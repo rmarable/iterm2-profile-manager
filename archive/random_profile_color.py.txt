@@ -1,0 +1,61 @@
+#!/usr/bin/env python3
+import iterm2
+import random
+
+PRESETS = {
+    "001": "Amber CRT Retro", "002": "IRIX Terminal", "003": "Cool Night", "004": "Tomorrow Night Blue",
+    "005": "Tinacious Design Light", "006": "HaX0R Blue", "007": "HaX0R R3D", "008": "Emerald Synth",
+    "009": "Blue Dolphin", "010": "iTerm2 Light Background", "011": "Solarized Dark Higher Contrast",
+    "012": "Grey Green", "013": "SeedFlip Ultraviolet", "014": "Borland", "015": "Man Page",
+    "016": "HaX0R Gr33N", "017": "base16 icy", "018": "Miami Heat", "019": "Unikitty",
+    "020": "Nebula Drift", "021": "Purple Rain", "022": "Tango Adapted", "023": "Shaman",
+    "024": "Laser", "025": "Tango Half Adapted", "026": "Poimandres White", "027": "Coffee Theme",
+    "028": "Under The Sea", "029": "Cyberdyne", "030": "Fun Forrest", "031": "Grass",
+    "032": "GitLab Light", "033": "Selenized Light", "034": "Night Owl", "035": "Pro Light",
+    "036": "Ocean", "037": "Prism", "038": "Green Phosphor CRT", "039": "Neon Purple",
+    "040": "Powershell", "041": "Solarized", "042": "Solarized Dark", "043": "iTerm2 Solarized Dark",
+    "044": "Red Sands", "045": "Sunset Drive", "046": "Acid Lime", "047": "iTerm2 Tango Light",
+    "048": "Forge Ember", "049": "Apple System Colors Light", "050": "Scarlet Protocol",
+    "051": "Solarized Dark Patched", "052": "Sandstone Ink", "053": "Horizon Bright", "054": "Flat",
+    "055": "iTerm2 Solarized Light", "056": "Solarized Light", "057": "Rapture", "058": "Keys Ocean Sunset HC",
+    "059": "Cyberpunk", "060": "Material Design Colors", "061": "Shades of Purple", "062": "Modus Operandi Tinted",
+    "063": "Cobalt Neon", "064": "Monospace Light", "065": "Lavandula", "066": "Sandstone Warm",
+    "067": "Sublette", "068": "Violet Light", "069": "Medallion", "070": "Galizur",
+    "071": "Breadog", "072": "cyberpunk icy", "073": "Selenized Dark", "074": "Flexoki Light",
+    "075": "Spacedust", "076": "SeedFlip Glacier", "077": "Sandstone Classic", "078": "Nvim Light",
+    "079": "Cobalt2", "080": "Fairyfloss", "081": "Sugarplum", "082": "Gruvbox Light",
+    "083": "Hipster Green", "084": "TokyoNight Moon", "085": "Tinacious Design Dark", "086": "Novel",
+    "087": "Shokunin", "088": "Modus Vivendi Tinted", "089": "Challenger Deep", "090": "Monokai Pro Machine",
+    "091": "Blue Matrix", "092": "Squintless", "093": "Sauber", "094": "IC Orange PPL",
+    "095": "Box", "096": "Electron Highlighter", "097": "Heeler", "098": "3024 Night",
+    "099": "Monospace Dark", "100": "Opaline", "101": "Duckbones", "102": "Hot Dog Stand",
+    "103": "Purplepeter", "104": "Spiderman", "105": "Porcelain", "106": "Floraverse",
+    "107": "Darkermatrix", "108": "Abernathy", "109": "Synthwave Alpha", "110": "Eclipse",
+    "111": "Dracula", "112": "Retro", "113": "Pandora", "114": "Hot Dog Stand (Mustard)",
+    "115": "Nvim Dark", "116": "Ubuntu", "117": "Aura", "118": "Sea Shells",
+    "119": "Gruvbox Light Hard", "120": "Aardvark Blue", "121": "Aurora", "122": "Mirage",
+    "123": "Trapped in Amber", "124": "Adventure Time", "125": "Aura Dark", "126": "iTerm2 Default",
+    "127": "Crayon Pony Fish", "128": "Neon",
+}
+
+async def set_preset(connection, session, preset_name):
+    preset = await iterm2.ColorPreset.async_get(connection, preset_name)
+    if not preset:
+        print(f"[warn] preset not found: {preset_name}", flush=True)
+        return
+    profile = await session.async_get_profile()
+    if not profile:
+        return
+    await profile.async_set_color_preset(preset)
+
+async def main(connection):
+    app = await iterm2.async_get_app(connection)
+    async with iterm2.NewSessionMonitor(connection) as mon:
+        while True:
+            session_id = await mon.async_get()
+            session = app.get_session_by_id(session_id)
+            if session:
+                tag, name = random.choice(list(PRESETS.items()))
+                await set_preset(connection, session, name)
+
+iterm2.run_forever(main)
