@@ -4,3 +4,7 @@ __pycache__/
 *.db
 *.db-wal
 *.db-shm
+
+# Claude working-state notes (local only)
+CLAUDE-STATE.md
+docs/archived-decisions.md
