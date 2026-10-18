@@ -1,5 +1,6 @@
 .DS_Store
 __pycache__/
+.ruff_cache/
 *.pyc
 *.db
 *.db-wal
@@ -8,3 +9,6 @@ __pycache__/
 # Claude working-state notes (local only)
 CLAUDE-STATE.md
 docs/archived-decisions.md
+
+# Personal curation exports (.tools/srcp_export_curation.py); keep them outside this repo
+curation*.sql
