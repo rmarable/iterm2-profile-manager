@@ -31,8 +31,9 @@ from pathlib import Path
 from typing import IO, Any, TypeVar
 
 import iterm2
+from iterm2.capabilities import supports_context_menu_submenus_and_visibility
 
-VERSION = "0.5.0"  # bump on every change, so the Console shows which code is running
+VERSION = "0.5.1"  # bump on every change, so the Console shows which code is running
 DATA_DIR = os.path.expanduser("~/.local/share/iterm2-color-schemes")
 DB_PATH = os.path.join(DATA_DIR, "schemes.db")
 LOCK_PATH = os.path.join(DATA_DIR, ".lock")
@@ -681,9 +682,10 @@ async def save_dialog(
     if info is None:
         return
     stats, stars = info
-    lines = [f"{preset} ({mode})", f"{font} {size}"]
+    lines = [f"{preset} ({mode})", f"{await store.call(font_label, font) or font} {size}"]
     if stats:
-        lines.append(f"Launched {stats[0]} times, last {local_time(stats[1])}.")
+        times = "1 time" if stats[0] == 1 else f"{stats[0]} times"
+        lines.append(f"Launched {times}, last {local_time(stats[1])}.")
     else:
         lines.append("Not launched before.")
     if stars:
@@ -698,15 +700,28 @@ async def save_dialog(
     await apply_choice(app, store, choice, (preset, font, size))
 
 
-async def remove_from_menu(app: iterm2.App, store: Store, session_id: str) -> None:
+async def remove_from_menu(
+    connection: iterm2.Connection, app: iterm2.App, store: Store, session_id: str
+) -> None:
     session = app.get_session_by_id(session_id)
     if not session:
         return
     preset = await session.async_get_variable("user.color_preset")
     font = await session.async_get_variable("user.font")
     size = await session.async_get_variable("user.font_size") or DEFAULT_SIZE
-    if preset and font:
+    if preset and font and await store.call(is_favorite, preset, font):
         await apply_choice(app, store, REMOVE, (preset, font, size))
+        return
+    # iTerm2 before API protocol 1.23 shows the item on every tab, so say why nothing happens.
+    if preset and font:
+        label = await store.call(font_label, font) or font
+        text = f"{preset} with {label} isn't a favorite, so there's nothing to remove."
+    else:
+        text = "This tab wasn't colored by srcp_set_random_color_profile.py, so it has no favorite."
+    window, _ = app.get_window_and_tab_for_session(session)
+    await iterm2.Alert(
+        "Remove from favorites", text, window.window_id if window else None
+    ).async_run(connection)
 
 
 async def register_save_handlers(
@@ -744,15 +759,19 @@ async def register_save_handlers(
 
     @iterm2.ContextMenuProviderRPC
     async def remove_favorite_menu(session_id: str = iterm2.Reference("id")) -> None:  # pyright: ignore[reportArgumentType]
-        start(f"remove:{session_id}", remove_from_menu(app, store, session_id))
+        start(f"remove:{session_id}", remove_from_menu(connection, app, store, session_id))
 
     await save_profile.async_register(connection)
     await save_profile_menu.async_register(connection, "Save/update this profile", MENU_ID)
+    # Hide the item on non-favorites where iTerm2 can (API protocol 1.23+, newer than 3.7.6);
+    # elsewhere it shows on every tab and remove_from_menu explains. Passing visible_when to
+    # an older iTerm2 only adds a warning to the Console.
+    hide = supports_context_menu_submenus_and_visibility(connection)
     await remove_favorite_menu.async_register(
         connection,
         "Remove from favorites",
         REMOVE_MENU_ID,
-        visible_when="user.is_favorite == 1",
+        visible_when="user.is_favorite == 1" if hide else None,
     )
 
 

@@ -157,7 +157,7 @@ Right-click in a session → **Save/update this profile**, or press ⌃⌥⌘S. 
 - **Never show:** sets `overrides.include=0` and deletes the preset's favorites.
 - **Cancel**
 
-Right-click → **Remove from favorites** does the same as the dialog's Remove favorite, without the dialog. iTerm2 shows it only on sessions whose preset and font are a favorite (`user.is_favorite`).
+Right-click → **Remove from favorites** does the same as the dialog's Remove favorite, without the dialog. On a tab whose look isn't a favorite it says so and changes nothing. iTerm2 3.7.6 shows the item on every tab: hiding it on non-favorites needs iTerm2's Python API protocol 1.23 (in nightly builds since 2026-10-12), and the script turns that on by itself once iTerm2 supports it.
 
 Every favorite is also an iTerm2 profile named `<preset> - <font label>` (e.g. `Kibble - Menlo`), listed under **Profiles → Favorites** (the profile tag `Favorites`). They live in one Dynamic Profiles file, `~/Library/Application Support/iTerm2/DynamicProfiles/iterm2-profile-manager.plist`, which the script rewrites at startup, after every save, removal or Never show, and at the next new tab after favorites change any other way (sqlite3, a restored export); iTerm2 updates the Profiles menu on its own. Each profile is a child of your default profile (it inherits everything else, triggers included) with the preset's colors, the saved font, and the `nonascii_font` icon font. Edits made to these profiles in Settings aren't written back to the file, so they're lost the next time iTerm2 reloads the folder; to change one, save the look again. Starring a preset you'd marked Never show unhides it. Delete the file to remove them all (it's recreated at the next start while favorites exist).
 
