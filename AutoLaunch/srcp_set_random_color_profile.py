@@ -33,7 +33,7 @@ from typing import IO, Any, TypeVar
 import iterm2
 from iterm2.capabilities import supports_context_menu_submenus_and_visibility
 
-VERSION = "0.5.1"  # bump on every change, so the Console shows which code is running
+VERSION = "0.5.2"  # bump on every change, so the Console shows which code is running
 DATA_DIR = os.path.expanduser("~/.local/share/iterm2-color-schemes")
 DB_PATH = os.path.join(DATA_DIR, "schemes.db")
 LOCK_PATH = os.path.join(DATA_DIR, ".lock")
