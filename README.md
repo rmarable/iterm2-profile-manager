@@ -1,177 +1,100 @@
 # iterm2-profile-manager
 
-iTerm2 Python API scripts that give every new tab, window or split pane a color scheme matching the macOS light/dark appearance, plus a random monospaced font. Looks you like can be starred: starred looks come back more often, and each becomes an iTerm2 profile ("Kibble - Menlo") you can open from the Profiles menu.
+Every new iTerm2 tab, window or split pane gets a random color preset that matches the macOS light/dark setting, and a random monospaced font. You rate the looks you like from 1 to 5 stars. Rated looks come up more often, and each one becomes an iTerm2 profile (e.g. "Kibble - Menlo") under **Profiles → Favorites**.
 
-## Prerequisites
+Presets come from [iTerm2-Color-Schemes](https://github.com/mbadolato/iTerm2-Color-Schemes) (815 schemes). Presets with hard-to-read colors are left out.
+
+## Requirements
 
 | Need | Why | How |
 |---|---|---|
-| macOS | Fonts come from Terminal.app; `setup.sh` exits elsewhere. | |
-| iTerm2 | Runs the AutoLaunch script. Tested on 3.7.6; the right-click items need Python API protocol 1.7+, and hiding Remove from favorites on non-favorites needs 1.23. | [iterm2.com](https://iterm2.com) |
-| iTerm2 Python API | Lets scripts talk to iTerm2. | Settings → General → Magic → **Enable Python API** |
-| iTerm2 Python runtime | The script runs on iTerm2's own Python 3.12 and `iterm2` module. | Scripts → Manage → **Install Python Runtime** |
-| Theme Automatic or Minimal | Only these follow the macOS light/dark setting. | Settings → Appearance → Theme |
-| Xcode Command Line Tools | `/usr/bin/python3` (3.9+) and `git`. | `xcode-select --install` |
-| Network | Cloning the schemes repo, first run or update. | |
-| Homebrew (optional) | Installs MesloLGS Nerd Font. Without it, that font stays disabled. | [brew.sh](https://brew.sh) |
+| macOS | Fonts are copied from Terminal.app. `setup.sh` exits on other systems. | |
+| iTerm2 | Runs the scripts. Tested on 3.7.6. | [iterm2.com](https://iterm2.com) |
+| iTerm2 Python API | Lets scripts control iTerm2. | Settings → General → Magic → **Enable Python API** |
+| iTerm2 Python runtime | The main script runs on iTerm2's own Python 3.12. | Scripts → Manage → **Install Python Runtime** |
+| Theme set to Automatic or Minimal | Only these themes follow the macOS light/dark setting. | Settings → Appearance → Theme |
+| Xcode Command Line Tools | Provides `/usr/bin/python3` (3.9+) and `git`. | `xcode-select --install` |
+| Homebrew (optional) | Installs MesloLGS Nerd Font, for shell prompt icons. Without it, that font is skipped. | [brew.sh](https://brew.sh) |
 
-No pip packages: the tools use only the standard library.
+No pip packages are needed: the tools use only Python's standard library. The first install needs network access to clone the schemes repo.
 
-## Where the code goes
+## Install
 
-iTerm2 runs scripts only from `~/Library/Application Support/iTerm2/Scripts/`, and starts anything in its `AutoLaunch/` folder when iTerm2 launches. `~/.config/iterm2/AppSupport` is a symlink to `~/Library/Application Support/iTerm2`, so both paths reach the same folder.
+### 1. Get the code
 
-**Clone anywhere (recommended):**
+iTerm2 only runs scripts from `~/Library/Application Support/iTerm2/Scripts/`, and starts everything in its `AutoLaunch/` subfolder when iTerm2 launches. You can clone the repo anywhere and let `setup.sh` copy the scripts there (recommended):
 
 ```sh
 git clone git@github.com:rmarable/iterm2-profile-manager.git ~/src/iterm2-profile-manager
 cd ~/src/iterm2-profile-manager
 ```
 
-`setup.sh` copies `AutoLaunch/srcp_set_random_color_profile.py`, `srcp_score_presets.py`, `srcp_ratings.py` and `.tools/srcp_favorites.py` and `.tools/srcp_popup.js` (used by `srcp_ratings.py`) into the Scripts folder. The other `.tools/` commands stay in the checkout and run from there.
-
-**Or clone into the Scripts folder itself**, if it doesn't exist yet or is empty (`git clone` refuses a non-empty folder):
+Or clone it straight into the Scripts folder. This only works if that folder is missing or empty. Edits then take effect without copying, but every `.py` file in the repo shows up in iTerm2's Scripts menu.
 
 ```sh
 git clone git@github.com:rmarable/iterm2-profile-manager.git ~/Library/Application\ Support/iTerm2/Scripts
 ```
 
-Edits then take effect without copying, but every `.py` in the checkout shows up in iTerm2's Scripts menu.
+### 2. Run setup
 
-## Files
-
-| Path | What it does |
-|---|---|
-| `AutoLaunch/srcp_set_random_color_profile.py` | Starts with iTerm2. Colors each new session from the scheme DB, logs every launch, snapshots the DB daily, adds "Save/update this profile" and "Remove from favorites" to the right-click menu and the `save_profile()` key function, and keeps a profile per favorite in `~/Library/Application Support/iTerm2/DynamicProfiles/iterm2-profile-manager.plist`. |
-| `.tools/srcp_build_scheme_db.py` | Tags every installed preset light or dark, runs the readability gate, writes `~/.local/share/iterm2-color-schemes/schemes.db`, after snapshotting the old one. |
-| `srcp_ratings.py` | Scripts menu: favorites, rating history or hidden presets in a native popup (fixed-width, scrollable, selectable). |
-| `.tools/srcp_popup.js` | The popup: an AppKit alert in Menlo, run with `osascript -l JavaScript`. |
-| `.tools/srcp_favorites.py` | Lists favorites with stars and use, rating history, and hidden presets. |
-| `.tools/srcp_export_curation.py` | Exports favorites, rating history, overrides, config and fonts as SQL, for keeping off this Mac. |
-| `.tools/srcp_import_presets.py` | Imports a folder of `.itermcolors` files as presets, with no dialog per file. |
-| `.tools/srcp_add_key_binding.py` | Binds ⌃⌥⌘S to `save_profile()`. |
-| `.tools/srcp_enable_claude_integration.py` | Optional, run by hand: turns on iTerm2's Claude Code integration (iTerm2 3.7+). Not part of `setup.sh`. |
-| `.tools/srcp_iterm_prefs.py`, `.tools/srcp_db_backup.py` | Shared helpers: `defaults` read/write with backup; DB snapshots. |
-| `.tools/` | Command-line tools. The leading dot keeps them out of iTerm2's Scripts menu, which can't pass them arguments. |
-| `srcp_score_presets.py` | Report only: ranks presets by saturation. Not used for selection. |
-| `setup.sh` | Runs the whole install. |
-| `uninstall.sh` | Undoes it (see Uninstall). |
-| `.tools/srcp_uninstall_prefs.py` | Uninstall's prefs part: removes the key binding and, optionally, unedited repo presets, in one backed-up write. |
-| `lint.sh`, `pyproject.toml`, `AutoLaunch/ruff.toml` | Format, lint and type checks (see Development). |
-
-## Install
-
-Quit iTerm2 (⌘Q), open **Terminal.app**, `cd` to the checkout, and run:
+`setup.sh` changes iTerm2's settings file, which iTerm2 overwrites when it quits. So quit iTerm2 (⌘Q), open **Terminal.app**, `cd` to the repo, and run:
 
 ```sh
-./setup.sh --dryrun         # preview every step; safe with iTerm2 open
-./setup.sh                  # schemes repo goes in ~/src
-SRC_DIR=~/code ./setup.sh   # or elsewhere
+./setup.sh --dryrun         # show every step without changing anything (safe with iTerm2 open)
+./setup.sh                  # the schemes repo is cloned into ~/src
+SRC_DIR=~/code ./setup.sh   # or somewhere else
 ```
 
-In order, it:
+It does the following. Running it again is safe.
 
-1. Copies Terminal.app's bundled fonts (SF Mono, SF Mono Terminal) from `/System/Applications/Utilities/Terminal.app/Contents/Resources/Fonts/` into `~/Library/Fonts`. A changed file is re-copied. These are Apple-licensed fonts from your own macOS install; never commit them.
-2. Installs MesloLGS Nerd Font with `brew install --cask font-meslo-lg-nerd-font` if Homebrew exists and the font is missing. A failure is reported and skipped.
-3. Clones or updates [iTerm2-Color-Schemes](https://github.com/mbadolato/iTerm2-Color-Schemes) into `$SRC_DIR/iTerm2-Color-Schemes`. A failed `git pull` keeps the existing checkout.
-4. Imports every `schemes/*.itermcolors` as a preset (`.tools/srcp_import_presets.py`).
-5. Builds the scheme DB (`.tools/srcp_build_scheme_db.py`).
-6. Binds ⌃⌥⌘S (`.tools/srcp_add_key_binding.py`).
-7. Copies the scripts into the Scripts folder (unless the checkout is that folder) and removes the retired `AutoLaunch/random_profile_color.py`.
+1. Copies Terminal.app's fonts (SF Mono, SF Mono Terminal) into `~/Library/Fonts`. These are Apple-licensed fonts from your own Mac; never commit them.
+2. Installs MesloLGS Nerd Font with Homebrew, if Homebrew is present.
+3. Clones or updates iTerm2-Color-Schemes in `$SRC_DIR/iTerm2-Color-Schemes`.
+4. Imports its `schemes/*.itermcolors` files as iTerm2 color presets.
+5. Builds the scheme database (see [How a look is picked](#how-a-look-is-picked)).
+6. Binds ⌃⌥⌘S to the save dialog.
+7. Copies the scripts into the Scripts folder (skipped if the repo is the Scripts folder).
 
-Every step is idempotent. `setup.sh` refuses to start while iTerm2 runs, because steps 4 and 6 write iTerm2's prefs and iTerm2 rewrites them when it quits. Each prefs write is backed up first to `~/Library/Preferences/com.googlecode.iterm2.backup-<timestamp>.plist`.
+Before each change to iTerm2's settings, the old settings are backed up to `~/Library/Preferences/com.googlecode.iterm2.backup-<timestamp>.plist`.
 
-Then relaunch iTerm2: the new fonts appear and the AutoLaunch script starts.
+### 3. Relaunch iTerm2
 
-## Manual install
+The new fonts become available and the main script starts. To confirm it's running, open **Scripts → Manage → Console**: it shows `srcp_set_random_color_profile <version>`, and one line per new session, such as `[info] dark discovery: Nord | Menlo-Regular 13`.
+
+## Usage
+
+### Rate a look
+
+Right-click in a session and choose **Save/update this profile**, or press ⌃⌥⌘S. The dialog shows the session's preset, font and how many times this look was launched.
+
+| Button | Effect |
+|---|---|
+| **1 ★** … **5 ★★★★★** | Saves the preset and font as a favorite with that many stars. Choosing again changes the stars. |
+| **Remove favorite** | Shown only for a favorite. Deletes the favorite; the preset goes back into the random rotation. |
+| **Never show** | Never picks this preset again, and deletes its favorites. Rating it later undoes this. |
+| **Cancel** | Does nothing. |
+
+Right-click → **Remove from favorites** does the same as **Remove favorite** without opening the dialog. In iTerm2 3.7.6 this item appears on every tab, because hiding it needs a newer iTerm2 (Python API protocol 1.23, in nightly builds since 2026-10-12). On a tab that isn't a favorite it says so and changes nothing. Once iTerm2 supports hiding, the script hides it on its own.
+
+Changes apply to the next new session.
+
+### Favorite profiles
+
+Each favorite becomes a profile named `<preset> - <font>`, listed under **Profiles → Favorites**. A session opened from one keeps that look instead of getting a random one.
+
+The script writes these profiles to `~/Library/Application Support/iTerm2/DynamicProfiles/iterm2-profile-manager.plist` and iTerm2 picks up changes on its own. Each profile is based on your default profile, so it keeps your other settings (triggers, key bindings, etc.). Changes you make to one in Settings are lost the next time the file is rewritten; to change a favorite, open it, adjust, and rate it again. Deleting the file removes all of them until the script next starts.
+
+### Review your ratings
+
+In iTerm2, **Scripts → srcp_ratings.py** opens a window with your favorites. The **History** button shows the last 50 rating changes, and **Hidden** shows presets marked Never show. You can select and copy text from it.
+
+From a terminal:
 
 ```sh
-git clone https://github.com/mbadolato/iTerm2-Color-Schemes.git ~/src/iTerm2-Color-Schemes
-python3 .tools/srcp_import_presets.py ~/src/iTerm2-Color-Schemes/schemes   # iTerm2 quit; --overwrite replaces existing
-python3 .tools/srcp_build_scheme_db.py                                     # safe with iTerm2 open
-python3 .tools/srcp_add_key_binding.py                                     # iTerm2 quit
-mkdir -p ~/Library/Application\ Support/iTerm2/Scripts/AutoLaunch
-cp AutoLaunch/srcp_set_random_color_profile.py ~/Library/Application\ Support/iTerm2/Scripts/AutoLaunch/
-```
-
-The tools that write (`srcp_import_presets.py`, `srcp_build_scheme_db.py`, `srcp_add_key_binding.py`, `srcp_uninstall_prefs.py`, `srcp_enable_claude_integration.py`) take `--dryrun` (or `--dry-run`). Every tool works under `python3 -I`.
-
-Key binding by hand instead: Settings → Keys → Key Bindings → **+**, shortcut ⌃⌥⌘S, action **Invoke Script Function**, function `save_profile()`. If `GlobalKeyMap` is unset, `srcp_add_key_binding.py` first copies iTerm2's default bindings from `iTerm.app/Contents/Resources/DefaultGlobalKeyMap.plist` so they aren't lost.
-
-Why not double-click each `.itermcolors`? iTerm2 shows a dialog per file. `srcp_import_presets.py` stores the same thing (name = file name, contents verbatim). The repo's `tools/import-scheme.sh` renames some presets (e.g. "Birds Of Paradise" → "Birds of Paradise") and needs bash 4+.
-
-## How a session is chosen
-
-0. **Favorite profiles keep their look.** A session opened from a favorite's profile (Profiles menu) isn't recolored; it's logged and recorded as a favorite launch.
-1. **Mode.** `app.async_get_theme()` returns iTerm2's effective theme. With the Automatic or Minimal theme, that follows the macOS appearance. The script tests for `dark`; anything else is light. Open sessions aren't recolored when the appearance changes.
-2. **Favorite or discovery.** Probability of a favorite = `favorite_share × min(1, favorited presets in this mode / favorite_target)`, so a handful of favorites doesn't take over. The ramp counts presets, not (preset, font) pairs. No favorites → always discovery; no discovery candidates → favorites.
-   - **Favorite:** weighted by stars (5 ★ = 5× a 1 ★), with the font it was saved with, or a random enabled font if that one has since been disabled. A preset saved with several fonts has one weighted entry per font.
-   - **Discovery:** uniform over the `discovery` view for this mode, skipping the last `recent_window` discovery launches in that mode, with a random enabled font.
-3. **Apply.** Sets the preset and the font face on the session's profile copy. The size stays the profile's (13 pt by default). It also turns on the non-ASCII font and sets it to `config.nonascii_font` (MesloLGS Nerd Font Mono) at the same size, so Powerlevel10k and other Nerd Font icons render whatever the main font is. A preset that no longer exists is skipped and another picked, up to 3 tries.
-4. **Record.** Sets session variables `user.color_preset`, `user.font`, `user.font_size`, `user.mode`, `user.is_favorite` and inserts a `launches` row. When the session closes, the row gets `ended_at`, `duration_s` and `end_reason='closed'`. iTerm2 holds that event while closing can still be undone, so it lands a few seconds late. Sessions still open when iTerm2 quits get `end_reason='unknown'` on the next start.
-
-At startup the Console shows `[info] srcp_set_random_color_profile <version> (file modified <time>), pid <n>`. Each new session logs a line such as `[info] dark discovery: Nord | Menlo-Regular 13` or `[info] light favorite 4 ★: ...`.
-
-### Light or dark
-
-A preset is light if its background is brighter (relative luminance) than its foreground. A `variant:` line in the repo's `yaml/<name>.yml` takes precedence; the two agree on all 78 labeled schemes. `overrides.mode` overrides both.
-
-### Readability gate
-
-A preset is in `discovery` if all hold:
-
-| Check | Rule |
-|---|---|
-| Text | fg/bg contrast ≥ 4.5 (WCAG AA) |
-| Accents | at least 4 of ANSI 1-6 have contrast ≥ 2 against the bg |
-| Distinct | the largest set of ANSI 1-6 that are all ≥ 0.04 apart in OKLab has at least 5 colors |
-
-Monochrome themes (fewer than 2 accents with OKLab chroma > 0.02, or all of them within a 40° hue arc) skip the Accents and Distinct checks. There's no ranking: soft palettes are as likely as vivid ones. `overrides.include` beats the gate either way. Presets that are byte-identical older spellings of a repo scheme (e.g. `base16 icy` / `base16-icy`) are left out of discovery, even if included; include the repo spelling instead (the build warns).
-
-As of 2026-10-17: 824 presets, 181 light / 643 dark, 167 / 614 pass the gate.
-
-### Database
-
-`~/.local/share/iterm2-color-schemes/schemes.db` (WAL mode). A rebuild replaces only `schemes` and the four views below; your own views and every other table are kept.
-
-| Object | Contents |
-|---|---|
-| `schemes` | Derived per preset: `mode`, `mode_source` (`yaml`/`luminance`), `fg_contrast`, `accent_contrast`, `distinct_accents`, `monochrome`, `passes_gate`, `in_repo`, `color_hash`, `duplicate_of`. |
-| `overrides` | `name`, `mode` (force light/dark), `include` (1 = always in, 0 = never). Seeded with 6 near-misses from the old rotation. |
-| `config` | `favorite_share` (0.5), `favorite_target` (10), `recent_window` (20): a non-number falls back to the default, with a warning. `nonascii_font` (`MesloLGSNFM-Regular`): PostScript name of the icon font; `''` leaves the profile's non-ASCII font alone. |
-| `fonts` | `name` (PostScript), `enabled`, `label` (used in profile names; defaults to the name minus `-Regular`). SF Mono, Menlo, Monaco, MesloLGS Nerd Font Mono; uninstalled ones start disabled. |
-| `favorites` | `preset`, `font`, `size`, `stars` (1-5), `saved_at`; keyed on (preset, font). |
-| `ratings` | Rating history, never wiped: `at`, `preset`, `font`, `action` (`save`/`remove`/`never_show`), `stars`, `previous_stars`. One row per save, removal, or favorite removed by Never show. Times are UTC. |
-| `launches` | One row per colored session: `launched_at`, `preset`, `font`, `size`, `mode`, `source`, `stars`, `iterm_profile`, `session_id`, `ended_at`, `duration_s`, `end_reason`. Times are UTC. `mode` is the theme the preset was picked for; for a tab opened from a favorite's profile, the preset's own mode. |
-| `effective` (view) | `schemes` with overrides applied. |
-| `discovery` (view) | `name`, `mode` of discovery candidates (excludes favorited presets). |
-| `favorite_pool` (view) | Favorites with their effective mode, minus `include=0`. |
-| `launch_stats` (view) | Per preset: `launches`, first/last, favorite vs discovery counts, total/avg duration, `stars`. |
-
-## Saving favorites
-
-Right-click in a session → **Save/update this profile**, or press ⌃⌥⌘S. The dialog shows the preset, the font the script applied, and its launch count, with these buttons:
-
-- **1 ★ … 5 ★★★★★:** save (preset, font) with that rating. Re-saving updates the stars.
-- **Remove favorite** (shown only when this preset and font are a favorite): deletes that favorite. The preset goes back into discovery, and the rating is gone; saving it again starts fresh. The `ratings` history keeps the old rating (`previous_stars`). Removing something that isn't a favorite does nothing and logs nothing.
-- **Never show:** sets `overrides.include=0` and deletes the preset's favorites.
-- **Cancel**
-
-Right-click → **Remove from favorites** does the same as the dialog's Remove favorite, without the dialog. On a tab whose look isn't a favorite it says so and changes nothing. iTerm2 3.7.6 shows the item on every tab: hiding it on non-favorites needs iTerm2's Python API protocol 1.23 (in nightly builds since 2026-10-12), and the script turns that on by itself once iTerm2 supports it.
-
-Every favorite is also an iTerm2 profile named `<preset> - <font label>` (e.g. `Kibble - Menlo`), listed under **Profiles → Favorites** (the profile tag `Favorites`). They live in one Dynamic Profiles file, `~/Library/Application Support/iTerm2/DynamicProfiles/iterm2-profile-manager.plist`, which the script rewrites at startup, after every save, removal or Never show, and at the next new tab after favorites change any other way (sqlite3, a restored export); iTerm2 updates the Profiles menu on its own. Each profile is a child of your default profile (it inherits everything else, triggers included) with the preset's colors, the saved font, and the `nonascii_font` icon font. Edits made to these profiles in Settings aren't written back to the file, so they're lost the next time iTerm2 reloads the folder; to change one, save the look again. Starring a preset you'd marked Never show unhides it. Delete the file to remove them all (it's recreated at the next start while favorites exist).
-
-Changes take effect on the next new session; no restart needed.
-
-### Reviewing ratings
-
-From iTerm2: **Scripts → srcp_ratings.py** opens a popup with the favorites table below, in Menlo (SF Mono has no ★). It scrolls and you can select and copy from it. **History** (last 50 changes) and **Hidden** switch views; **Done** closes it. Times are local. From a terminal:
-
-```sh
-python3 .tools/srcp_favorites.py                          # favorites, best first, with launches, last used, avg time open
+python3 .tools/srcp_favorites.py                          # favorites: stars, launches, last used, average time open
 python3 .tools/srcp_favorites.py --mode dark --min-stars 4
 python3 .tools/srcp_favorites.py --history                # last 30 rating changes (--history 100 for more)
-python3 .tools/srcp_favorites.py --hidden                 # Never show list, with how to unhide
+python3 .tools/srcp_favorites.py --hidden                 # Never show list, with how to undo it
 ```
 
 ```
@@ -180,150 +103,248 @@ Stars  Preset          Font    Mode  Launches  Last used         Avg open  Saved
 5 ★    Selenized Dark  Monaco  dark  1         2026-10-17 21:03  2m 15s    2026-10-17
 ```
 
-`favorites` holds only the current rating. Every change is also kept in `ratings`, from when the DB reached schema version 3 (2026-10-17); earlier changes weren't recorded.
+Rating history was first recorded on 2026-10-17 (database schema version 3); earlier changes weren't kept.
+
+## How a look is picked
+
+For each new session, the script:
+
+1. **Skips sessions opened from a favorite profile.** They keep their look; the launch is still recorded.
+2. **Reads the light/dark setting** from iTerm2. With the Automatic or Minimal theme, this follows macOS. Open sessions aren't recolored when the setting changes.
+3. **Chooses a favorite or a new preset.** The chance of a favorite grows with the number of favorite presets in this mode: `favorite_share × min(1, favorite presets / favorite_target)`, so 50% once you have 10 or more. With no favorites it always picks a new preset.
+   - **Favorite:** weighted by stars (a 5 ★ comes up 5 times as often as a 1 ★), with the font it was saved with.
+   - **New preset:** any preset of this mode that passes the readability checks below and isn't a favorite, except the last 20 new presets picked in this mode. The font is random.
+4. **Applies the preset and font** to this session only, at the profile's font size. It also sets MesloLGS Nerd Font as the font for non-ASCII characters, so shell prompt icons (Powerlevel10k etc.) display with any main font.
+5. **Records the launch** in the database, and the time it's closed. Sessions still open when iTerm2 quits are marked `unknown` at the next start.
+
+### Light or Dark Mode Selection
+
+A preset counts as light if its background is brighter than its text. If the schemes repo labels it (a `variant:` line in `yaml/<name>.yml`), that label wins. The two methods agree on all 78 labeled schemes. You can override either (see [Configuration](#configuration)).
+
+### Skipping Hard-to-Read Presets
+
+A preset is picked at random only if:
+
+| Check | Rule |
+|---|---|
+| Text | Text-to-background contrast is at least 4.5 (the WCAG AA standard). |
+| Colors visible | At least 4 of the 6 main colors (ANSI red, green, yellow, blue, magenta, cyan) have contrast of at least 2 against the background. |
+| Colors distinct | At least 5 of those 6 colors are clearly different from each other (at least 0.04 apart in OKLab). |
+
+Monochrome presets (one hue, or nearly no color) only need the Text check. Soft and vivid palettes are equally likely; there's no ranking.
+
+Result as of 2026-10-17: 824 presets installed, 181 light and 643 dark; 167 light and 614 dark pass.
+
+Some installed presets are older, byte-identical spellings of a repo scheme (e.g. `base16 icy` and `base16-icy`). Only the repo spelling is picked.
+
+## Configuration
+
+Settings live in the database. Edit them with `sqlite3`; changes apply to the next new session.
+
+```sh
+sqlite3 ~/.local/share/iterm2-color-schemes/schemes.db
+```
+
+| `config` key | Default | Meaning |
+|---|---|---|
+| `favorite_share` | `0.5` | Highest chance of picking a favorite. |
+| `favorite_target` | `10` | Number of favorite presets (per mode) at which that chance is reached. |
+| `recent_window` | `20` | New presets don't repeat within this many picks. |
+| `nonascii_font` | `MesloLGSNFM-Regular` | Font for icons and other non-ASCII characters. `''` leaves the profile's setting alone. |
+
+```sql
+update config set value = '0.7' where key = 'favorite_share';
+update config set value = '' where key = 'nonascii_font';
+
+-- fonts: name is the PostScript name; label is used in profile names
+update fonts set enabled = 0 where name = 'Monaco';
+insert into fonts (name, label) values ('JetBrainsMonoNL-Regular', 'JetBrains Mono');
+
+-- force a preset in or out of the rotation, or set its mode
+insert or replace into overrides (name, include) values ('Zenburn', 1);
+insert or replace into overrides (name, mode) values ('Some Scheme', 'dark');
+```
+
+Default fonts: SF Mono, Menlo, Monaco, MesloLGS Nerd Font Mono. Fonts that aren't installed start disabled.
 
 ## Backups
 
-Snapshots go to `~/.local/share/iterm2-color-schemes/backups/schemes-<UTC timestamp>.db`, made with SQLite's online backup, so they're consistent while the script has the DB open:
+The database is `~/.local/share/iterm2-color-schemes/schemes.db`. Snapshots are saved to `backups/` in the same folder:
 
-- `srcp_build_scheme_db.py` snapshots the existing DB before every rebuild.
-- The AutoLaunch script snapshots at startup when the newest snapshot is more than 24 hours old.
-- The newest 14 are kept; older ones are deleted.
+- before every database rebuild,
+- when the main script starts, if the newest snapshot is more than a day old.
 
-`schemes` and the views can always be rebuilt. The snapshots protect what can't: `favorites`, `overrides`, `launches`, and your `config`/`fonts` edits.
+The newest 14 are kept. The preset data can always be rebuilt; the snapshots protect your favorites, hidden presets, launch history and settings.
 
-**Manual snapshot** (any time):
+**Take a snapshot by hand** (safe any time):
 
 ```sh
 cd ~/.local/share/iterm2-color-schemes
 sqlite3 schemes.db ".backup backups/manual-$(date -u +%Y%m%dT%H%M%SZ).db"
 ```
 
-Don't `cp` a live `schemes.db`: in WAL mode, recent writes may still be in `schemes.db-wal`.
+Don't `cp` the database while iTerm2 runs: recent changes may still be in `schemes.db-wal`.
 
-**Restore:**
+**Restore a snapshot:**
 
 ```sh
-# Quit iTerm2 first, so nothing has the DB open.
+# Quit iTerm2 first.
 cd ~/.local/share/iterm2-color-schemes
 ls -t backups/                      # newest first
 rm -f schemes.db-wal schemes.db-shm
-cp backups/schemes-<timestamp>.db schemes.db.new && mv schemes.db.new schemes.db  # new file: a running script notices
-python3 <checkout>/.tools/srcp_build_scheme_db.py   # refresh schemes against the installed presets
+cp backups/schemes-<timestamp>.db schemes.db.new && mv schemes.db.new schemes.db
+python3 <repo>/.tools/srcp_build_scheme_db.py   # update it to match the installed presets
 ```
 
-Snapshots stay on this Mac (and in Time Machine, if `~/.local` isn't excluded). For an off-Mac copy of what matters, use the export below.
+### Export your ratings
 
-### Exporting your curation
+Snapshots stay on this Mac. To keep your ratings elsewhere, or move them to another Mac, export them:
 
 ```sh
-python3 .tools/srcp_export_curation.py -o ~/curation.sql   # or no -o for stdout
+python3 .tools/srcp_export_curation.py -o ~/curation.sql
 ```
 
-The export is a few KB of SQL (`INSERT OR REPLACE`, plus `INSERT OR IGNORE` for history and fonts) for `favorites`, `ratings`, `overrides`, `config` and `fonts`. Launch history and the derived `schemes` table are left out. It contains preset names, font names, star ratings and when they changed, nothing else.
+The file is a few KB of SQL containing your favorites, rating history, hidden presets, settings and fonts: preset names, font names, stars and dates, nothing else. Launch history isn't included.
 
-Restore it into a built DB, on this Mac or a new one (after `setup.sh`):
+To load it into a database (on another Mac, after running `setup.sh`):
 
 ```sh
 sqlite3 ~/.local/share/iterm2-color-schemes/schemes.db < ~/curation.sql
 ```
 
-Favorites, overrides and config are replaced by key, so restoring over an existing DB updates matching rows and keeps the rest. Rating history is appended (restoring the same export twice adds nothing). A font is never re-enabled if this DB has it disabled, since it may not be installed here. The export stops before changing anything if this DB has an older schema than the export: rebuild it first.
+Matching rows are updated and other rows are kept. Loading the same file twice doesn't duplicate history. Fonts disabled in this database stay disabled. If this database is older than the export, nothing is changed; rebuild it first with `.tools/srcp_build_scheme_db.py`.
 
-### Where to keep the export
+Where to keep the export (not in this repo; `curation*.sql` is gitignored):
 
-Don't commit it to this repo: the checkout is shared code, and the export is your personal taste. `curation*.sql` is gitignored.
-
-| Option | Setup | Update | Notes |
-|---|---|---|---|
-| **Private git repo** (recommended; e.g. your dotfiles) | Copy the file in, commit. | Re-export, commit, push. | Real access control and history of every change. |
-| **Secret gist** | `gh gist create curation.sql -d "iterm2-profile-manager curation"` (secret is the default) | `git clone https://gist.github.com/<id>.git`, copy the new export over, commit, push. | Unlisted, not private: anyone with the URL can read it. Fine for star ratings; don't add anything sensitive. |
-| **iCloud Drive** | `python3 .tools/srcp_export_curation.py -o ~/Library/Mobile\ Documents/com~apple~CloudDocs/iterm2-curation.sql` | Same command. | Syncs to your other Macs; no history beyond iCloud's own. |
-| **Password manager** (1Password, Bitwarden: attach as a file) | Attach `curation.sql` to an item. | Replace the attachment. | Encrypted, but manual. |
-
-To keep it current, re-export after a session of starring. Or schedule it with a `launchd` agent that runs `srcp_export_curation.py -o <path>` daily.
-
-## SQL cookbook
-
-```sh
-sqlite3 ~/.local/share/iterm2-color-schemes/schemes.db
-```
-
-```sql
-select mode, count(*) from discovery group by mode;
-select * from favorite_pool order by stars desc;
-select * from launch_stats order by launches desc limit 10;
-select preset, font, launched_at, duration_s from launches order by id desc limit 20;
-
-update config set value = '0.7' where key = 'favorite_share';
-update fonts set enabled = 0 where name = 'Monaco';
-update config set value = '' where key = 'nonascii_font';      -- stop setting the icon font
-insert into fonts (name, label) values ('JetBrainsMonoNL-Regular', 'JetBrains Mono');  -- PostScript name, profile-name label
-insert or replace into overrides (name, include) values ('Zenburn', 1);
-insert or replace into overrides (name, mode) values ('Some Scheme', 'dark');
-select name, fg_contrast, accent_contrast, distinct_accents from schemes where passes_gate = 0;
-
--- favorites whose preset is no longer installed (never picked; delete or reinstall)
-select * from favorites where preset not in (select name from schemes);
-```
+| Option | How | Notes |
+|---|---|---|
+| Private git repo, e.g. your dotfiles (recommended) | Copy the file in, commit, push. | Access control and full history. |
+| Secret gist | `gh gist create curation.sql` | Anyone with the URL can read it. |
+| iCloud Drive | `-o ~/Library/Mobile\ Documents/com~apple~CloudDocs/iterm2-curation.sql` | Syncs to your other Macs. |
+| Password manager | Attach the file to an item. | Encrypted, manual updates. |
 
 ## Uninstall
 
-Quit iTerm2, then from Terminal.app in the checkout:
+Quit iTerm2, then from Terminal.app in the repo:
 
 ```sh
-./uninstall.sh --dryrun        # preview; safe with iTerm2 open
-./uninstall.sh                 # the defaults below
-./uninstall.sh --all           # everything setup.sh added
+./uninstall.sh --dryrun        # show what would be removed (safe with iTerm2 open)
+./uninstall.sh                 # remove the defaults below
+./uninstall.sh --all           # remove everything setup.sh added
 ```
 
-| What | Default | Flag |
-|---|---|---|
-| AutoLaunch script: installed copy deleted (renamed `.py.disabled` if this checkout is the Scripts folder) | yes | |
-| `srcp_` menu scripts copied into the Scripts folder | yes | |
-| Favorites' Dynamic Profiles file | yes | |
-| ⌃⌥⌘S `save_profile()` key binding (prefs backed up first) | yes | |
-| Scheme DB, snapshots, launch history. A curation export is saved to `~/srcp-curation-<time>.sql` first | | `--data` |
-| Color presets identical to the repo's `.itermcolors` files; edited and other presets stay, and so do ones the repo changed since you imported them (`setup.sh` doesn't overwrite existing presets) | | `--presets` |
-| Terminal.app fonts identical to Terminal's copies, and the MesloLGS Nerd Font cask (warns if a profile still uses it) | | `--fonts` |
-| The `iTerm2-Color-Schemes` clone (only if its origin is the upstream repo) | | `--repo` |
+| What | Removed by |
+|---|---|
+| The main script (renamed to `.py.disabled` if the repo is the Scripts folder) | default |
+| The menu scripts copied into the Scripts folder | default |
+| The favorite profiles file | default |
+| The ⌃⌥⌘S key binding (iTerm2 settings are backed up first) | default |
+| The database, snapshots and launch history. Your ratings are exported to `~/srcp-curation-<time>.sql` first. | `--data` |
+| Color presets that are unchanged copies of the repo's files | `--presets` |
+| The copied Terminal.app fonts and the MesloLGS Homebrew package | `--fonts` |
+| The iTerm2-Color-Schemes clone | `--repo` |
 
-It never touches the checkout itself, prefs backups, the Claude Code integration or your shell config. If `setup.sh` created `GlobalKeyMap` from iTerm2's defaults, that copy stays (only the ⌃⌥⌘S entry goes). Running `setup.sh` again re-enables a script `uninstall.sh` disabled. Sessions already colored keep their colors until closed.
-
-## Claude Code integration (optional)
-
-`setup.sh` doesn't run this. If you want it, quit iTerm2 and run `python3 .tools/srcp_enable_claude_integration.py [--dryrun]` from Terminal.app. It reproduces what iTerm2 3.7.6 installs when the integration is turned on in the app:
-
-- `~/.config/iterm2/cc-status` → the helper inside `iTerm.app`
-- a `cc-status` hook on 10 Claude Code events in `~/.claude/settings.json` (other settings kept, old file backed up)
-- two triggers per iTerm2 profile that group a `claude` job's activity
-- the two prefs flags recording that hooks and triggers are installed
-
-It never reads or writes iTerm2's AI chat/API settings (provider, model, URL, API key). A later iTerm2 may set things up differently. Set `ITERM_APP` if iTerm2 isn't in `/Applications`.
-
-## Development
-
-```sh
-./lint.sh         # ruff format --check, ruff check, pyright, shellcheck
-./lint.sh --fix   # apply ruff format and safe fixes first
-```
-
-Needs [uv](https://docs.astral.sh/uv/) (ruff and pyright run through pinned `uvx`) and `brew install shellcheck`. Settings are in `pyproject.toml`: Black-style formatting at 100 columns; `.tools/` targets Python 3.9 (`/usr/bin/python3`); `AutoLaunch/` (its own `AutoLaunch/ruff.toml`), `srcp_score_presets.py` and `srcp_ratings.py` target 3.12 (iTerm2's runtime). Pyright skips dot-folders, so `lint.sh` type-checks a temporary copy of `.tools/`. Pyright reads the `iterm2` module's types from iTerm2's runtime, so the script is type-checked against the real API.
-
-The scripts can't run outside iTerm2. Test DB changes against a copy with `--db /tmp/test.db`; dry-run everything else.
+It doesn't touch the repo itself, iTerm2 settings backups, or your shell config. Sessions already open keep their colors until closed. Running `setup.sh` again turns the main script back on.
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---|---|
-| `[warn] no scheme DB at ...` | Run `python3 .tools/srcp_build_scheme_db.py`. No restart needed. |
-| `[warn] preset not found: X` | Preset deleted or renamed in iTerm2. Rebuild the DB. |
-| Most presets show your Default profile's colors | Default has Settings → Profiles → Colors → "Use separate colors for light and dark mode" on; almost no preset defines both sets. Turn it off. |
-| Always light (or dark) | Settings → Appearance → Theme must be Automatic or Minimal to follow macOS. |
-| `another copy is already running; exiting` | Expected on a restart; the first copy holds `~/.local/share/iterm2-color-schemes/.lock`. |
-| A font never shows up | `select * from fonts`: it's disabled or not installed. Relaunch iTerm2 after installing fonts. |
-| A favorite isn't in the Profiles menu | Its preset isn't installed (`[warn] favorite ... isn't an installed preset`), or it's marked Never show. Check `~/Library/Application Support/iTerm2/DynamicProfiles/iterm2-profile-manager.plist`. |
-| ⌃⌥⌘S does nothing | Check Settings → Keys → Key Bindings for `save_profile()`, and that the AutoLaunch script is running (Scripts → Manage → Console). |
-| Build: `schemes.db is missing but its -wal/-shm files are still there` | Delete the two leftover files, or restore a backup. |
-| `[warn] DB ...: database is locked` | Another writer held the DB over 5 s (a long rebuild or a `sqlite3` session in a transaction). Finish it; that launch isn't recorded. |
-| A tool says iTerm2 is running | Quit iTerm2 and run it from Terminal.app; iTerm2 rewrites its prefs on quit. |
+| Console: `no scheme DB at ...` | Run `python3 .tools/srcp_build_scheme_db.py`. No restart needed. |
+| Console: `preset not found: X` | The preset was deleted or renamed in iTerm2. Rebuild the database. |
+| Most presets show your default profile's colors | In Settings → Profiles → Colors, turn off "Use separate colors for light and dark mode". Few presets define both. |
+| Always light, or always dark | Set Settings → Appearance → Theme to Automatic or Minimal. |
+| Console: `another copy is already running; exiting` | Normal after a restart; only one copy runs. |
+| A font never appears | Check `select * from fonts`: it's disabled or not installed. Relaunch iTerm2 after installing fonts. |
+| A favorite is missing from the Profiles menu | Its preset isn't installed, or it's marked Never show. |
+| ⌃⌥⌘S does nothing | Check Settings → Keys → Key Bindings for `save_profile()`, and that the script is running (Scripts → Manage → Console). |
+| Console: `database is locked` | Another program held the database for over 5 seconds (a rebuild, or an open `sqlite3` transaction). That launch isn't recorded. |
+| Build: `schemes.db is missing but its -wal/-shm files are still there` | Delete the two leftover files, or restore a snapshot. |
+| A tool says iTerm2 is running | Quit iTerm2 and run it from Terminal.app. |
+
+## Reference
+
+### Files
+
+| Path | Purpose |
+|---|---|
+| `AutoLaunch/srcp_set_random_color_profile.py` | The main script. Starts with iTerm2, picks each session's look, records launches, provides the rating dialog and right-click items, writes the favorite profiles, takes daily snapshots. |
+| `srcp_ratings.py` | Scripts menu: the ratings window. |
+| `srcp_score_presets.py` | Scripts menu: ranks presets by saturation. A report only; not used for picking. |
+| `setup.sh`, `uninstall.sh` | Install and uninstall. |
+| `.tools/` | Command-line tools. The leading dot keeps them out of iTerm2's Scripts menu. |
+| `.tools/srcp_build_scheme_db.py` | Labels each preset light or dark, runs the readability checks, writes the database. |
+| `.tools/srcp_import_presets.py` | Imports a folder of `.itermcolors` files without a dialog per file. |
+| `.tools/srcp_add_key_binding.py` | Binds ⌃⌥⌘S. |
+| `.tools/srcp_favorites.py` | Ratings report. |
+| `.tools/srcp_popup.js` | The ratings window (used by `srcp_ratings.py`). |
+| `.tools/srcp_export_curation.py` | Exports ratings and settings as SQL. |
+| `.tools/srcp_uninstall_prefs.py` | Removes the key binding and presets from iTerm2's settings (used by `uninstall.sh`). |
+| `.tools/srcp_iterm_prefs.py`, `.tools/srcp_db_backup.py` | Shared helpers: iTerm2 settings access, snapshots. |
+| `.tools/srcp_enable_claude_integration.py` | Optional; see below. |
+| `lint.sh`, `pyproject.toml`, `AutoLaunch/ruff.toml` | Lint and type checks. |
+
+### Manual install
+
+Instead of `setup.sh`:
+
+```sh
+git clone https://github.com/mbadolato/iTerm2-Color-Schemes.git ~/src/iTerm2-Color-Schemes
+python3 .tools/srcp_import_presets.py ~/src/iTerm2-Color-Schemes/schemes   # iTerm2 quit; --overwrite replaces existing presets
+python3 .tools/srcp_build_scheme_db.py                                     # safe with iTerm2 open
+python3 .tools/srcp_add_key_binding.py                                     # iTerm2 quit
+mkdir -p ~/Library/Application\ Support/iTerm2/Scripts/AutoLaunch
+cp AutoLaunch/srcp_set_random_color_profile.py ~/Library/Application\ Support/iTerm2/Scripts/AutoLaunch/
+```
+
+Every tool that writes takes `--dryrun`. To add the key binding by hand instead: Settings → Keys → Key Bindings → **+**, shortcut ⌃⌥⌘S, action **Invoke Script Function**, function `save_profile()`.
+
+Double-clicking an `.itermcolors` file also imports it, but shows a dialog for each of the 815 files. The schemes repo's own `tools/import-scheme.sh` renames some presets and needs bash 4+.
+
+### Database tables
+
+| Table or view | Contents |
+|---|---|
+| `schemes` | One row per installed preset: mode, how the mode was decided, contrast and color scores, whether it passes, duplicate spelling. Rebuilt by `srcp_build_scheme_db.py`. |
+| `overrides` | `name`, `mode` (force light/dark), `include` (1 = always pick, 0 = never). Starts with 6 presets that narrowly fail the checks, forced in. |
+| `config` | Settings (see [Configuration](#configuration)). |
+| `fonts` | `name` (PostScript name), `enabled`, `label`. |
+| `favorites` | `preset`, `font`, `size`, `stars`, `saved_at`. One row per preset and font. |
+| `ratings` | Every save, removal and Never show: `at`, `preset`, `font`, `action`, `stars`, `previous_stars`. Never cleared. |
+| `launches` | One row per session: `launched_at`, `preset`, `font`, `size`, `mode`, `source` (favorite or discovery), `stars`, `ended_at`, `duration_s`, `end_reason`. |
+| `effective` (view) | `schemes` with `overrides` applied. |
+| `discovery` (view) | Presets eligible for random picks. |
+| `favorite_pool` (view) | Favorites that can be picked, with their mode. |
+| `launch_stats` (view) | Per preset: launch counts, first and last use, time open, stars. |
+
+Times are stored in UTC. A rebuild replaces only `schemes` and the four views; everything else, including views you add, is kept.
+
+```sql
+select mode, count(*) from discovery group by mode;
+select * from launch_stats order by launches desc limit 10;
+select preset, font, launched_at, duration_s from launches order by id desc limit 20;
+select name, fg_contrast, accent_contrast, distinct_accents from schemes where passes_gate = 0;
+select * from favorites where preset not in (select name from schemes);  -- favorites whose preset is gone
+```
+
+### Claude Code integration (optional)
+
+`setup.sh` doesn't do this. To turn on iTerm2's Claude Code integration from the command line, quit iTerm2 and run `python3 .tools/srcp_enable_claude_integration.py [--dryrun]` from Terminal.app. It makes the same changes iTerm2 3.7.6 makes when you enable it in the app:
+
+- links `~/.config/iterm2/cc-status` to the helper inside iTerm.app,
+- adds a `cc-status` hook for 10 Claude Code events to `~/.claude/settings.json` (other settings kept, old file backed up),
+- adds two triggers per iTerm2 profile that track a running `claude` job,
+- sets the two iTerm2 settings that record the above.
+
+It doesn't touch iTerm2's AI chat settings or API key. Set `ITERM_APP` if iTerm2 isn't in `/Applications`.
+
+### Development
+
+```sh
+./lint.sh         # ruff format --check, ruff check, pyright, shellcheck
+./lint.sh --fix   # apply formatting and safe fixes first
+```
+
+Needs [uv](https://docs.astral.sh/uv/) and `brew install shellcheck`. Settings are in `pyproject.toml`: Black style, 100 columns. `.tools/` targets Python 3.9 (`/usr/bin/python3`); everything else targets 3.12 (iTerm2's Python), and pyright checks the main script against the real `iterm2` module.
+
+The scripts only run inside iTerm2. Test database changes on a copy (`--db /tmp/test.db`) and use `--dryrun` for everything else.
