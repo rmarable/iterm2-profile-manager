@@ -7,7 +7,7 @@ iTerm2 Python API scripts that give every new tab, window or split pane a color 
 | Need | Why | How |
 |---|---|---|
 | macOS | Fonts come from Terminal.app; `setup.sh` exits elsewhere. | |
-| iTerm2 | Runs the AutoLaunch script. Tested on 3.7.6; the right-click item needs Python API protocol 1.7+. | [iterm2.com](https://iterm2.com) |
+| iTerm2 | Runs the AutoLaunch script. Tested on 3.7.6; the right-click items need Python API protocol 1.7+, and hiding Remove from favorites on non-favorites needs 1.23. | [iterm2.com](https://iterm2.com) |
 | iTerm2 Python API | Lets scripts talk to iTerm2. | Settings → General → Magic → **Enable Python API** |
 | iTerm2 Python runtime | The script runs on iTerm2's own Python 3.12 and `iterm2` module. | Scripts → Manage → **Install Python Runtime** |
 | Theme Automatic or Minimal | Only these follow the macOS light/dark setting. | Settings → Appearance → Theme |
@@ -110,7 +110,7 @@ Why not double-click each `.itermcolors`? iTerm2 shows a dialog per file. `srcp_
 3. **Apply.** Sets the preset and the font face on the session's profile copy. The size stays the profile's (13 pt by default). It also turns on the non-ASCII font and sets it to `config.nonascii_font` (MesloLGS Nerd Font Mono) at the same size, so Powerlevel10k and other Nerd Font icons render whatever the main font is. A preset that no longer exists is skipped and another picked, up to 3 tries.
 4. **Record.** Sets session variables `user.color_preset`, `user.font`, `user.font_size`, `user.mode`, `user.is_favorite` and inserts a `launches` row. When the session closes, the row gets `ended_at`, `duration_s` and `end_reason='closed'`. iTerm2 holds that event while closing can still be undone, so it lands a few seconds late. Sessions still open when iTerm2 quits get `end_reason='unknown'` on the next start.
 
-At startup the Console shows `[info] srcp_set_random_color_profile <version> (file modified <time>), pid <n>`.  `[info] dark discovery: Nord | Menlo-Regular 13` or `[info] light favorite 4 ★: ...`.
+At startup the Console shows `[info] srcp_set_random_color_profile <version> (file modified <time>), pid <n>`. Each new session logs a line such as `[info] dark discovery: Nord | Menlo-Regular 13` or `[info] light favorite 4 ★: ...`.
 
 ### Light or dark
 
@@ -220,7 +220,7 @@ Snapshots stay on this Mac (and in Time Machine, if `~/.local` isn't excluded). 
 python3 .tools/srcp_export_curation.py -o ~/curation.sql   # or no -o for stdout
 ```
 
-The export is a few KB of `INSERT OR REPLACE` statements for `favorites`, `ratings`, `overrides`, `config` and `fonts`. Launch history and the derived `schemes` table are left out. It contains preset names, font names, star ratings and when they changed, nothing else.
+The export is a few KB of SQL (`INSERT OR REPLACE`, plus `INSERT OR IGNORE` for history and fonts) for `favorites`, `ratings`, `overrides`, `config` and `fonts`. Launch history and the derived `schemes` table are left out. It contains preset names, font names, star ratings and when they changed, nothing else.
 
 Restore it into a built DB, on this Mac or a new one (after `setup.sh`):
 
@@ -258,7 +258,7 @@ select preset, font, launched_at, duration_s from launches order by id desc limi
 update config set value = '0.7' where key = 'favorite_share';
 update fonts set enabled = 0 where name = 'Monaco';
 update config set value = '' where key = 'nonascii_font';      -- stop setting the icon font
-insert into fonts values ('JetBrainsMonoNL-Regular', 1);           -- PostScript name
+insert into fonts (name, label) values ('JetBrainsMonoNL-Regular', 'JetBrains Mono');  -- PostScript name, profile-name label
 insert or replace into overrides (name, include) values ('Zenburn', 1);
 insert or replace into overrides (name, mode) values ('Some Scheme', 'dark');
 select name, fg_contrast, accent_contrast, distinct_accents from schemes where passes_gate = 0;
