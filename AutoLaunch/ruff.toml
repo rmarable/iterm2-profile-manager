@@ -4,9 +4,5 @@ target-version = "py312"
 
 [lint]
 ignore = [
-    "PLR2004",
-    "S603",
-    "S607",
     "S311", # random picks a color scheme, not a secret
-    "B008", # iterm2.Reference("id") as a default is how the API passes the session id
 ]

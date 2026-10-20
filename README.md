@@ -29,7 +29,7 @@ git clone git@github.com:rmarable/iterm2-profile-manager.git ~/src/iterm2-profil
 cd ~/src/iterm2-profile-manager
 ```
 
-Or clone it straight into the Scripts folder. This only works if that folder is missing or empty. Edits then take effect without copying, but every `.py` file in the repo shows up in iTerm2's Scripts menu.
+Or clone it straight into the Scripts folder. This only works if that folder is missing or empty. Edits then take effect without copying, and `git pull` updates the installed scripts.
 
 ```sh
 git clone git@github.com:rmarable/iterm2-profile-manager.git ~/Library/Application\ Support/iTerm2/Scripts
@@ -65,12 +65,12 @@ The new fonts become available and the main script starts. To confirm it's runni
 
 ### Rate a look
 
-Right-click in a session and choose **Save/update this profile**, or press ⌃⌥⌘S. The dialog shows the session's preset, font and how many times this look was launched.
+Right-click in a session and choose **Save/update this profile**, or press ⌃⌥⌘S. The dialog shows the session's preset and mode, its font, how many times the preset was launched (with any font) and when last, and its current stars.
 
 | Button | Effect |
 |---|---|
 | **1 ★** … **5 ★★★★★** | Saves the preset and font as a favorite with that many stars. Choosing again changes the stars. |
-| **Remove favorite** | Shown only for a favorite. Deletes the favorite; the preset goes back into the random rotation. |
+| **Remove favorite** | Shown only for a favorite. Deletes this preset + font favorite. The preset goes back into the random rotation once it has no favorites with any font. |
 | **Never show** | Never picks this preset again, and deletes its favorites. Rating it later undoes this. |
 | **Cancel** | Does nothing. |
 
@@ -82,7 +82,7 @@ Changes apply to the next new session.
 
 Each favorite becomes a profile named `<preset> - <font>`, listed under **Profiles → Favorites**. A session opened from one keeps that look instead of getting a random one.
 
-The script writes these profiles to `~/Library/Application Support/iTerm2/DynamicProfiles/iterm2-profile-manager.plist` and iTerm2 picks up changes on its own. Each profile is based on your default profile, so it keeps your other settings (triggers, key bindings, etc.). Changes you make to one in Settings are lost the next time the file is rewritten; to change a favorite, open it, adjust, and rate it again. Deleting the file removes all of them until the script next starts.
+The script writes these profiles to `~/Library/Application Support/iTerm2/DynamicProfiles/iterm2-profile-manager.plist` and iTerm2 picks up changes on its own. Each profile is based on your default profile, so it keeps your other settings (triggers, key bindings, etc.). Changes you make to one in Settings are lost the next time the file is rewritten; to change a favorite, open it, adjust, and rate it again. Deleting the file removes all of them until the script restarts or a favorite changes.
 
 ### Review your ratings
 
@@ -163,8 +163,10 @@ update fonts set enabled = 0 where name = 'Monaco';
 insert into fonts (name, label) values ('JetBrainsMonoNL-Regular', 'JetBrains Mono');
 
 -- force a preset in or out of the rotation, or set its mode
-insert or replace into overrides (name, include) values ('Zenburn', 1);
-insert or replace into overrides (name, mode) values ('Some Scheme', 'dark');
+insert into overrides (name, include) values ('Zenburn', 1)
+  on conflict (name) do update set include = excluded.include;
+insert into overrides (name, mode) values ('Some Scheme', 'dark')
+  on conflict (name) do update set mode = excluded.mode;
 ```
 
 Default fonts: SF Mono, Menlo, Monaco, MesloLGS Nerd Font Mono. Fonts that aren't installed start disabled.
@@ -176,7 +178,7 @@ The database is `~/.local/share/iterm2-color-schemes/schemes.db`. Snapshots are 
 - before every database rebuild,
 - when the main script starts, if the newest snapshot is more than a day old.
 
-The newest 14 are kept. The preset data can always be rebuilt; the snapshots protect your favorites, hidden presets, launch history and settings.
+The newest 14 are kept. Manual snapshots (`manual-*.db`) aren't counted or deleted. The preset data can always be rebuilt; the snapshots protect your favorites, hidden presets, launch history and settings.
 
 **Take a snapshot by hand** (safe any time):
 
@@ -297,6 +299,9 @@ python3 .tools/srcp_build_scheme_db.py                                     # saf
 python3 .tools/srcp_add_key_binding.py                                     # iTerm2 quit
 mkdir -p ~/Library/Application\ Support/iTerm2/Scripts/AutoLaunch
 cp AutoLaunch/srcp_set_random_color_profile.py ~/Library/Application\ Support/iTerm2/Scripts/AutoLaunch/
+cp srcp_ratings.py srcp_score_presets.py ~/Library/Application\ Support/iTerm2/Scripts/
+mkdir -p ~/Library/Application\ Support/iTerm2/Scripts/.tools
+cp .tools/srcp_favorites.py .tools/srcp_popup.js ~/Library/Application\ Support/iTerm2/Scripts/.tools/
 ```
 
 Every tool that writes takes `--dryrun`. To add the key binding by hand instead: Settings → Keys → Key Bindings → **+**, shortcut ⌃⌥⌘S, action **Invoke Script Function**, function `save_profile()`.
@@ -350,3 +355,7 @@ It doesn't touch iTerm2's AI chat settings or API key. Set `ITERM_APP` if iTerm2
 Needs [uv](https://docs.astral.sh/uv/) and `brew install shellcheck`. Settings are in `pyproject.toml`: Black style, 100 columns. `.tools/` targets Python 3.9 (`/usr/bin/python3`); everything else targets 3.12 (iTerm2's Python), and pyright checks the main script against the real `iterm2` module.
 
 The scripts only run inside iTerm2. Test database changes on a copy (`--db /tmp/test.db`) and use `--dryrun` for everything else.
+
+## License
+
+[MIT](LICENSE). Color presets come from [iTerm2-Color-Schemes](https://github.com/mbadolato/iTerm2-Color-Schemes), cloned at install time under its own license. See also [DISCLAIMER.md](DISCLAIMER.md).

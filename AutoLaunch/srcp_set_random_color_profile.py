@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Give each new session a color preset matching the macOS light/dark mode, plus a random font.
 
-Picks from the scheme DB built by .tools/srcp_build_scheme_db.py: a starred favorite of
-the current mode (weighted by stars), or otherwise a gate-passing preset of that
-mode not shown in the last few launches. Records every launch and when it ended,
-and snapshots the DB once a day. "Save/update this profile" (right-click) or the
-save_profile() key binding stars the current look; "Remove from favorites"
-(right-click, shown on favorites only) un-stars it. Every favorite is also an
+Picks from the scheme DB built by .tools/srcp_build_scheme_db.py: sometimes
+(favorite_share, ramped by the number of favorites) a starred favorite of the current
+mode, weighted by stars; otherwise a preset from the discovery view not among the last
+recent_window picks, with colored-background presets weighted by colorful_weight.
+Records every launch and when it ended, and snapshots the DB once a day.
+"Save/update this profile" (right-click) or the save_profile() key binding stars the
+current look; "Remove from favorites" (right-click; hidden on non-favorites only where
+iTerm2 supports API protocol 1.23+) un-stars it. Every favorite is also an
 iTerm2 profile ("Kibble - Menlo"), kept in a Dynamic Profiles file.
 """
 
@@ -33,7 +35,7 @@ from typing import IO, Any, TypeVar
 import iterm2
 from iterm2.capabilities import supports_context_menu_submenus_and_visibility
 
-VERSION = "0.6.0"  # bump on every change, so the Console shows which code is running
+VERSION = "0.6.1"  # bump on every change, so the Console shows which code is running
 DATA_DIR = os.path.expanduser("~/.local/share/iterm2-color-schemes")
 DB_PATH = os.path.join(DATA_DIR, "schemes.db")
 LOCK_PATH = os.path.join(DATA_DIR, ".lock")
@@ -225,17 +227,16 @@ def random_font(db: sqlite3.Connection) -> str | None:
     return row[0] if row else None
 
 
-def record_launch(db: sqlite3.Connection, *values: Any) -> bool:
+def record_launch(db: sqlite3.Connection, *values: Any) -> None:
     """values: preset, font, size, mode, source, stars, iterm_profile, session_id."""
     db.execute(
         "INSERT INTO launches (launched_at, preset, font, size, mode, source, stars, "
         "iterm_profile, session_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (now(), *values),
     )
-    return True
 
 
-def record_end(db: sqlite3.Connection, session_id: str) -> bool:
+def record_end(db: sqlite3.Connection, session_id: str) -> None:
     t = now()
     db.execute(
         "UPDATE launches SET ended_at = ?, end_reason = 'closed', "
@@ -243,7 +244,6 @@ def record_end(db: sqlite3.Connection, session_id: str) -> bool:
         "WHERE session_id = ? AND ended_at IS NULL AND end_reason IS NULL",
         (t, t, session_id),
     )
-    return True
 
 
 def close_stale(db: sqlite3.Connection, live_ids: set[str], started: str) -> int:
@@ -529,7 +529,7 @@ async def set_variables(session: iterm2.Session, **values: Any) -> None:
 
 
 async def keep_favorite_profile(
-    store: Store, session: iterm2.Session, profile: iterm2.Profile, mode: str
+    store: Store, session: iterm2.Session, profile: iterm2.Profile
 ) -> bool:
     """A session opened from a favorite's profile keeps its look; True if this is one."""
     guid = profile.original_guid or profile.guid
@@ -569,7 +569,7 @@ async def color_session(
     mode = "dark" if "dark" in theme else "light"
     await sync_and_log(store)  # picks up favorites changed outside the dialog
     profile = await session.async_get_profile()
-    if await keep_favorite_profile(store, session, profile, mode):
+    if await keep_favorite_profile(store, session, profile):
         return
     exclude: set[str] = set()
     for _ in range(3):

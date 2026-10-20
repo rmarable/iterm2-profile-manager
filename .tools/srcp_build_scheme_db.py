@@ -3,7 +3,7 @@
 
 Classifies every installed color preset as light or dark and runs a readability
 gate over it. A rebuild replaces only the derived `schemes` table and the views;
-`overrides`, `config`, `fonts`, `favorites` and `launches` are kept. An existing DB
+`overrides`, `config`, `fonts`, `favorites`, `ratings` and `launches` are kept. An existing DB
 is snapshotted to backups/ first.
 
 Reads iTerm2's prefs without writing them, so it's safe with iTerm2 running:
@@ -342,12 +342,10 @@ def seed_every_build(db):
         )
         if not installed:  # e.g. re-enabled by a curation export from another Mac
             db.execute("UPDATE fonts SET enabled = 0 WHERE name = ?", (name,))
-    has_label = any(r[1] == "label" for r in db.execute("PRAGMA table_info(fonts)"))
-    if has_label:
-        db.executemany(
-            "UPDATE fonts SET label = ? WHERE name = ? AND label IS NULL",
-            [(label, n) for n, label in SEED_FONT_LABELS.items()],
-        )
+    db.executemany(
+        "UPDATE fonts SET label = ? WHERE name = ? AND label IS NULL",
+        [(label, n) for n, label in SEED_FONT_LABELS.items()],
+    )
 
 
 def write_db(path, rows):

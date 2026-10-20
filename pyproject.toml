@@ -29,5 +29,5 @@ exclude = ["archive"]
 typeCheckingMode = "standard"
 executionEnvironments = [
     { root = "AutoLaunch", pythonVersion = "3.12" },
-    { root = ".", pythonVersion = "3.12", extraPaths = [".tools"] }, # srcp_ratings imports from it
+    { root = ".", pythonVersion = "3.12" },
 ]

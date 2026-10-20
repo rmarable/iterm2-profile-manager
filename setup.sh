@@ -5,7 +5,7 @@
 #   3. clone (or update) iTerm2-Color-Schemes into $SRC_DIR (default ~/src)
 #   4. import every .itermcolors file as an iTerm2 color preset (no dialogs)
 #   5. build the light/dark scheme database the AutoLaunch script picks from
-#   6. bind Ctrl-Opt-Cmd-S to the "save this profile" dialog
+#   6. bind Ctrl-Opt-Cmd-S to the "Save/update this profile" dialog
 #   7. install the scripts into iTerm2's Scripts folder, if this checkout isn't
 #      already that folder, and remove retired AutoLaunch scripts
 #

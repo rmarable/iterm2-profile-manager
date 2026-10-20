@@ -24,7 +24,7 @@ KEY_MAP = "GlobalKeyMap"
 
 # 0x<character>-0x<modifiers>-0x<keycode>-0x1, as in iterm2.KeyBinding.key:
 # "s", Control|Option|Command (1<<18 | 1<<19 | 1<<20), kVK_ANSI_S = 1.
-# Unverified against an entry iTerm2 wrote itself (open item 2 in CLAUDE-STATE.md).
+# Format confirmed working in iTerm2 3.7.6.
 CHAR_MODS = "0x73-0x1c0000"
 BINDING_KEY = CHAR_MODS + "-0x1-0x1"
 BINDING = {"Action": 60, "Text": "save_profile()"}  # 60 = INVOKE_SCRIPT_FUNCTION
