@@ -95,4 +95,4 @@ cd ~/src/iterm2-profile-manager
 
 Everything else (how schemes are picked, settings, backups, the database) is in [README.md](README.md).
 
-**Tip:** if you use Claude Code, you can open it in this folder and ask it to explain or change anything here.
+**Tip:** if you use Claude Code or Codex, you can open it in this folder and ask it to explain or change anything here.
