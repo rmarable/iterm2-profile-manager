@@ -8,20 +8,26 @@ New to the terminal? Start with [ABOUT-THIS-REPO.md](ABOUT-THIS-REPO.md). See al
 
 ## Requirements
 
+### Software
+
 | Software | Notes |
 |---|---|
-| macOS | `setup.sh` copies fonts from Terminal.app and exits on other systems. |
-| [iTerm2](https://iterm2.com) | Tested on 3.7.6. Set `ITERM_APP` if it isn't in `/Applications`. |
-| Xcode Command Line Tools | Provides `git` and `/usr/bin/python3` (3.9+). Install: `xcode-select --install`. |
-| [Homebrew](https://brew.sh) | Optional. Installs MesloLGS Nerd Font for prompt icons; skipped if absent. |
+| macOS | Required. `setup.sh` exits on other systems. |
+| [iTerm2](https://iterm2.com) | Tested on 3.7.6. Install in `/Applications`, or set `ITERM_APP` to its path. |
+| Xcode Command Line Tools | `xcode-select --install`. Provides `git` and `/usr/bin/python3` (3.9+). |
+| [Homebrew](https://brew.sh) | Optional. Installs MesloLGS Nerd Font for prompt icons. |
 
-| iTerm2 setting | Where | Why |
+No pip packages are needed. Setup needs network access to clone the schemes repo.
+
+### iTerm2 settings
+
+Set these before running setup:
+
+| Setting | Where | Why |
 |---|---|---|
 | Python API | Settings → General → Magic → **Enable Python API** | Scripts can't connect without it. |
 | Python runtime | Scripts → Manage → **Install Python Runtime** | The main script runs on it (Python 3.12). |
-| Theme | Settings → Appearance → Theme → **Automatic** or **Minimal** | Only these follow the macOS mode. |
-
-No pip packages; the tools use only the standard library. The first install needs network access to clone the schemes repo.
+| Theme | Settings → Appearance → Theme → **Automatic** or **Minimal** | Only these follow the macOS light/dark mode. |
 
 ## Install
 
