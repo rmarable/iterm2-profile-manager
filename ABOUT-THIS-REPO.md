@@ -1,6 +1,11 @@
 # About this repo
 
-New to living in the terminal? Running Claude Code, Codex or another AI agent in a few tabs at once? This gives every iTerm2 tab its own look, so you can tell them apart at a glance.
+- Are you new to living in the terminal?
+- Do you now find yourself running Claude Code, Codex or another AI agent in multiple tabs at once?
+- Do you hate how limited Terminal's colors are?
+- Are you bored with the iTerm2 defaults?
+
+This gives every iTerm2 tab its own look, so you can tell them apart at a glance.
 
 ## What it does
 
@@ -8,13 +13,19 @@ New to living in the terminal? Running Claude Code, Codex or another AI agent in
 - **You rate the ones you like** (1 to 5 stars). Rated looks come up more often.
 - **Each rated look becomes a profile** under **Profiles → Favorites**, so you can open it on purpose, e.g. a "Kibble - Menlo" tab for your Claude Code session.
 
-Nothing about your shell, prompt or AI tools changes. It only recolors iTerm2 sessions.
+This toolkit only recolors iTerm2 sessions. Nothing about your shell, prompt or AI tools changes.
+
+## See the Profile Chooser in Action
+
+![One iTerm2 window split three ways: two Claude Code sessions and a shell, each with its own color scheme](images/profile-chooser.jpg)
+
+Two Claude Code sessions and a plain shell in one window. Each pane got its own colors when it opened.
 
 ## Why it helps with AI agents
 
 Agents work in long-running sessions, and it's easy to lose track of which tab is which:
 
-| Without | With |
+| Default iTerm2 Color Scheme | With the Profile Manager Activated |
 |---|---|
 | Five black tabs, all running `claude` | Five different colors and fonts |
 | Typing into the wrong agent's tab | The color tells you where you are before you type |
@@ -24,11 +35,14 @@ Optional: `.tools/srcp_enable_claude_integration.py` turns on iTerm2's built-in 
 
 ## Before you start
 
-- A Mac with [iTerm2](https://iterm2.com) installed.
-- In iTerm2: Settings → General → Magic → **Enable Python API**.
-- In iTerm2: Scripts → Manage → **Install Python Runtime**.
-- In iTerm2: Settings → Appearance → Theme → **Automatic** (so it follows Light/Dark Mode).
-- `git` and `python3`: run `xcode-select --install` if you don't have them.
+You need a Mac with [iTerm2](https://iterm2.com), plus:
+
+| Setting or tool | Where |
+|---|---|
+| Python API | iTerm2 → Settings → General → Magic → **Enable Python API** |
+| Python runtime | iTerm2 → Scripts → Manage → **Install Python Runtime** |
+| Theme follows Light/Dark Mode | iTerm2 → Settings → Appearance → Theme → **Automatic** |
+| `git` and `python3` | Terminal: `xcode-select --install` (skip if already installed) |
 
 ## Install (about 5 minutes)
 
@@ -59,7 +73,7 @@ Running `setup.sh` again is safe. It backs up iTerm2's settings before changing 
 
 Changes apply to the next tab you open.
 
-## Undo
+## Uninstall the toolkit
 
 Quit iTerm2, then from Terminal.app:
 
