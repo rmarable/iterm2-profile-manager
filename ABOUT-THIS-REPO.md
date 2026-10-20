@@ -67,9 +67,11 @@ Running `setup.sh` again is safe. It backs up iTerm2's settings before changing 
 | To | Do |
 |---|---|
 | Keep a look you like | Right-click → **Save/update this profile**, or press ⌃⌥⌘S, then pick 1 to 5 stars |
-| Never see a scheme again | Same dialog → **Never show** |
+| Never see a scheme again | Same dialog → **Never show**. It's gone for good, with every font, and survives updates. |
 | Open a saved look | **Profiles → Favorites → \<name\>** |
 | See your ratings | **Scripts → srcp_ratings.py** |
+| See schemes you've hidden | **Scripts → srcp_ratings.py** → **Hidden** |
+| Bring a hidden scheme back | **Hidden** shows how; or rate it from a tab that still has it |
 
 Changes apply to the next tab you open.
 
