@@ -33,14 +33,19 @@ from typing import IO, Any, TypeVar
 import iterm2
 from iterm2.capabilities import supports_context_menu_submenus_and_visibility
 
-VERSION = "0.5.2"  # bump on every change, so the Console shows which code is running
+VERSION = "0.6.0"  # bump on every change, so the Console shows which code is running
 DATA_DIR = os.path.expanduser("~/.local/share/iterm2-color-schemes")
 DB_PATH = os.path.join(DATA_DIR, "schemes.db")
 LOCK_PATH = os.path.join(DATA_DIR, ".lock")
 BACKUP_KEEP = 14
 BACKUP_EVERY_S = 24 * 3600
 DEFAULT_SIZE = 13
-DEFAULT_CONFIG = {"favorite_share": 0.5, "favorite_target": 10, "recent_window": 20}
+DEFAULT_CONFIG = {
+    "favorite_share": 0.5,
+    "favorite_target": 10,
+    "recent_window": 20,
+    "colorful_weight": 3,
+}
 # Font for characters the main font lacks, e.g. Powerlevel10k prompt icons; config overrides.
 DEFAULT_NONASCII_FONT = "MesloLGSNFM-Regular"
 MENU_ID = "com.rmarable.set-random-color-profile.save"
@@ -172,11 +177,12 @@ def pick(db: sqlite3.Connection, mode: str, exclude: set[str]) -> Pick | None:
         for r in db.execute("SELECT preset, font, stars FROM favorite_pool WHERE mode = ?", (mode,))
         if r[0] not in exclude
     ]
-    disc = [
-        n
-        for (n,) in db.execute("SELECT name FROM discovery WHERE mode = ?", (mode,))
-        if n not in exclude
-    ]
+    try:
+        rows = db.execute("SELECT name, colorful FROM discovery WHERE mode = ?", (mode,)).fetchall()
+    except sqlite3.OperationalError:  # DB built before colorful_weight: rebuild it to get it
+        warn_once("no-colorful", "discovery has no colorful column; rebuild the DB")
+        rows = [(n, 0) for (n,) in db.execute("SELECT name FROM discovery WHERE mode = ?", (mode,))]
+    disc = [(n, c) for n, c in rows if n not in exclude]
     # Ramp up by distinct presets, so saving one preset with several fonts doesn't speed it.
     target = cfg["favorite_target"]
     n_presets = len({f[0] for f in favs})
@@ -198,7 +204,11 @@ def pick(db: sqlite3.Connection, mode: str, exclude: set[str]) -> Pick | None:
             (mode, window),
         )
     }
-    return random.choice([n for n in disc if n not in recent] or disc), None, "discovery", None
+    pool = [d for d in disc if d[0] not in recent] or disc
+    weight = max(0.0, cfg["colorful_weight"])
+    weights = [weight if colorful else 1.0 for _, colorful in pool]
+    preset = random.choices(pool, weights=weights if sum(weights) > 0 else None)[0][0]
+    return preset, None, "discovery", None
 
 
 def nonascii_font(db: sqlite3.Connection) -> str | None:

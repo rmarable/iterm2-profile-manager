@@ -45,6 +45,8 @@ MIN_ACCENT_DIST = 0.04  # OKLab distance below which two accents look the same
 MIN_DISTINCT_ACCENTS = 5  # largest set of accents all MIN_ACCENT_DIST apart
 CHROMA_MIN = 0.02  # OKLab chroma above which an accent counts as colored
 MONO_ARC_DEG = 40  # colored accents within this hue arc = monochrome theme
+# Background OKLab chroma at or above which a preset counts as colorful (config colorful_weight).
+COLORFUL_BG_CHROMA = 0.05
 
 # Old-rotation presets just under the gate, included on the first build.
 SEED_INCLUDES = [
@@ -59,6 +61,7 @@ SEED_CONFIG = {
     "favorite_share": "0.5",
     "favorite_target": "10",
     "recent_window": "20",
+    "colorful_weight": "3",  # colorful-background presets picked this many times as often
     "nonascii_font": "MesloLGSNFM-Regular",  # prompt icons; '' turns it off
 }
 # PostScript name -> readable label, used in favorite profile names ("Kibble - Menlo").
@@ -152,6 +155,7 @@ def classify(colors):
     mono = is_monochrome(labs)
     return {
         "lum_mode": "light" if relative_luminance(bg) > relative_luminance(fg) else "dark",
+        "bg_chroma": round(math.hypot(*oklab(bg)[1:]), 4),
         "fg_contrast": round(contrast_ratio(fg, bg), 2),
         "accent_contrast": round(accent_contrast, 2),
         "distinct_accents": distinct,
@@ -257,11 +261,12 @@ MIGRATIONS = [
 VIEW_NAMES = ["launch_stats", "favorite_pool", "discovery", "effective"]
 VIEWS = """
 CREATE VIEW effective AS
-    SELECT s.name, COALESCE(o.mode, s.mode) AS mode, o.include, s.passes_gate, s.duplicate_of
+    SELECT s.name, COALESCE(o.mode, s.mode) AS mode, o.include, s.passes_gate, s.duplicate_of,
+           s.bg_chroma
     FROM schemes s LEFT JOIN overrides o ON o.name = s.name;
 
 CREATE VIEW discovery AS
-    SELECT name, mode FROM effective
+    SELECT name, mode, bg_chroma >= {colorful} AS colorful FROM effective
     WHERE duplicate_of IS NULL
       AND (include = 1 OR (include IS NULL AND passes_gate = 1))
       AND name NOT IN (SELECT preset FROM favorites);
@@ -296,7 +301,8 @@ CREATE TABLE schemes (
     passes_gate INTEGER NOT NULL,
     in_repo INTEGER NOT NULL,
     color_hash TEXT,
-    duplicate_of TEXT
+    duplicate_of TEXT,
+    bg_chroma REAL
 )
 """
 
@@ -357,8 +363,8 @@ def write_db(path, rows):
             migrate(db)
             db.execute("DROP TABLE IF EXISTS schemes")
             db.execute(SCHEMES_TABLE)
-            db.executemany("INSERT INTO schemes VALUES (?,?,?,?,?,?,?,?,?,?,?)", rows)
-            execute_all(db, VIEWS)
+            db.executemany("INSERT INTO schemes VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+            execute_all(db, VIEWS.format(colorful=COLORFUL_BG_CHROMA))
             db.execute("COMMIT")
         except BaseException:
             db.execute("ROLLBACK")
@@ -411,6 +417,7 @@ def build_rows(presets, repo):
                 int(in_repo),
                 h,
                 None if in_repo else repo_hashes.get(h),
+                c["bg_chroma"],
             )
         )
     return rows, {"disagree": disagree, "fails": fails, "skipped": skipped}

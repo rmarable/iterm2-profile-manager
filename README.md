@@ -113,7 +113,7 @@ For each new session, the script:
 2. **Reads the light/dark setting** from iTerm2. With the Automatic or Minimal theme, this follows macOS. Open sessions aren't recolored when the setting changes.
 3. **Chooses a favorite or a new preset.** The chance of a favorite grows with the number of favorite presets in this mode: `favorite_share × min(1, favorite presets / favorite_target)`, so 50% once you have 10 or more. With no favorites it always picks a new preset.
    - **Favorite:** weighted by stars (a 5 ★ comes up 5 times as often as a 1 ★), with the font it was saved with.
-   - **New preset:** any preset of this mode that passes the readability checks below and isn't a favorite, except the last 20 new presets picked in this mode. The font is random.
+   - **New preset:** any preset of this mode that passes the readability checks below and isn't a favorite, except the last 20 new presets picked in this mode. Presets with a colored background (yellow, pink, teal, … rather than white, grey or black) are picked 3 times as often as plain ones; there are few of them (12 of 168 light, 90 of 611 dark), so this raises their share to about 19% of light tabs and 34% of dark tabs. The font is random.
 4. **Applies the preset and font** to this session only, at the profile's font size. It also sets MesloLGS Nerd Font as the font for non-ASCII characters, so shell prompt icons (Powerlevel10k etc.) display with any main font.
 5. **Records the launch** in the database, and the time it's closed. Sessions still open when iTerm2 quits are marked `unknown` at the next start.
 
@@ -131,7 +131,7 @@ A preset is picked at random only if:
 | Colors visible | At least 4 of the 6 main colors (ANSI red, green, yellow, blue, magenta, cyan) have contrast of at least 2 against the background. |
 | Colors distinct | At least 5 of those 6 colors are clearly different from each other (at least 0.04 apart in OKLab). |
 
-Monochrome presets (one hue, or nearly no color) only need the Text check. Soft and vivid palettes are equally likely; there's no ranking.
+Monochrome presets (one hue, or nearly no color) only need the Text check.
 
 Result as of 2026-10-17: 824 presets installed, 181 light and 643 dark; 167 light and 614 dark pass.
 
@@ -150,10 +150,12 @@ sqlite3 ~/.local/share/iterm2-color-schemes/schemes.db
 | `favorite_share` | `0.5` | Highest chance of picking a favorite. |
 | `favorite_target` | `10` | Number of favorite presets (per mode) at which that chance is reached. |
 | `recent_window` | `20` | New presets don't repeat within this many picks. |
+| `colorful_weight` | `3` | How many times as often a preset with a colored background (OKLab chroma ≥ 0.05) is picked. `1` treats all presets equally. |
 | `nonascii_font` | `MesloLGSNFM-Regular` | Font for icons and other non-ASCII characters. `''` leaves the profile's setting alone. |
 
 ```sql
 update config set value = '0.7' where key = 'favorite_share';
+update config set value = '1' where key = 'colorful_weight';
 update config set value = '' where key = 'nonascii_font';
 
 -- fonts: name is the PostScript name; label is used in profile names
@@ -305,7 +307,7 @@ Double-clicking an `.itermcolors` file also imports it, but shows a dialog for e
 
 | Table or view | Contents |
 |---|---|
-| `schemes` | One row per installed preset: mode, how the mode was decided, contrast and color scores, whether it passes, duplicate spelling. Rebuilt by `srcp_build_scheme_db.py`. |
+| `schemes` | One row per installed preset: mode, how the mode was decided, contrast and color scores, whether it passes, duplicate spelling, background colorfulness (`bg_chroma`). Rebuilt by `srcp_build_scheme_db.py`. |
 | `overrides` | `name`, `mode` (force light/dark), `include` (1 = always pick, 0 = never). Starts with 6 presets that narrowly fail the checks, forced in. |
 | `config` | Settings (see [Configuration](#configuration)). |
 | `fonts` | `name` (PostScript name), `enabled`, `label`. |
@@ -313,7 +315,7 @@ Double-clicking an `.itermcolors` file also imports it, but shows a dialog for e
 | `ratings` | Every save, removal and Never show: `at`, `preset`, `font`, `action`, `stars`, `previous_stars`. Never cleared. |
 | `launches` | One row per session: `launched_at`, `preset`, `font`, `size`, `mode`, `source` (favorite or discovery), `stars`, `ended_at`, `duration_s`, `end_reason`. |
 | `effective` (view) | `schemes` with `overrides` applied. |
-| `discovery` (view) | Presets eligible for random picks. |
+| `discovery` (view) | Presets eligible for random picks, with `colorful` (1 = colored background). |
 | `favorite_pool` (view) | Favorites that can be picked, with their mode. |
 | `launch_stats` (view) | Per preset: launch counts, first and last use, time open, stars. |
 
