@@ -15,11 +15,11 @@ This gives every iTerm2 tab its own look, so you can tell them apart at a glance
 
 This toolkit only recolors iTerm2 sessions. Nothing about your shell, prompt or AI tools changes.
 
-## See the Profile Chooser in Action
-
-![One iTerm2 window split three ways: two Claude Code sessions and a shell, each with its own color scheme](images/profile-chooser.jpg)
+**See the Profile Chooser in Action**
 
 Two Claude Code sessions and a plain shell in one window. Each pane got its own colors when it opened.
+
+![One iTerm2 window split three ways: two Claude Code sessions and a shell, each with its own color scheme](images/profile-chooser.jpg "See the Profile Chooser in Action")
 
 ## Why it helps with AI agents
 
