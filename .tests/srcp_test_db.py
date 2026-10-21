@@ -287,6 +287,13 @@ class HelperTest(unittest.TestCase):
         prefs = {"LoadPrefsFromCustomFolder": True, "PrefsCustomFolder": "/elsewhere"}
         self.assertEqual(srcp_iterm_prefs.custom_folder(prefs), "/elsewhere")
         self.assertIsNone(srcp_iterm_prefs.custom_folder({}))
+
+        def no_defaults(*args, **kwargs):  # if the guard ever regressed, never touch real prefs
+            raise AssertionError(f"save_prefs ran {args[0]!r} instead of refusing")
+
+        real = srcp_iterm_prefs.subprocess
+        srcp_iterm_prefs.subprocess = types.SimpleNamespace(run=no_defaults)
+        self.addCleanup(setattr, srcp_iterm_prefs, "subprocess", real)
         with self.assertRaises(SystemExit):
             srcp_iterm_prefs.save_prefs(prefs)
 

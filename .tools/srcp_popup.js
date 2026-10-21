@@ -4,6 +4,25 @@
 // the alert, prints its size and exits without showing it (for tests).
 ObjC.import("Cocoa");
 
+// NSAlert gives Escape only to a button titled "Cancel" (a hidden one ignores keys, and a
+// button has one key, so Done can't take Escape without losing Return). The text view's
+// scroll view answers Escape instead, ending the alert as if Done (the first button) was
+// clicked.
+ObjC.registerSubclass({
+  name: "SRCPPopupScrollView",
+  superclass: "NSScrollView",
+  methods: {
+    "performKeyEquivalent:": {
+      types: ["bool", ["id"]],
+      implementation: function (event) {
+        if (event.charactersIgnoringModifiers.js !== "\u001b") return false;
+        $.NSApp.stopModalWithCode(1000);
+        return true;
+      },
+    },
+  },
+});
+
 function run(argv) {
   const [title = "", text = "", ...buttons] = argv;
   const app = $.NSApplication.sharedApplication;
@@ -18,7 +37,7 @@ function run(argv) {
   const width = Math.min(Math.ceil(longest * charW) + 24, 1000);
   const height = Math.min(Math.ceil(lines.length * lineH) + 16, 460);
 
-  const scroll = $.NSScrollView.alloc.initWithFrame($.NSMakeRect(0, 0, width, height));
+  const scroll = $.SRCPPopupScrollView.alloc.initWithFrame($.NSMakeRect(0, 0, width, height));
   // Both scrollers, shown only when needed: long lines scroll sideways instead of wrapping
   // (wrapped lines would make the height estimate wrong and clip the end).
   scroll.hasVerticalScroller = true;
@@ -47,14 +66,10 @@ function run(argv) {
   alert.informativeText = "";
   alert.accessoryView = scroll;
   for (const b of buttons) alert.addButtonWithTitle(b);
-  // Escape (and Cmd-.) only map to a button titled "Cancel", and a button has one key, so
-  // Done keeps Return and a hidden Cancel takes Escape; it answers as Done (index 0).
-  alert.addButtonWithTitle("Cancel").hidden = true;
 
   if ($.NSProcessInfo.processInfo.environment.objectForKey("SRCP_POPUP_DRYRUN").js === "1") {
     return `dryrun ${width}x${height} lines=${lines.length} buttons=${buttons.length}`;
   }
   app.activateIgnoringOtherApps(true);
-  const index = alert.runModal - 1000;
-  return String(index === buttons.length ? 0 : index);
+  return String(alert.runModal - 1000);
 }

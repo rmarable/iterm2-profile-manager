@@ -35,7 +35,7 @@ from typing import IO, Any, TypeVar
 import iterm2
 from iterm2.capabilities import supports_context_menu_submenus_and_visibility
 
-VERSION = "0.6.4"  # bump on every change, so the Console shows which code is running
+VERSION = "0.6.5"  # bump on every change, so the Console shows which code is running
 DATA_DIR = os.path.expanduser("~/.local/share/iterm2-color-schemes")
 DB_PATH = os.path.join(DATA_DIR, "schemes.db")
 LOCK_PATH = os.path.join(DATA_DIR, ".lock")
@@ -711,6 +711,7 @@ async def save_dialog(
 
     info = await store.call(preset_info, preset, font)
     if info is None:
+        await db_failed_alert(connection, "Save/update this profile", window_id)
         return
     stats, stars = info
     lines = [f"{preset} ({mode})", f"{await store.call(font_label, font) or font} {size}"]
@@ -730,12 +731,17 @@ async def save_dialog(
     index = await alert.async_run(connection) - 1000
     choice = buttons[index] if 0 <= index < len(buttons) else CANCEL
     if not await apply_choice(app, store, choice, (preset, font, size)):
-        await iterm2.Alert(
-            "Save/update this profile",
-            f"{choice} didn't take: the database was busy or missing. Try again in a moment; "
-            "Scripts > Manage > Console has the details.",
-            window_id,
-        ).async_run(connection)
+        await db_failed_alert(connection, "Save/update this profile", window_id)
+
+
+async def db_failed_alert(connection: iterm2.Connection, title: str, window_id: str | None) -> None:
+    """Tell the user a dialog action was lost to a DB failure (store.call gave None)."""
+    await iterm2.Alert(
+        title,
+        "That didn't take: the database was busy or missing. Try again in a moment; "
+        "Scripts > Manage > Console has the details.",
+        window_id,
+    ).async_run(connection)
 
 
 async def remove_from_menu(
@@ -747,8 +753,11 @@ async def remove_from_menu(
     preset = await session.async_get_variable("user.color_preset")
     font = await session.async_get_variable("user.font")
     size = await session.async_get_variable("user.font_size") or DEFAULT_SIZE
+    window, _ = app.get_window_and_tab_for_session(session)
+    window_id = window.window_id if window else None
     if preset and font and await store.call(is_favorite, preset, font):
-        await apply_choice(app, store, REMOVE, (preset, font, size))
+        if not await apply_choice(app, store, REMOVE, (preset, font, size)):
+            await db_failed_alert(connection, "Remove from favorites", window_id)
         return
     # iTerm2 before API protocol 1.23 shows the item on every tab, so say why nothing happens.
     if preset and font:
@@ -756,10 +765,7 @@ async def remove_from_menu(
         text = f"{preset} with {label} isn't a favorite, so there's nothing to remove."
     else:
         text = "This tab wasn't colored by srcp_set_random_color_profile.py, so it has no favorite."
-    window, _ = app.get_window_and_tab_for_session(session)
-    await iterm2.Alert(
-        "Remove from favorites", text, window.window_id if window else None
-    ).async_run(connection)
+    await iterm2.Alert("Remove from favorites", text, window_id).async_run(connection)
 
 
 async def register_save_handlers(

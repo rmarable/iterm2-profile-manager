@@ -24,7 +24,15 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # works under python3 -I too
-from srcp_iterm_prefs import QUIT_FIRST, iterm_app, iterm_running, load_prefs, save_prefs
+from srcp_iterm_prefs import (
+    CUSTOM_FOLDER,
+    QUIT_FIRST,
+    custom_folder,
+    iterm_app,
+    iterm_running,
+    load_prefs,
+    save_prefs,
+)
 
 CC_STATUS_SRC = os.path.join(iterm_app(), "Contents/Resources/utilities/cc-status")
 CC_STATUS_LINK = os.path.expanduser("~/.config/iterm2/cc-status")
@@ -124,9 +132,12 @@ def add_hooks(dry):
     target = os.path.realpath(CLAUDE_SETTINGS)
     os.makedirs(os.path.dirname(target), exist_ok=True)
     tmp = f"{target}.partial"
+    with contextlib.suppress(FileNotFoundError):
+        os.remove(tmp)  # a stale one from a crash would keep its old (maybe looser) mode
     try:
         # Owner-only from the start (settings.json can hold secrets), then the old file's mode.
-        with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(settings, f, indent=2, ensure_ascii=False)
             f.write("\n")
         if os.path.exists(target):
@@ -190,6 +201,11 @@ def main():
         )
     if not args.dry_run and iterm_running():
         sys.exit(QUIT_FIRST)
+    folder = custom_folder(load_prefs())
+    if folder:  # before any write, not just at save_prefs: the link and hooks come first
+        if not args.dry_run:
+            sys.exit(CUSTOM_FOLDER.format(folder))
+        print(f"  ! {CUSTOM_FOLDER.format(folder)}")
 
     link_cc_status(args.dry_run)
     add_hooks(args.dry_run)
