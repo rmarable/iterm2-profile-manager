@@ -3,7 +3,8 @@
 #   1. install Terminal.app's bundled fonts (SF Mono, SF Mono Terminal)
 #   2. install MesloLGS Nerd Font with Homebrew, if brew exists
 #   3. clone (or update) iTerm2-Color-Schemes into $SRC_DIR (default ~/src)
-#   4. import every .itermcolors file as an iTerm2 color preset (no dialogs)
+#   4. import every .itermcolors file as an iTerm2 color preset (no dialogs), updating
+#      ones the repo changed since, unless you edited them
 #   5. build the light/dark scheme database the AutoLaunch script picks from
 #   6. bind Ctrl-Opt-Cmd-S to the "Save/update this profile" dialog
 #   7. install the scripts into iTerm2's Scripts folder, if this checkout isn't
@@ -20,7 +21,7 @@ for arg in "$@"; do
 	case "$arg" in
 	--dryrun | --dry-run) DRYRUN=true ;;
 	-h | --help)
-		sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
+		sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
 		exit 0
 		;;
 	*)
@@ -60,6 +61,15 @@ fi
 if ! $DRYRUN && ps -axo comm= | grep '/iTerm2$' >/dev/null; then
 	echo "iTerm2 is running. Quit it (Cmd-Q) and run this from Terminal.app." >&2
 	exit 1
+fi
+# iTerm2 set to load its settings from a custom folder or URL would overwrite our changes.
+if [[ "$(defaults read com.googlecode.iterm2 LoadPrefsFromCustomFolder 2>/dev/null || true)" == 1 ]]; then
+	folder="$(defaults read com.googlecode.iterm2 PrefsCustomFolder 2>/dev/null || echo "unknown location")"
+	echo "iTerm2 loads its settings from a custom folder or URL ($folder), so it would" >&2
+	echo "overwrite changes made here. In iTerm2, turn off Settings > General > Settings >" >&2
+	echo "Load settings from a custom folder or URL, quit it, run this again, then turn" >&2
+	echo "that setting back on and save the current settings to the folder." >&2
+	$DRYRUN || exit 1
 fi
 
 echo "==> Installing Terminal.app fonts"

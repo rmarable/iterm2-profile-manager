@@ -8,7 +8,8 @@
 # Only when asked:
 #   --data     export your curation to ~/srcp-curation-<time>.sql, then delete the
 #              scheme DB, its backups and launch history (~/.local/share/iterm2-color-schemes)
-#   --presets  remove color presets identical to the schemes repo's .itermcolors files
+#   --presets  remove color presets matching the schemes repo's .itermcolors files
+#              (current or earlier versions; ones you edited are kept)
 #   --fonts    remove Terminal.app fonts identical to Terminal's copies, and the
 #              MesloLGS Nerd Font Homebrew cask
 #   --repo     delete the iTerm2-Color-Schemes clone in $SRC_DIR (default ~/src)
@@ -29,7 +30,7 @@ for arg in "$@"; do
 	--repo) REPO=true ;;
 	--all) DATA=true PRESETS=true FONTS=true REPO=true ;;
 	-h | --help)
-		sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'
+		sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
 		exit 0
 		;;
 	*)
@@ -70,6 +71,15 @@ fi
 if ! $DRYRUN && ps -axo comm= | grep '/iTerm2$' >/dev/null; then
 	echo "iTerm2 is running. Quit it (Cmd-Q) and run this from Terminal.app." >&2
 	exit 1
+fi
+# iTerm2 set to load its settings from a custom folder or URL would overwrite our changes.
+if [[ "$(defaults read com.googlecode.iterm2 LoadPrefsFromCustomFolder 2>/dev/null || true)" == 1 ]]; then
+	folder="$(defaults read com.googlecode.iterm2 PrefsCustomFolder 2>/dev/null || echo "unknown location")"
+	echo "iTerm2 loads its settings from a custom folder or URL ($folder), so it would" >&2
+	echo "overwrite changes made here. In iTerm2, turn off Settings > General > Settings >" >&2
+	echo "Load settings from a custom folder or URL, quit it, run this again, then turn" >&2
+	echo "that setting back on and save the current settings to the folder." >&2
+	$DRYRUN || exit 1
 fi
 
 echo "==> AutoLaunch script"

@@ -70,7 +70,7 @@ Setup changes iTerm2's settings, and iTerm2 overwrites them when it quits, so ru
 1. Copies SF Mono and SF Mono Terminal from Terminal.app into `~/Library/Fonts`.
 2. Installs MesloLGS Nerd Font via Homebrew, if installed.
 3. Clones or updates iTerm2-Color-Schemes in `~/src/iTerm2-Color-Schemes` (set `SRC_DIR` to use another folder).
-4. Imports its schemes as iTerm2 color presets. Existing presets are left alone.
+4. Imports its schemes as iTerm2 color presets, and updates ones the repo has changed since, unless you've edited them.
 5. Builds the database the main script picks from.
 6. Binds ⌃⌥⌘S to the rating dialog.
 7. Copies the scripts into iTerm2's Scripts folder.
@@ -99,7 +99,7 @@ Quit iTerm2, then from Terminal.app in the repo:
 
 ```sh
 git pull
-./setup.sh   # pulls the schemes repo, imports new presets, rebuilds the database, copies the scripts
+./setup.sh   # pulls the schemes repo, imports new and changed presets, rebuilds the database, copies the scripts
 ```
 
 Relaunch iTerm2. If the repo is the Scripts folder, `git pull` alone updates the scripts; restart the main script from the Scripts menu, or relaunch iTerm2.
@@ -121,7 +121,7 @@ Quit iTerm2, then from Terminal.app in the repo:
 | Favorite profiles file | (default) |
 | ⌃⌥⌘S key binding (settings backed up first) | (default) |
 | Database, snapshots, launch history (ratings exported to `~/srcp-curation-<time>.sql` first) | `--data` |
-| Presets identical to the repo's files | `--presets` |
+| Presets matching the repo's files, current or earlier versions (edited ones are kept) | `--presets` |
 | Copied Terminal.app fonts; MesloLGS Homebrew package | `--fonts` |
 | iTerm2-Color-Schemes clone | `--repo` |
 
@@ -143,6 +143,7 @@ Kept: this repo, iTerm2 settings backups, shell config, and the Claude Code inte
 | Console: `database is locked` | A rebuild or open `sqlite3` transaction held the lock over 5 s. That launch isn't logged; no action needed. |
 | `srcp_build_scheme_db.py`: `schemes.db is missing but its -wal/-shm files are still there` | Delete `schemes.db-wal` and `schemes.db-shm`, or restore a snapshot. |
 | A tool says iTerm2 is running | Quit iTerm2 (⌘Q) and run the tool from Terminal.app. |
+| Setup says iTerm2 loads its settings from a custom folder | iTerm2 would overwrite the changes. Turn off Settings → General → Settings → **Load settings from a custom folder or URL**, run setup, then turn it back on and save the current settings to the folder. |
 
 ## More
 

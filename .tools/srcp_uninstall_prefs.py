@@ -3,8 +3,9 @@
 
 Removes every GlobalKeyMap entry that invokes save_profile(). With --presets DIR, also
 removes each Custom Color Preset whose name and contents match a DIR/*.itermcolors
-file exactly, so presets you've edited, or imported from elsewhere, stay. One backup,
-one write.
+file, now or at any earlier commit of the repo (setup.sh imported it and the repo has
+changed it since), so presets you've edited, or imported from elsewhere, stay. One
+backup, one write.
 
 Run from Terminal.app with iTerm2 quit (--dryrun works any time):
     python3 .tools/srcp_uninstall_prefs.py [--dryrun] [--presets ~/src/iTerm2-Color-Schemes/schemes]
@@ -13,11 +14,11 @@ Run from Terminal.app with iTerm2 quit (--dryrun works any time):
 import argparse
 import glob
 import os
-import plistlib
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # works under python3 -I too
 from srcp_iterm_prefs import QUIT_FIRST, iterm_running, load_prefs, save_prefs
+from srcp_preset_history import from_repo, repo_root
 
 KEY_MAP = "GlobalKeyMap"
 PRESETS = "Custom Color Presets"
@@ -45,17 +46,17 @@ def remove_presets(prefs, schemes_dir):
     if not files:
         print(f"  (skipped presets: no .itermcolors files in {schemes_dir})")
         return False
+    root = repo_root(os.path.dirname(files[0]))
     removed, edited = [], []
     for path in files:
         name = os.path.basename(path)[: -len(".itermcolors")]
         if name not in presets:
             continue
-        with open(path, "rb") as f:
-            if presets[name] == plistlib.load(f):
-                removed.append(name)
-                del presets[name]
-            else:
-                edited.append(name)
+        if from_repo(presets[name], path, root):
+            removed.append(name)
+            del presets[name]
+        else:
+            edited.append(name)
     print(f"  - {len(removed)} color presets matching {schemes_dir}")
     if edited:
         print(

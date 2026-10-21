@@ -201,7 +201,7 @@ Equivalent to `setup.sh`, minus fonts:
 
 ```sh
 git clone https://github.com/mbadolato/iTerm2-Color-Schemes.git ~/src/iTerm2-Color-Schemes
-python3 .tools/srcp_import_presets.py ~/src/iTerm2-Color-Schemes/schemes   # iTerm2 must be quit; --overwrite replaces existing presets
+python3 .tools/srcp_import_presets.py ~/src/iTerm2-Color-Schemes/schemes   # iTerm2 must be quit; --overwrite also replaces presets you've edited
 python3 .tools/srcp_build_scheme_db.py                                     # safe with iTerm2 open
 python3 .tools/srcp_add_key_binding.py                                     # iTerm2 must be quit
 mkdir -p ~/Library/Application\ Support/iTerm2/Scripts/AutoLaunch
@@ -244,7 +244,7 @@ Double-clicking an `.itermcolors` file also imports it, with one dialog per file
 | `.tools/srcp_popup.js` | Draws the ratings window for `srcp_ratings.py`. |
 | `.tools/srcp_export_curation.py` | Exports ratings and settings as SQL. |
 | `.tools/srcp_uninstall_prefs.py` | Removes the key binding and presets from iTerm2's settings (used by `uninstall.sh`). |
-| `.tools/srcp_iterm_prefs.py`, `.tools/srcp_db_backup.py` | Shared helpers: iTerm2 settings access, snapshots. |
+| `.tools/srcp_iterm_prefs.py`, `.tools/srcp_db_backup.py`, `.tools/srcp_preset_history.py` | Shared helpers: iTerm2 settings access, snapshots, past versions of the repo's presets. |
 | `.tools/srcp_enable_claude_integration.py` | See [Claude Code integration](#claude-code-integration-optional). |
 | `lint.sh`, `pyproject.toml`, `AutoLaunch/ruff.toml` | Lint and type checks. |
 
