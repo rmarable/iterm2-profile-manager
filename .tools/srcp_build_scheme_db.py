@@ -478,6 +478,7 @@ def main():
         help="print the counts without writing anything",
     )
     args = ap.parse_args()
+    args.db = os.path.abspath(os.path.expanduser(args.db))  # a bare "t.db" has no dirname
 
     presets = load_prefs().get(KEY, {})
     if not presets:
@@ -492,6 +493,18 @@ def main():
             f"write into them. Delete {args.db}-wal and {args.db}-shm, or restore a backup."
         )
 
+    if os.path.exists(args.db):
+        db = sqlite3.connect(args.db)
+        try:
+            version = db.execute("PRAGMA user_version").fetchone()[0]
+        finally:
+            db.close()
+        if version > len(MIGRATIONS):  # a rebuild here would recreate schemes in an older shape
+            sys.exit(
+                f"{args.db} is schema {version}, newer than this script ({len(MIGRATIONS)}). "
+                "Update this checkout (git pull) and run it again."
+            )
+
     rows, report = build_rows(presets, args.repo)
     print_report(rows, report)
     if args.dry_run:
@@ -500,7 +513,15 @@ def main():
     backup = snapshot(args.db)
     if backup:
         print(f"Backup: {backup}")
-    write_db(args.db, rows)
+    try:
+        write_db(args.db, rows)
+    except sqlite3.OperationalError as e:
+        if "locked" not in str(e):
+            raise
+        sys.exit(
+            f"{args.db} is locked (another sqlite3 session or a long write?). "
+            "Nothing was changed; run this again."
+        )
     warn_included_duplicates(args.db)
     print(f"Wrote {args.db}")
 

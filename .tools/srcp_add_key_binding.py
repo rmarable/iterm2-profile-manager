@@ -18,7 +18,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # works under python3 -I too
 from srcp_iterm_prefs import QUIT_FIRST, iterm_running, load_prefs, save_prefs
 
-APP = os.environ.get("ITERM_APP", "/Applications/iTerm.app")
+APP_DIRS = ["/Applications/iTerm.app", os.path.expanduser("~/Applications/iTerm.app")]
+APP = os.environ.get("ITERM_APP") or next((d for d in APP_DIRS if os.path.isdir(d)), APP_DIRS[0])
 DEFAULT_MAP = os.path.join(APP, "Contents/Resources/DefaultGlobalKeyMap.plist")
 KEY_MAP = "GlobalKeyMap"
 
@@ -51,7 +52,7 @@ def main():
             sys.exit(
                 f"{KEY_MAP} isn't set and {DEFAULT_MAP} is missing, so adding a key "
                 "would drop iTerm2's default bindings. Add it by hand in Settings > Keys "
-                "(set ITERM_APP if iTerm2 isn't in /Applications)."
+                "(set ITERM_APP if iTerm2 isn't in /Applications or ~/Applications)."
             )
         with open(DEFAULT_MAP, "rb") as f:
             keymap = plistlib.load(f)

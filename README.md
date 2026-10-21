@@ -137,7 +137,7 @@ Kept: this repo, iTerm2 settings backups, shell config, and the Claude Code inte
 | Most presets show your default profile's colors | Settings → Profiles → Colors: turn off **Use separate colors for light and dark mode** (few presets define both). |
 | Always light, or always dark | Settings → Appearance → Theme: **Automatic** or **Minimal**. |
 | Console: `another copy is already running; exiting` | Expected after a restart; a lock allows one copy. |
-| A font never appears | Disabled or not installed: `select name, enabled from fonts`. Relaunch iTerm2 after installing a font. |
+| A font never appears | Disabled or not installed: `select name, enabled from fonts`. A font that was missing at setup stays disabled after you install it: `update fonts set enabled = 1 where name = '<name>'`, then relaunch iTerm2. |
 | A favorite is missing from the Profiles menu | Preset not installed, or marked **Never show**. |
 | ⌃⌥⌘S does nothing | Check Settings → Keys → Key Bindings for `save_profile()`, and the Console for the main script's startup line. |
 | Console: `database is locked` | A rebuild or open `sqlite3` transaction held the lock over 5 s. That launch isn't logged; no action needed. |

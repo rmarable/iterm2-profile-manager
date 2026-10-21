@@ -69,6 +69,8 @@ def export(db, out):
     )
     out.write(f"CREATE TEMP TABLE srcp_schema_check (v INTEGER CHECK (v >= {version}));\n")
     out.write("INSERT INTO srcp_schema_check SELECT user_version FROM pragma_user_version;\n")
+    # Dropped again so a second export can be read in the same sqlite3 session.
+    out.write("DROP TABLE srcp_schema_check;\n")
     out.write("BEGIN;\n")
     for table in TABLES:
         cols = [r[1] for r in db.execute(f'PRAGMA table_info("{table}")')]

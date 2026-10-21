@@ -35,7 +35,7 @@ from typing import IO, Any, TypeVar
 import iterm2
 from iterm2.capabilities import supports_context_menu_submenus_and_visibility
 
-VERSION = "0.6.2"  # bump on every change, so the Console shows which code is running
+VERSION = "0.6.3"  # bump on every change, so the Console shows which code is running
 DATA_DIR = os.path.expanduser("~/.local/share/iterm2-color-schemes")
 DB_PATH = os.path.join(DATA_DIR, "schemes.db")
 LOCK_PATH = os.path.join(DATA_DIR, ".lock")
@@ -291,7 +291,9 @@ def log_rating(
         ).fetchone()
         previous = row[0] if row else None
     db.execute(
-        "INSERT INTO ratings (at, preset, font, action, stars, previous_stars) "
+        # OR IGNORE: a second event for the same look in the same second would hit the
+        # ratings_event unique index and roll back the whole save; history is best-effort.
+        "INSERT OR IGNORE INTO ratings (at, preset, font, action, stars, previous_stars) "
         "VALUES (?, ?, ?, ?, ?, ?)",
         (now(), preset, font, action, stars, previous),
     )
@@ -300,8 +302,15 @@ def log_rating(
 def save_favorite(db: sqlite3.Connection, preset: str, font: str, size: float, stars: int) -> bool:
     db.execute("BEGIN IMMEDIATE")  # Store.call rolls back if anything below fails
     # Starring a preset marked Never show (e.g. in a tab opened before) unhides it;
-    # otherwise the favorite would never be picked or get a profile.
-    db.execute("DELETE FROM overrides WHERE name = ? AND include = 0", (preset,))
+    # otherwise the favorite would never be picked or get a profile. Update rather than
+    # delete, so a mode override survives; one that fails the gate is forced in (include 1),
+    # since rating it says it's wanted (and it may have been a seeded near-miss).
+    db.execute(
+        "UPDATE overrides SET include = CASE WHEN "
+        "(SELECT passes_gate FROM schemes WHERE name = ?) = 0 THEN 1 END "
+        "WHERE name = ? AND include = 0",
+        (preset, preset),
+    )
     log_rating(db, preset, font, "save", stars)
     db.execute(
         "INSERT INTO favorites (preset, font, size, stars, saved_at) VALUES (?, ?, ?, ?, ?) "
@@ -361,7 +370,10 @@ def sync_profiles(db: sqlite3.Connection) -> int | None:
     """Write one iTerm2 profile per favorite; return the count, or None if unchanged."""
     prefs = plistlib.loads(
         subprocess.run(
-            ["defaults", "export", "com.googlecode.iterm2", "-"], capture_output=True, check=True
+            ["defaults", "export", "com.googlecode.iterm2", "-"],
+            capture_output=True,
+            check=True,
+            timeout=30,
         ).stdout
     )
     presets = prefs.get("Custom Color Presets", {})
@@ -617,7 +629,11 @@ async def color_session(
 
 
 async def sync_and_log(store: Store) -> None:
-    count = await store.call(sync_if_changed)
+    try:
+        count = await store.call(sync_if_changed)
+    except Exception as e:  # e.g. defaults export failed: profiles are optional, coloring isn't
+        log("warn", f"favorite profiles not updated: {e!r}")
+        return
     if count is not None:
         log("info", f"favorite profiles: {count} in {DYNAMIC_PATH}")
 
@@ -701,8 +717,9 @@ async def save_dialog(
     if stars:
         lines.append(f"Saved now with {STAR_BUTTONS[stars - 1]}.")
     alert = iterm2.Alert("Save/update this profile", "\n".join(lines), window_id)
-    # Remove favorite only appears when this (preset, font) is a favorite.
-    buttons = [*STAR_BUTTONS, *([REMOVE] if stars else []), NEVER, CANCEL]
+    # Remove favorite only appears when this (preset, font) is a favorite. Cancel goes first:
+    # the first button is the default, so Return closes the dialog instead of saving 1 star.
+    buttons = [CANCEL, *STAR_BUTTONS, *([REMOVE] if stars else []), NEVER]
     for b in buttons:
         alert.add_button(b)
     index = await alert.async_run(connection) - 1000
@@ -760,15 +777,15 @@ async def register_save_handlers(
         start(f"save:{session_id}", save_dialog(connection, app, store, session_id))
 
     @iterm2.RPC
-    async def save_profile(session_id: str = iterm2.Reference("id")) -> None:  # pyright: ignore[reportArgumentType]
+    async def save_profile(session_id: str = iterm2.Reference("id")) -> None:  # pyright: ignore[reportArgumentType]  # Reference resolves to the id at call time
         start_dialog(session_id)
 
     @iterm2.ContextMenuProviderRPC
-    async def save_profile_menu(session_id: str = iterm2.Reference("id")) -> None:  # pyright: ignore[reportArgumentType]
+    async def save_profile_menu(session_id: str = iterm2.Reference("id")) -> None:  # pyright: ignore[reportArgumentType]  # Reference resolves to the id at call time
         start_dialog(session_id)
 
     @iterm2.ContextMenuProviderRPC
-    async def remove_favorite_menu(session_id: str = iterm2.Reference("id")) -> None:  # pyright: ignore[reportArgumentType]
+    async def remove_favorite_menu(session_id: str = iterm2.Reference("id")) -> None:  # pyright: ignore[reportArgumentType]  # Reference resolves to the id at call time
         start(f"remove:{session_id}", remove_from_menu(connection, app, store, session_id))
 
     await save_profile.async_register(connection)

@@ -81,16 +81,23 @@ def link_cc_status(dry):
     if dry:
         return
     os.makedirs(os.path.dirname(CC_STATUS_LINK), exist_ok=True)
-    if os.path.lexists(CC_STATUS_LINK):
+    if os.path.islink(CC_STATUS_LINK):
         os.remove(CC_STATUS_LINK)
+    elif os.path.lexists(CC_STATUS_LINK):  # a real file: keep it rather than delete it
+        backup = f"{CC_STATUS_LINK}.backup-{stamp()}"
+        os.rename(CC_STATUS_LINK, backup)
+        print(f"  (moved the existing file to {backup})")
     os.symlink(CC_STATUS_SRC, CC_STATUS_LINK)
 
 
 def add_hooks(dry):
     settings = {}
     if os.path.exists(CLAUDE_SETTINGS):
-        with open(CLAUDE_SETTINGS) as f:
-            settings = json.load(f)
+        with open(CLAUDE_SETTINGS, encoding="utf-8") as f:
+            try:
+                settings = json.load(f)
+            except json.JSONDecodeError as e:
+                sys.exit(f"{CLAUDE_SETTINGS} isn't valid JSON ({e}); fix it and run this again.")
     hooks = settings.setdefault("hooks", {})
 
     added = []
@@ -112,10 +119,15 @@ def add_hooks(dry):
         return
     if os.path.exists(CLAUDE_SETTINGS):
         shutil.copy2(CLAUDE_SETTINGS, f"{CLAUDE_SETTINGS}.backup-{stamp()}")
-    os.makedirs(os.path.dirname(CLAUDE_SETTINGS), exist_ok=True)
-    with open(CLAUDE_SETTINGS, "w") as f:
-        json.dump(settings, f, indent=2)
+    # Write a temp file and rename it over the real one (through a symlink, e.g. dotfiles),
+    # so a crash can't leave a half-written settings file.
+    target = os.path.realpath(CLAUDE_SETTINGS)
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    tmp = f"{target}.partial"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(settings, f, indent=2, ensure_ascii=False)
         f.write("\n")
+    os.replace(tmp, target)
 
 
 def has_trigger(existing, trig):

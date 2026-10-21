@@ -34,8 +34,11 @@ def contrast_ratio(rgb1, rgb2):
 
 
 async def score_preset(connection, name):
-    preset = await iterm2.ColorPreset.async_get(connection, name)
-    if not preset:
+    try:
+        preset = await iterm2.ColorPreset.async_get(connection, name)
+    except (iterm2.GetPresetException, iterm2.ListPresetsException):  # e.g. deleted meanwhile
+        return None
+    if preset is None:  # typed Optional, though the module raises instead
         return None
 
     colors = {}

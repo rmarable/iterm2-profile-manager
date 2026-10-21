@@ -110,7 +110,11 @@ echo "==> Building scheme database"
 python3 "$HERE/.tools/srcp_build_scheme_db.py" "${DRY_FLAG[@]+"${DRY_FLAG[@]}"}" --repo "$REPO_DIR"
 
 echo "==> Key binding: Ctrl-Opt-Cmd-S saves the current profile"
-python3 "$HERE/.tools/srcp_add_key_binding.py" "${DRY_FLAG[@]+"${DRY_FLAG[@]}"}"
+# Optional: a failure here must not stop the scripts from being installed below.
+if ! python3 "$HERE/.tools/srcp_add_key_binding.py" "${DRY_FLAG[@]+"${DRY_FLAG[@]}"}"; then
+	echo "  (key binding skipped; add it in Settings > Keys > Key Bindings: Ctrl-Opt-Cmd-S," \
+		"action Invoke Script Function, function save_profile())"
+fi
 
 if [[ "$HERE" != "$(cd "$SCRIPTS_DIR" 2>/dev/null && pwd -P || echo "$SCRIPTS_DIR")" ]]; then
 	echo "==> Installing scripts into $SCRIPTS_DIR"

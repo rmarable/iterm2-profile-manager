@@ -86,7 +86,7 @@ sqlite3 ~/.local/share/iterm2-color-schemes/schemes.db
 | `colorful_weight` | `3` | Discovery weight of colored-background presets (OKLab chroma ≥ 0.05). `1` = no preference. |
 | `nonascii_font` | `MesloLGSNFM-Regular` | Font for icons and other non-ASCII characters. `''` keeps the profile's setting. |
 
-Default fonts: SF Mono, Menlo, Monaco, MesloLGS Nerd Font Mono. Fonts that aren't installed start disabled.
+Default fonts: SF Mono, Menlo, Monaco, MesloLGS Nerd Font Mono. Fonts that aren't installed start disabled and stay disabled after you install them; enable one with `update fonts set enabled = 1 where name = '<name>'`.
 
 ```sql
 update config set value = '0.7' where key = 'favorite_share';

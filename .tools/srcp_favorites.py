@@ -54,7 +54,10 @@ def local(utc, fmt="%Y-%m-%d %H:%M"):
     """DB times are UTC ('2026-10-18 01:19:05'); show them in local time."""
     if not utc:
         return ""
-    when = dt.datetime.strptime(utc, "%Y-%m-%d %H:%M:%S").replace(tzinfo=dt.timezone.utc)
+    try:
+        when = dt.datetime.strptime(utc, "%Y-%m-%d %H:%M:%S").replace(tzinfo=dt.timezone.utc)
+    except ValueError:  # e.g. a row edited by hand in sqlite3: show it as stored
+        return utc
     return when.astimezone().strftime(fmt)
 
 
@@ -77,7 +80,7 @@ def has_table(db, name):
     return db.execute("SELECT 1 FROM sqlite_master WHERE name = ?", (name,)).fetchone()
 
 
-def show_favorites(db, mode, min_stars):
+def show_favorites(db, mode, min_stars, cli_hints=True):
     rows = db.execute(FAVORITES, (min_stars, mode, mode)).fetchall()
     if not rows:
         print("No favorites match." if mode or min_stars > 1 else "No favorites yet.")
@@ -91,7 +94,8 @@ def show_favorites(db, mode, min_stars):
     )
     hidden = db.execute("SELECT count(*) FROM overrides WHERE include = 0").fetchone()[0]
     noun = "favorite" if len(rows) == 1 else "favorites"
-    print(f"\n{len(rows)} {noun}. {hidden} hidden (--hidden). Rating history: --history.")
+    hints = " (--hidden). Rating history: --history." if cli_hints else "."
+    print(f"\n{len(rows)} {noun}. {hidden} hidden{hints}")
 
 
 def show_history(db, limit):

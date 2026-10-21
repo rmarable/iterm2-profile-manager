@@ -43,7 +43,7 @@ def render(report: ModuleType, db: sqlite3.Connection, view: str) -> str:
     with contextlib.redirect_stdout(out):
         try:
             if view == "Favorites":
-                report.show_favorites(db, None, 1)
+                report.show_favorites(db, None, 1, cli_hints=False)  # the window has buttons
             elif view == "History":
                 report.show_history(db, HISTORY_ROWS)
             else:
@@ -100,7 +100,11 @@ async def main(connection: iterm2.Connection) -> None:
     view = "Favorites"
     while True:
         others = [v for v in ("Favorites", "History", "Hidden") if v != view]
-        choice = await popup(f"srcp ratings: {view}", view_text(report, view), [DONE, *others])
+        try:
+            text = view_text(report, view)
+        except Exception as e:  # show it in the window: the Console is easy to miss
+            text = f"Couldn't read the database: {e!r}"
+        choice = await popup(f"srcp ratings: {view}", text, [DONE, *others])
         if choice == DONE:
             return
         view = choice

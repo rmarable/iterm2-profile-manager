@@ -18,7 +18,7 @@ There is no warranty, no support commitment, and no guarantee it works on your M
 | `~/.local/share/iterm2-color-schemes/` (database) | the scripts | Yes, rolling snapshots |
 | `~/.claude/settings.json`, every iTerm2 profile's triggers | `.tools/srcp_enable_claude_integration.py`, only if you run it | Yes |
 
-`./uninstall.sh` undoes these (see the README). Keep your own backup of anything you care about.
+`./uninstall.sh` undoes all of these except the last row; [docs/REFERENCE.md](docs/REFERENCE.md#claude-code-integration-optional) says how to undo that by hand. Keep your own backup of anything you care about.
 
 ## Third-party software and content
 
