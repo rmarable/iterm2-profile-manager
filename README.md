@@ -5,15 +5,15 @@
 - Do you hate how limited Terminal's colors are?
 - Are you bored with the iTerm2 defaults?
 
-Every new iTerm2 tab, window or split pane opens with its own color scheme and font. Run Claude Code in one tab, a build in another and SSH in a third, and you can tell them apart at a glance.
+Every new iTerm2 tab, window and split pane gets a random color preset and font. With several Claude Code or Codex sessions open, each one looks different, so you're less likely to type into the wrong one.
 
-Schemes come from the 800+ in [iTerm2-Color-Schemes](https://github.com/mbadolato/iTerm2-Color-Schemes). Light ones show up when macOS is in Light Mode, dark ones in Dark Mode, and the hard-to-read ones (about 5%) are skipped.
+The presets come from [iTerm2-Color-Schemes](https://github.com/mbadolato/iTerm2-Color-Schemes) (800+). Light presets are used when macOS is in Light Mode and dark ones in Dark Mode. About 5% are hard to read and never get picked.
 
-Like what you got? Press ⌃⌥⌘S and give it up to five stars. It comes back more often, and it's saved under **Profiles → Favorites** so you can open it any time. Can't stand it? Click **Never show** and you won't see it again.
+Press ⌃⌥⌘S to rate the current preset and font from 1 to 5 stars. Rated combinations come up more often and are saved as profiles under **Profiles → Favorites**. **Never show** in the same dialog removes a preset for good.
 
 ![One iTerm2 window split three ways: two Claude Code sessions and a shell, each with its own color scheme](images/profile-chooser.jpg)
 
-It only changes how iTerm2 sessions look. Your shell, prompt and AI tools are untouched. Setup is one script and takes about five minutes.
+Only iTerm2's colors and fonts change. Your shell and prompt are left alone. Installation is a single script.
 
 ## Why it helps with AI agents
 
