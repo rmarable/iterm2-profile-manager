@@ -148,6 +148,10 @@ fi
 
 if $FONTS; then
 	echo "==> Terminal.app fonts in $FONT_DIR (only identical copies)"
+	# Not grep -q: with pipefail, an early exit can turn defaults' SIGPIPE into "no match".
+	if defaults read com.googlecode.iterm2 "New Bookmarks" 2>/dev/null | grep SFMono >/dev/null; then
+		echo "  ! an iTerm2 profile still uses SF Mono; change its font after this"
+	fi
 	if [[ -d "$TERMINAL_FONTS" ]]; then
 		for src in "$TERMINAL_FONTS"/*; do
 			[[ -e "$src" ]] || continue # empty folder: the glob stays literal
@@ -184,6 +188,6 @@ $DRYRUN && exit 0
 cat <<'EOF'
 
 Done. Relaunch iTerm2. Sessions it colored keep their colors until closed.
-Not touched: this checkout, prefs backups (~/Library/Preferences/com.googlecode.iterm2.backup-*),
+Not touched: this checkout, prefs backups (~/.local/share/iterm2-profile-manager/prefs-backups),
 the Claude Code integration, and your shell config.
 EOF

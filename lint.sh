@@ -1,5 +1,5 @@
 #!/bin/bash
-# Format check, lint and type check everything (settings in pyproject.toml):
+# Format check, lint, type check and test everything (settings in pyproject.toml):
 #   ./lint.sh          # check only
 #   ./lint.sh --fix    # apply ruff format and safe ruff fixes first
 # Needs uv (https://docs.astral.sh/uv/) for uvx, and shellcheck (brew install shellcheck).
@@ -36,4 +36,13 @@ printf '{"pythonVersion": "3.9", "typeCheckingMode": "standard"}\n' >"$tools_tmp
 rm -rf "$tools_tmp"
 echo "==> shellcheck"
 shellcheck setup.sh uninstall.sh lint.sh || status=1
+# Database-layer tests, against a temp folder (never the real DB or iTerm2's settings).
+echo "==> tests"
+if [[ -x "$ITERM_PY" ]]; then
+	# -W: the iterm2 module imports websockets.legacy, which warns on every run.
+	"$ITERM_PY" -W "ignore:websockets.legacy is deprecated:DeprecationWarning" \
+		-m unittest discover -s .tests -p 'srcp_test_*.py' || status=1
+else
+	echo "  (skipped: iTerm2's Python runtime not found at $ITERM_PY)"
+fi
 exit "$status"

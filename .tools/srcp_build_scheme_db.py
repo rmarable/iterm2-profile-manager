@@ -414,7 +414,9 @@ def build_rows(presets, repo):
                 int(passes),
                 int(in_repo),
                 h,
-                None if in_repo else repo_hashes.get(h),
+                # An old spelling of a repo scheme, or the repo's own identical twin
+                # (e.g. Zenbones = Zenbones Light): only the first repo name is picked.
+                twin if (twin := repo_hashes.get(h)) != name else None,
                 c["bg_chroma"],
             )
         )
@@ -442,7 +444,7 @@ def print_report(rows, report):
         f"gate fails: text contrast {f['text']}, faint accents {f['accent']}, "
         f"repeated accents {f['distinct']}"
     )
-    print(f"repo duplicates (old spellings): {sum(r[10] is not None for r in rows)}")
+    print(f"duplicates (old spellings, repo twins): {sum(r[10] is not None for r in rows)}")
     for name in report["skipped"]:
         print(f"[warn] skipped {name!r}: missing ANSI/fg/bg colors")
     for font, files in SEED_FONTS.items():
@@ -457,7 +459,7 @@ def warn_included_duplicates(path):
             "SELECT s.name, s.duplicate_of FROM schemes s JOIN overrides o ON o.name = s.name "
             "WHERE o.include = 1 AND s.duplicate_of IS NOT NULL"
         ):
-            print(f"[warn] overrides includes {name!r}, an old spelling of {twin!r}: include that")
+            print(f"[warn] overrides includes {name!r}, a duplicate of {twin!r}: include that")
     finally:
         db.close()
 
@@ -480,13 +482,6 @@ def main():
     args = ap.parse_args()
     args.db = os.path.abspath(os.path.expanduser(args.db))  # a bare "t.db" has no dirname
 
-    presets = load_prefs().get(KEY, {})
-    if not presets:
-        msg = f"No {KEY!r} in iTerm2's prefs. Import presets first (.tools/srcp_import_presets.py)."
-        if args.dry_run:  # e.g. setup.sh --dryrun on a fresh Mac, before any import
-            print(f"  (skipped: {msg})")
-            return
-        sys.exit(msg)
     if not os.path.exists(args.db) and any(os.path.exists(args.db + s) for s in ("-wal", "-shm")):
         sys.exit(
             f"{args.db} is missing but its -wal/-shm files are still there, so a build would "
@@ -504,6 +499,15 @@ def main():
                 f"{args.db} is schema {version}, newer than this script ({len(MIGRATIONS)}). "
                 "Update this checkout (git pull) and run it again."
             )
+
+    # The DB checks above come first: they need no prefs and fail fast.
+    presets = load_prefs().get(KEY, {})
+    if not presets:
+        msg = f"No {KEY!r} in iTerm2's prefs. Import presets first (.tools/srcp_import_presets.py)."
+        if args.dry_run:  # e.g. setup.sh --dryrun on a fresh Mac, before any import
+            print(f"  (skipped: {msg})")
+            return
+        sys.exit(msg)
 
     rows, report = build_rows(presets, args.repo)
     print_report(rows, report)

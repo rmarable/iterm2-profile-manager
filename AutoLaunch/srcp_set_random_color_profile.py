@@ -35,7 +35,7 @@ from typing import IO, Any, TypeVar
 import iterm2
 from iterm2.capabilities import supports_context_menu_submenus_and_visibility
 
-VERSION = "0.6.3"  # bump on every change, so the Console shows which code is running
+VERSION = "0.6.4"  # bump on every change, so the Console shows which code is running
 DATA_DIR = os.path.expanduser("~/.local/share/iterm2-color-schemes")
 DB_PATH = os.path.join(DATA_DIR, "schemes.db")
 LOCK_PATH = os.path.join(DATA_DIR, ".lock")
@@ -657,23 +657,28 @@ async def favorites_changed(app: iterm2.App, store: Store, preset: str) -> None:
 
 async def apply_choice(
     app: iterm2.App, store: Store, choice: str, look: tuple[str, str, float]
-) -> None:
-    """look: (preset, font, size) of the session the choice was made in."""
+) -> bool:
+    """look: (preset, font, size) of the session the choice was made in.
+
+    Returns False if the DB call failed (store.call gives None: locked, missing, ...), so the
+    caller can tell the user; a legitimate "nothing to do" (False from the call) is True here.
+    """
     preset, font, size = look
-    done = False
+    result: bool | None = False
     if choice in STAR_BUTTONS:
         rating = STAR_BUTTONS.index(choice) + 1
-        if done := bool(await store.call(save_favorite, preset, font, size, rating)):
+        if result := await store.call(save_favorite, preset, font, size, rating):
             log("info", f"saved favorite {rating} ★: {preset} | {font} {size}")
     elif choice == REMOVE:
-        if done := bool(await store.call(remove_favorite, preset, font)):
+        if result := await store.call(remove_favorite, preset, font):
             log("info", f"removed favorite: {preset} | {font} {size}")
-        else:
+        elif result is not None:
             log("info", f"not a favorite, nothing removed: {preset} | {font} {size}")
-    elif choice == NEVER and (done := bool(await store.call(never_show, preset))):
+    elif choice == NEVER and (result := await store.call(never_show, preset)):
         log("info", f"never show: {preset}")
-    if done:
+    if result:
         await favorites_changed(app, store, preset)
+    return result is not None
 
 
 async def save_dialog(
@@ -724,7 +729,13 @@ async def save_dialog(
         alert.add_button(b)
     index = await alert.async_run(connection) - 1000
     choice = buttons[index] if 0 <= index < len(buttons) else CANCEL
-    await apply_choice(app, store, choice, (preset, font, size))
+    if not await apply_choice(app, store, choice, (preset, font, size)):
+        await iterm2.Alert(
+            "Save/update this profile",
+            f"{choice} didn't take: the database was busy or missing. Try again in a moment; "
+            "Scripts > Manage > Console has the details.",
+            window_id,
+        ).async_run(connection)
 
 
 async def remove_from_menu(

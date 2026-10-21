@@ -133,7 +133,7 @@ def show_hidden(db):
         print("No hidden presets.")
         return
     table(["Preset", "Mode", "Hidden"], [(n, m, local(at)) for n, m, at in rows])
-    print("\nUnhide: delete from overrides where name = '<preset>';")
+    print("\nUnhide: update overrides set include = null where name = '<preset>';")
 
 
 def main():

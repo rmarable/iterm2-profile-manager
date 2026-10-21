@@ -16,11 +16,9 @@ import plistlib
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # works under python3 -I too
-from srcp_iterm_prefs import QUIT_FIRST, iterm_running, load_prefs, save_prefs
+from srcp_iterm_prefs import QUIT_FIRST, iterm_app, iterm_running, load_prefs, save_prefs
 
-APP_DIRS = ["/Applications/iTerm.app", os.path.expanduser("~/Applications/iTerm.app")]
-APP = os.environ.get("ITERM_APP") or next((d for d in APP_DIRS if os.path.isdir(d)), APP_DIRS[0])
-DEFAULT_MAP = os.path.join(APP, "Contents/Resources/DefaultGlobalKeyMap.plist")
+DEFAULT_MAP = os.path.join(iterm_app(), "Contents/Resources/DefaultGlobalKeyMap.plist")
 KEY_MAP = "GlobalKeyMap"
 
 # 0x<character>-0x<modifiers>-0x<keycode>-0x1, as in iterm2.KeyBinding.key:

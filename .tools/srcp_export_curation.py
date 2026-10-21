@@ -38,11 +38,13 @@ def restore_statement(table, cols, row):
         cols = [c for c in cols if c != "id"]
         verb = "INSERT OR IGNORE"
     elif table == "fonts":
-        # Never enable a font the target has disabled (it may not be installed there);
-        # do carry over fonts you disabled, and your labels.
+        # Never enable a font the target has disabled (it may not be installed there), and
+        # add fonts it doesn't know yet disabled, for the same reason; do carry over fonts
+        # you disabled, and your labels.
+        new = {**values, "enabled": 0} if "enabled" in values else values
         insert = (
             f'INSERT OR IGNORE INTO "fonts" ({", ".join(cols)}) '
-            f"VALUES ({', '.join(sql_literal(values[c]) for c in cols)});\n"
+            f"VALUES ({', '.join(sql_literal(new[c]) for c in cols)});\n"
         )
         update = (
             f"UPDATE fonts SET enabled = enabled AND {sql_literal(values.get('enabled'))}"

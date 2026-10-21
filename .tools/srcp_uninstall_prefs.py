@@ -14,18 +14,30 @@ Run from Terminal.app with iTerm2 quit (--dryrun works any time):
 import argparse
 import glob
 import os
+import plistlib
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # works under python3 -I too
-from srcp_iterm_prefs import QUIT_FIRST, iterm_running, load_prefs, save_prefs
+from srcp_iterm_prefs import QUIT_FIRST, iterm_app, iterm_running, load_prefs, save_prefs
 from srcp_preset_history import from_repo, repo_root
 
 KEY_MAP = "GlobalKeyMap"
 PRESETS = "Custom Color Presets"
 SAVE_ACTION = {"Action": 60, "Text": "save_profile()"}  # as written by srcp_add_key_binding.py
+DEFAULT_MAP = os.path.join(iterm_app(), "Contents/Resources/DefaultGlobalKeyMap.plist")
+
+
+def is_default_keymap(keymap):
+    """True if keymap is exactly iTerm2's built-in bindings (as srcp_add_key_binding copied)."""
+    try:
+        with open(DEFAULT_MAP, "rb") as f:
+            return keymap == plistlib.load(f)
+    except (OSError, plistlib.InvalidFileException):
+        return False
 
 
 def remove_key_binding(prefs):
+    """Remove our binding; return the top-level keys to delete (GlobalKeyMap, if now default)."""
     keymap = prefs.get(KEY_MAP) or {}
     ours = [
         k
@@ -37,7 +49,13 @@ def remove_key_binding(prefs):
         del keymap[k]
     if not ours:
         print("  = no save_profile() key binding")
-    return bool(ours)
+        return None
+    if is_default_keymap(keymap):
+        # srcp_add_key_binding copied iTerm2's defaults in to add ours; deleting the key
+        # puts iTerm2 back on its built-in defaults, which can change in later versions.
+        print(f"  - {KEY_MAP}: the rest is iTerm2's defaults; remove it so iTerm2 uses its own")
+        return [KEY_MAP]
+    return []
 
 
 def remove_presets(prefs, schemes_dir):
@@ -70,7 +88,11 @@ def remove_presets(prefs, schemes_dir):
 
 def main():
     ap = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
-    ap.add_argument("--presets", metavar="DIR", help="also remove presets identical to DIR's files")
+    ap.add_argument(
+        "--presets",
+        metavar="DIR",
+        help="also remove presets matching DIR's files, now or in earlier commits",
+    )
     ap.add_argument(
         "--dryrun",
         "--dry-run",
@@ -83,14 +105,15 @@ def main():
     if not args.dry_run and iterm_running():
         sys.exit(QUIT_FIRST)
     prefs = load_prefs()
-    changed = remove_key_binding(prefs)
+    delete = remove_key_binding(prefs)
+    changed = delete is not None
     if args.presets:
         changed = remove_presets(prefs, args.presets) or changed
     if args.dry_run or not changed:
         if args.dry_run:
             print("  (dry run: nothing written)")
         return
-    print(f"  Backup of previous iTerm2 prefs: {save_prefs(prefs)}")
+    print(f"  Backup of previous iTerm2 prefs: {save_prefs(prefs, delete or ())}")
 
 
 if __name__ == "__main__":

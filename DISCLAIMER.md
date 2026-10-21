@@ -10,7 +10,7 @@ There is no warranty, no support commitment, and no guarantee it works on your M
 
 | What | Changed by | Backed up first |
 |---|---|---|
-| iTerm2 settings (`com.googlecode.iterm2`): color presets, a key binding | `setup.sh` | Yes, `~/Library/Preferences/com.googlecode.iterm2.backup-<timestamp>.plist` |
+| iTerm2 settings (`com.googlecode.iterm2`): color presets, a key binding | `setup.sh` | Yes, in `~/.local/share/iterm2-profile-manager/prefs-backups/` (newest 10 kept) |
 | iTerm2's Scripts folder and Dynamic Profiles | `setup.sh`, the main script | No (regenerated) |
 | `~/Library/Fonts`: copies of fonts already on your Mac | `setup.sh` | No |
 | Homebrew: MesloLGS Nerd Font | `setup.sh`, if Homebrew is installed | No |

@@ -19,7 +19,7 @@ Right-click → **Remove from favorites** does the same as **Remove favorite**, 
 
 Each favorite becomes a profile named `<preset> - <font>` under **Profiles → Favorites**. Sessions opened from one keep that look.
 
-The main script writes these profiles to a Dynamic Profiles file (see [Files on disk](#files-on-disk)); iTerm2 reloads it automatically. Each profile is based on your default profile, so it keeps your other settings (triggers, key bindings, etc.). Edits made to one in Settings are lost when the file is rewritten. To change a favorite's font, open a session from it, change the font, and rate it again. If the file is deleted, it comes back at the next script start or favorite change.
+The main script writes these profiles to a Dynamic Profiles file (see [Files on disk](#files-on-disk)); iTerm2 reloads it automatically. Each profile is based on your default profile, so it keeps your other settings (triggers, key bindings, etc.). Edits made to one in Settings are lost when the file is rewritten. A favorite is one preset + font: changing the font in a session doesn't change what the rating dialog saves (it uses the font the script applied). To keep a preset with another font, rate it from a tab that shows it in that font; to drop the old one, open it from **Profiles → Favorites** and choose **Remove favorite**. If the file is deleted, it comes back at the next script start or favorite change.
 
 ## Review ratings
 
@@ -47,7 +47,7 @@ For each new session, the main script:
 1. **Skips sessions opened from a favorite profile.** They keep their look; the launch is still logged.
 2. **Reads the mode** from iTerm2 (follows macOS with the Automatic or Minimal theme). Open sessions keep their colors when the mode changes.
 3. **Chooses a favorite or a discovery preset.** Chance of a favorite: `favorite_share × min(1, favorite presets in this mode / favorite_target)`. With defaults that is 5% per favorite preset, capped at 50% from 10 on. No favorites means discovery every time.
-   - **Favorite:** weighted by stars (5 ★ is picked 5× as often as 1 ★), in its saved font. If that font has since been disabled, a random one.
+   - **Favorite:** weighted by stars per saved preset + font (a 5 ★ is picked 5× as often as a 1 ★; a preset saved with three fonts has three chances), in its saved font. If that font has since been disabled, a random one.
    - **Discovery:** a preset of this mode that passes the readability checks, isn't a favorite, and isn't among the last 20 discovery picks in this mode. Colored-background presets (yellow, pink, teal rather than white, grey or black) get 3× weight. They are rare, so this lifts them to roughly a fifth of light and a third of dark sessions. Random font.
 4. **Applies the preset and font** to this session only, at the profile's font size. Also sets the non-ASCII font to MesloLGS Nerd Font (`nonascii_font`), so prompt icons (Powerlevel10k etc.) render with any font.
 5. **Logs the launch**, and the close time when the session ends. Sessions open when iTerm2 quits get `end_reason = 'unknown'` at the next start.
@@ -68,7 +68,7 @@ Discovery uses only presets that pass all three:
 
 Monochrome presets (one hue, or near-grey) need only the Text check. `overrides.include` forces a preset in or out.
 
-A few installed presets are byte-identical copies under an older name (`base16 icy` = `base16-icy`); discovery uses only the repo's name.
+A few installed presets are byte-identical copies under an older name (`base16 icy` = `base16-icy`), and the repo has a few identical twins of its own (`Zenbones` = `Zenbones Light`). Discovery uses only one name for each: the repo's, and the first in sort order.
 
 ## Configuration
 
@@ -152,7 +152,7 @@ Import (e.g. on another Mac after `setup.sh`):
 sqlite3 ~/.local/share/iterm2-color-schemes/schemes.db < ~/curation.sql
 ```
 
-Matching rows are updated, others kept; re-importing doesn't duplicate history. Fonts disabled in the target stay disabled. If the target database's schema is older than the export's, nothing is imported: run `.tools/srcp_build_scheme_db.py` first.
+Matching rows are updated, others kept; re-importing doesn't duplicate history. Fonts disabled in the target stay disabled, and fonts it doesn't have yet arrive disabled (enable them once they're installed). If the target database's schema is older than the export's, nothing is imported: run `.tools/srcp_build_scheme_db.py` first.
 
 Where to keep it (not this repo; `curation*.sql` is gitignored):
 
@@ -224,7 +224,7 @@ Double-clicking an `.itermcolors` file also imports it, with one dialog per file
 | `~/.local/share/iterm2-color-schemes/schemes.db` | The database. |
 | `~/.local/share/iterm2-color-schemes/backups/` | Database snapshots. |
 | `~/Library/Application Support/iTerm2/DynamicProfiles/iterm2-profile-manager.plist` | Favorite profiles. |
-| `~/Library/Preferences/com.googlecode.iterm2.backup-<timestamp>.plist` | iTerm2 settings backups. |
+| `~/.local/share/iterm2-profile-manager/prefs-backups/com.googlecode.iterm2-<timestamp>.plist` | iTerm2 settings backups, newest 10 kept. Restore one with iTerm2 quit: `defaults import com.googlecode.iterm2 <file>`. Versions before 0.6.7 wrote them to `~/Library/Preferences/com.googlecode.iterm2.backup-*.plist`; those can be deleted. |
 | `$SRC_DIR/iTerm2-Color-Schemes` (default `~/src`) | Schemes repo clone. |
 | `~/Library/Fonts` | Copied Terminal.app fonts. |
 
@@ -284,4 +284,4 @@ select * from favorites where preset not in (select name from schemes);  -- favo
 
 Needs [uv](https://docs.astral.sh/uv/) and shellcheck (`brew install shellcheck`). Config: `pyproject.toml`, `AutoLaunch/ruff.toml` (Black style, 100 columns). Targets: `.tools/` Python 3.9 (`/usr/bin/python3`), everything else 3.12; pyright checks the main script against the real `iterm2` module.
 
-Scripts run only inside iTerm2. Test database changes against a scratch database (`srcp_build_scheme_db.py --db /tmp/test.db`); use `--dryrun` for everything else.
+Scripts run only inside iTerm2. `./lint.sh` also runs `.tests/srcp_test_db.py` under iTerm2's Python: build, migrations, picking, rating, export and helpers, against a temp folder. Try other database changes against a scratch database (`srcp_build_scheme_db.py --db /tmp/test.db`); use `--dryrun` for everything else.

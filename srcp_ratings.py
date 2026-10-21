@@ -10,13 +10,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import importlib
+import importlib.util
 import io
 import os
 import sqlite3
 import sys
 from pathlib import Path
-from types import ModuleType
 
 import iterm2
 
@@ -24,21 +23,19 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 TOOLS = os.path.join(HERE, ".tools")
 POPUP = os.path.join(TOOLS, "srcp_popup.js")
 sys.path.insert(0, TOOLS)
+# .tools/srcp_favorites.py supplies the report's own tables, so both views agree. It's
+# imported where used (pyright resolves it via extraPaths, so lint.sh checks the calls),
+# after main() has checked it's installed.
+HAVE_REPORT = importlib.util.find_spec("srcp_favorites") is not None
 
 HISTORY_ROWS = 50
 DONE = "Done"
 
 
-def load_report() -> ModuleType | None:
-    """.tools/srcp_favorites.py: the report's own tables, so both views agree."""
-    try:
-        return importlib.import_module("srcp_favorites")
-    except ImportError:
-        return None
-
-
-def render(report: ModuleType, db: sqlite3.Connection, view: str) -> str:
+def render(db: sqlite3.Connection, view: str) -> str:
     """The report's table for view, as text."""
+    import srcp_favorites as report  # noqa: PLC0415  (main() checks it is installed first)
+
     out = io.StringIO()
     with contextlib.redirect_stdout(out):
         try:
@@ -56,13 +53,15 @@ def render(report: ModuleType, db: sqlite3.Connection, view: str) -> str:
     return out.getvalue().rstrip()
 
 
-def view_text(report: ModuleType, view: str) -> str:
+def view_text(view: str) -> str:
+    import srcp_favorites as report  # noqa: PLC0415  (main() checks it is installed first)
+
     if not os.path.exists(report.DEFAULT_DB):
         return f"No database at {report.DEFAULT_DB}.\nBuild it with .tools/srcp_build_scheme_db.py."
     # mode=rw (it only reads): mode=ro can fail on a WAL DB that nothing else has open.
     db = sqlite3.connect(Path(report.DEFAULT_DB).resolve().as_uri() + "?mode=rw", uri=True)
     try:
-        return render(report, db, view)
+        return render(db, view)
     finally:
         db.close()
 
@@ -89,8 +88,7 @@ async def popup(title: str, text: str, buttons: list[str]) -> str:
 
 
 async def main(connection: iterm2.Connection) -> None:
-    report = load_report()
-    if report is None or not os.path.exists(POPUP):
+    if not HAVE_REPORT or not os.path.exists(POPUP):
         await iterm2.Alert(
             "srcp ratings",
             f"{TOOLS}/srcp_favorites.py or srcp_popup.js not found. "
@@ -101,7 +99,7 @@ async def main(connection: iterm2.Connection) -> None:
     while True:
         others = [v for v in ("Favorites", "History", "Hidden") if v != view]
         try:
-            text = view_text(report, view)
+            text = view_text(view)
         except Exception as e:  # show it in the window: the Console is easy to miss
             text = f"Couldn't read the database: {e!r}"
         choice = await popup(f"srcp ratings: {view}", text, [DONE, *others])

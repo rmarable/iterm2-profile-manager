@@ -75,7 +75,7 @@ Setup changes iTerm2's settings, and iTerm2 overwrites them when it quits, so ru
 6. Binds ⌃⌥⌘S to the rating dialog.
 7. Copies the scripts into iTerm2's Scripts folder.
 
-It backs up iTerm2's settings to `~/Library/Preferences/com.googlecode.iterm2.backup-<timestamp>.plist` before changing them. For a custom `SRC_DIR`, cloning straight into the Scripts folder, or a manual install, see [docs/REFERENCE.md](docs/REFERENCE.md#install-options).
+It backs up iTerm2's settings to `~/.local/share/iterm2-profile-manager/prefs-backups/com.googlecode.iterm2-<timestamp>.plist` before changing them (newest 10 kept). For a custom `SRC_DIR`, cloning straight into the Scripts folder, or a manual install, see [docs/REFERENCE.md](docs/REFERENCE.md#install-options).
 
 ## Daily use
 
@@ -140,7 +140,7 @@ Kept: this repo, iTerm2 settings backups, shell config, and the Claude Code inte
 | A font never appears | Disabled or not installed: `select name, enabled from fonts`. A font that was missing at setup stays disabled after you install it: `update fonts set enabled = 1 where name = '<name>'`, then relaunch iTerm2. |
 | A favorite is missing from the Profiles menu | Preset not installed, or marked **Never show**. |
 | ⌃⌥⌘S does nothing | Check Settings → Keys → Key Bindings for `save_profile()`, and the Console for the main script's startup line. |
-| Console: `database is locked` | A rebuild or open `sqlite3` transaction held the lock over 5 s. That launch isn't logged; no action needed. |
+| Console: `database is locked` | A rebuild or open `sqlite3` transaction held the lock over 5 s. That launch isn't logged. A rating made then shows a "didn't take" alert: rate again. |
 | `srcp_build_scheme_db.py`: `schemes.db is missing but its -wal/-shm files are still there` | Delete `schemes.db-wal` and `schemes.db-shm`, or restore a snapshot. |
 | A tool says iTerm2 is running | Quit iTerm2 (⌘Q) and run the tool from Terminal.app. |
 | Setup says iTerm2 loads its settings from a custom folder | iTerm2 would overwrite the changes. Turn off Settings → General → Settings → **Load settings from a custom folder or URL**, run setup, then turn it back on and save the current settings to the folder. |

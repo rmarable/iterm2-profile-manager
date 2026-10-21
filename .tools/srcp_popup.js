@@ -47,12 +47,14 @@ function run(argv) {
   alert.informativeText = "";
   alert.accessoryView = scroll;
   for (const b of buttons) alert.addButtonWithTitle(b);
-  // Escape (and Cmd-.) only map to a button titled "Cancel"; give it to the first (Done).
-  if (buttons.length > 0) alert.buttons.objectAtIndex(0).keyEquivalent = "\u001b";
+  // Escape (and Cmd-.) only map to a button titled "Cancel", and a button has one key, so
+  // Done keeps Return and a hidden Cancel takes Escape; it answers as Done (index 0).
+  alert.addButtonWithTitle("Cancel").hidden = true;
 
   if ($.NSProcessInfo.processInfo.environment.objectForKey("SRCP_POPUP_DRYRUN").js === "1") {
     return `dryrun ${width}x${height} lines=${lines.length} buttons=${buttons.length}`;
   }
   app.activateIgnoringOtherApps(true);
-  return String(alert.runModal - 1000);
+  const index = alert.runModal - 1000;
+  return String(index === buttons.length ? 0 : index);
 }
