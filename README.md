@@ -1,10 +1,14 @@
 # About This Toolkit
 
-Each new iTerm2 session (tab, window or split pane) gets a random **look**: a color preset that matches the macOS light/dark mode, plus a random monospaced font. Rate looks 1-5 stars. Rated looks come up more often, and each becomes an iTerm2 profile (e.g. "Kibble - Menlo") under **Profiles → Favorites**.
+Every new iTerm2 tab, window or split pane opens with its own color scheme and font. Run Claude Code in one tab, a build in another and SSH in a third, and you can tell them apart at a glance.
 
-Presets come from [iTerm2-Color-Schemes](https://github.com/mbadolato/iTerm2-Color-Schemes) (800+ schemes; about 5% fail the [readability checks](#readability-checks) and are never picked at random).
+Schemes come from the 800+ in [iTerm2-Color-Schemes](https://github.com/mbadolato/iTerm2-Color-Schemes). Light ones show up when macOS is in Light Mode, dark ones in Dark Mode, and the hard-to-read ones (about 5%) are skipped.
 
-New to the terminal? Start with [ABOUT-THIS-REPO.md](ABOUT-THIS-REPO.md). See also [DISCLAIMER.md](DISCLAIMER.md).
+Like what you got? Press ⌃⌥⌘S and give it up to five stars. It comes back more often, and it's saved under **Profiles → Favorites** so you can open it any time. Can't stand it? Click **Never show** and you won't see it again.
+
+![One iTerm2 window split three ways: two Claude Code sessions and a shell, each with its own color scheme](images/profile-chooser.jpg)
+
+Setup is one script and takes about five minutes. New to the terminal? [ABOUT-THIS-REPO.md](ABOUT-THIS-REPO.md) walks you through it.
 
 ## Requirements
 
