@@ -1,4 +1,4 @@
-# About this repo
+# About the iTerm2 Profile Manager
 
 - Are you new to living in the terminal?
 - Do you now find yourself running Claude Code, Codex or another AI agent in multiple tabs at once?
