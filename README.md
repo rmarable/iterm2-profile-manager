@@ -1,11 +1,12 @@
 # About This Toolkit
 
-- Are you new to living in the terminal?
+- Are you new to this AI concept of "living in the terminal"?
 - Do you now find yourself running Claude Code, Codex or another AI agent in multiple tabs at once?
 - Do you hate how limited Terminal's colors are?
-- Are you bored with the iTerm2 defaults?
+- If you made the move from Terminal to iTerm2, are you bored with the iTerm2 default color scheme?
+- Wouldn't it be great to have something you can control in your life (like the colors and font of your terminal session)?
 
-Every new iTerm2 tab, window and split pane gets a random color preset and font. With several Claude Code or Codex sessions open, each one looks different, so you're less likely to type into the wrong one.
+If you answered "yes" to any of the above questions, meet your new best friend, the iTerm2 Profile Manager. It gives every iTerm2 tab and window its own look and fixed-width font, so you can easily tell your sessions apart at a glance. Rate and save your favorite combinations, review your past choices, and more.
 
 The presets come from [iTerm2-Color-Schemes](https://github.com/mbadolato/iTerm2-Color-Schemes) (800+). Light presets are used when macOS is in Light Mode and dark ones in Dark Mode. About 5% are hard to read and never get picked.
 
