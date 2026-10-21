@@ -45,7 +45,7 @@ Stars  Preset          Font    Mode  Launches  Last used         Avg open  Saved
 For each new session, the main script:
 
 1. **Skips sessions opened from a favorite profile.** They keep their look; the launch is still logged.
-2. **Reads the mode** from iTerm2 (follows macOS with the Automatic or Minimal theme). Open sessions keep their colors when the mode changes.
+2. **Reads the mode** from iTerm2 (follows macOS with the Regular, Minimal or Compact theme). Open sessions keep their colors when the mode changes.
 3. **Chooses a favorite or a discovery preset.** Chance of a favorite: `favorite_share × min(1, favorite presets in this mode / favorite_target)`. With defaults that is 5% per favorite preset, capped at 50% from 10 on. No favorites means discovery every time.
    - **Favorite:** weighted by stars per saved preset + font (a 5 ★ is picked 5× as often as a 1 ★; a preset saved with three fonts has three chances), in its saved font. If that font has since been disabled, a random one.
    - **Discovery:** a preset of this mode that passes the readability checks, isn't a favorite, and isn't among the last 20 discovery picks in this mode. Colored-background presets (yellow, pink, teal rather than white, grey or black) get 3× weight. They are rare, so this lifts them to roughly a fifth of light and a third of dark sessions. Random font.

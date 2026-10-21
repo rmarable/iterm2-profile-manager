@@ -47,7 +47,7 @@ Set these before running setup:
 |---|---|---|
 | Python API | Settings → General → Magic → **Enable Python API** | Scripts can't connect without it. |
 | Python runtime | Scripts → Manage → **Install Python Runtime** | The main script runs on it (Python 3.12). |
-| Theme | Settings → Appearance → Theme → **Automatic** or **Minimal** | Only these follow the macOS light/dark mode. |
+| Theme | Settings → Appearance → Theme → **Regular**, **Minimal** or **Compact** | These follow the macOS light/dark mode; Light, Dark and the High Contrast themes don't. |
 
 ## Install
 
@@ -135,12 +135,12 @@ Kept: this repo, iTerm2 settings backups, shell config, and the Claude Code inte
 | Console: `no scheme DB at ...` | Run `python3 .tools/srcp_build_scheme_db.py`. No restart needed. |
 | Console: `preset not found: X` | Preset renamed or deleted in iTerm2. Run `python3 .tools/srcp_build_scheme_db.py`. |
 | Most presets show your default profile's colors | Settings → Profiles → Colors: turn off **Use separate colors for light and dark mode** (few presets define both). |
-| Always light, or always dark | Settings → Appearance → Theme: **Automatic** or **Minimal**. |
+| Always light, or always dark | Settings → Appearance → Theme: **Regular**, **Minimal** or **Compact**, not Light, Dark or High Contrast. |
 | Console: `another copy is already running; exiting` | Expected after a restart; a lock allows one copy. |
 | A font never appears | Disabled or not installed: `select name, enabled from fonts`. A font that was missing at setup stays disabled after you install it: `update fonts set enabled = 1 where name = '<name>'`, then relaunch iTerm2. |
 | A favorite is missing from the Profiles menu | Preset not installed, or marked **Never show**. |
 | ⌃⌥⌘S does nothing | Check Settings → Keys → Key Bindings for `save_profile()`, and the Console for the main script's startup line. |
-| Console: `database is locked` | A rebuild or open `sqlite3` transaction held the lock over 5 s. That launch isn't logged. A rating made then shows a "didn't take" alert: rate again. |
+| Console: `database is locked` | A rebuild or open `sqlite3` transaction held the lock over 5 s. A session opened then keeps the profile's colors, or isn't logged; a rating made then shows a "didn't take" alert: rate again. |
 | `srcp_build_scheme_db.py`: `schemes.db is missing but its -wal/-shm files are still there` | Delete `schemes.db-wal` and `schemes.db-shm`, or restore a snapshot. |
 | A tool says iTerm2 is running | Quit iTerm2 (⌘Q) and run the tool from Terminal.app. |
 | Setup says iTerm2 loads its settings from a custom folder | iTerm2 would overwrite the changes. Turn off Settings → General → Settings → **Load settings from a custom folder or URL**, run setup, then turn it back on and save the current settings to the folder. |

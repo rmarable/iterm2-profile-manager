@@ -35,7 +35,7 @@ from typing import IO, Any, TypeVar
 import iterm2
 from iterm2.capabilities import supports_context_menu_submenus_and_visibility
 
-VERSION = "0.6.5"  # bump on every change, so the Console shows which code is running
+VERSION = "0.6.6"  # bump on every change, so the Console shows which code is running
 DATA_DIR = os.path.expanduser("~/.local/share/iterm2-color-schemes")
 DB_PATH = os.path.join(DATA_DIR, "schemes.db")
 LOCK_PATH = os.path.join(DATA_DIR, ".lock")
@@ -171,8 +171,11 @@ def read_config(db: sqlite3.Connection) -> dict[str, float]:
     return cfg
 
 
-def pick(db: sqlite3.Connection, mode: str, exclude: set[str]) -> Pick | None:
-    """Choose a favorite or a discovery preset for mode, or None if nothing fits."""
+def pick(db: sqlite3.Connection, mode: str, exclude: set[str]) -> Pick | tuple[()]:
+    """Choose a favorite or a discovery preset for mode, or () if nothing fits.
+
+    Not None: store.call returns None when the DB fails, and the caller tells them apart.
+    """
     cfg = read_config(db)
     favs: list[tuple[str, str, int]] = [
         r
@@ -196,7 +199,7 @@ def pick(db: sqlite3.Connection, mode: str, exclude: set[str]) -> Pick | None:
             font = None  # disabled since it was saved: a random font instead
         return preset, font, "favorite", stars
     if not disc:
-        return None
+        return ()
     window = max(0, int(cfg["recent_window"]))
     recent = {
         n
@@ -217,7 +220,12 @@ def nonascii_font(db: sqlite3.Connection) -> str | None:
     """config nonascii_font (PostScript name); '' turns it off."""
     row = db.execute("SELECT value FROM config WHERE key = 'nonascii_font'").fetchone()
     value = DEFAULT_NONASCII_FONT if row is None or row[0] is None else str(row[0]).strip()
-    return value or None
+    if not value:
+        return None
+    # The build disables seeded fonts that aren't installed (e.g. MesloLGS without Homebrew);
+    # a missing icon font would make iTerm2 fall back to another face for every icon.
+    enabled = db.execute("SELECT enabled FROM fonts WHERE name = ?", (value,)).fetchone()
+    return None if enabled is not None and not enabled[0] else value
 
 
 def random_font(db: sqlite3.Connection) -> str | None:
@@ -432,7 +440,7 @@ _profiles_state: list[str | None] = [None]  # what sync_profiles last wrote from
 
 
 def sync_if_changed(db: sqlite3.Connection) -> int | None:
-    """sync_profiles, but only when favorites, Never show or the icon font changed.
+    """sync_profiles, but only when favorites, Never show, the icon font or fonts changed.
 
     Cheap enough to call for every new session, so restoring an export or editing
     favorites in sqlite3 shows up in the Profiles menu without a restart.
@@ -444,7 +452,9 @@ def sync_if_changed(db: sqlite3.Connection) -> int | None:
             "ifnull(size, ''), ';') FROM (SELECT * FROM favorites ORDER BY preset, font)), "
             "(SELECT group_concat(name, ';') FROM "
             "(SELECT name FROM overrides WHERE include = 0 ORDER BY name)), "
-            "(SELECT value FROM config WHERE key = 'nonascii_font')"
+            "(SELECT value FROM config WHERE key = 'nonascii_font'), "
+            "(SELECT group_concat(name || ':' || enabled || ':' || ifnull(label, ''), ';') "
+            "FROM (SELECT * FROM fonts ORDER BY name))"
         ).fetchone()
     )
     if state == _profiles_state[0]:
@@ -577,6 +587,10 @@ async def keep_favorite_profile(
 async def color_session(
     connection: iterm2.Connection, app: iterm2.App, store: Store, session: iterm2.Session
 ) -> None:
+    # Already has a look: a restored window, or one startup() colored while it was also
+    # queued as new. Coloring again would change it and log a second launch.
+    if await session.async_get_variable("user.color_preset"):
+        return
     theme = await app.async_get_theme()
     mode = "dark" if "dark" in theme else "light"
     await sync_and_log(store)  # picks up favorites changed outside the dialog
@@ -586,7 +600,10 @@ async def color_session(
     exclude: set[str] = set()
     for _ in range(3):
         choice = await store.call(pick, mode, exclude)
-        if choice is None:
+        if choice is None:  # store.call already logged why
+            log("warn", "couldn't read the DB; session left as is")
+            return
+        if not choice:
             warn_once(f"empty-{mode}", f"no {mode} presets to pick from; sessions left as is")
             return
         preset_name, font, source, stars = choice
@@ -842,15 +859,18 @@ async def main(connection: iterm2.Connection) -> None:
             iterm2.SessionTerminationMonitor(connection)
         )
         await register_save_handlers(connection, app, store)
-        await startup(app, store, started)
+        await startup(connection, app, store, started)
         await asyncio.gather(
             watch_new(connection, app, store, new_sessions),
             watch_ended(store, ended_sessions),
         )
 
 
-async def startup(app: iterm2.App, store: Store, started: str) -> None:
-    live = {s.session_id for w in app.windows for t in w.tabs for s in t.all_sessions}
+async def startup(
+    connection: iterm2.Connection, app: iterm2.App, store: Store, started: str
+) -> None:
+    open_sessions = [s for w in app.windows for t in w.tabs for s in t.all_sessions]
+    live = {s.session_id for s in open_sessions}
     live |= {s.session_id for s in app.buried_sessions}
     stale = await store.call(close_stale, live, started)
     if stale:
@@ -859,6 +879,13 @@ async def startup(app: iterm2.App, store: Store, started: str) -> None:
     if backup:
         log("info", f"DB snapshot: {backup}")
     await sync_and_log(store)
+    # Windows iTerm2 opened before this script connected (the one at launch) got no look.
+    # Restored windows keep theirs: iTerm2 saves user.* variables with them.
+    for session in open_sessions:
+        try:
+            await color_session(connection, app, store, session)
+        except Exception as e:  # one session must not stop the rest, or startup
+            log("warn", f"coloring open session failed: {e!r}")
 
 
 async def watch_new(

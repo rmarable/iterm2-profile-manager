@@ -28,6 +28,7 @@ import srcp_export_curation  # noqa: E402
 import srcp_favorites  # noqa: E402
 import srcp_iterm_prefs  # noqa: E402
 import srcp_preset_history  # noqa: E402
+import srcp_uninstall_prefs  # noqa: E402
 
 MAIN = os.path.join(ROOT, "AutoLaunch", "srcp_set_random_color_profile.py")
 
@@ -158,6 +159,29 @@ class MainScriptTest(DbTest):
             name, font, source, _stars = self.main["pick"](self.db, "dark", {"Dark Two"})
             self.assertEqual((name, font, source), ("Dark One", None, "discovery"))
 
+    def test_pick_with_nothing_left_is_empty_not_none(self):
+        # None means the DB call failed (store.call); () means nothing fits.
+        self.assertEqual(self.main["pick"](self.db, "light", {"Light One", "Yellow"}), ())
+
+    def test_icon_font_is_skipped_when_not_installed(self):
+        font = self.main["DEFAULT_NONASCII_FONT"]
+        self.db.execute("UPDATE fonts SET enabled = 1 WHERE name = ?", (font,))
+        self.assertEqual(self.main["nonascii_font"](self.db), font)
+        self.db.execute("UPDATE fonts SET enabled = 0 WHERE name = ?", (font,))
+        self.assertIsNone(self.main["nonascii_font"](self.db))
+
+    def test_font_label_edits_trigger_a_profiles_rewrite(self):
+        self.main["subprocess"] = types.SimpleNamespace(
+            run=lambda *a, **k: types.SimpleNamespace(stdout=stdout)
+        )
+        stdout = plistlib.dumps({"Custom Color Presets": {"Dark One": DARK}})
+        self.main["save_favorite"](self.db, "Dark One", "Monaco", 13, 4)
+        self.main["_profiles_state"][0] = None
+        self.assertIsNotNone(self.main["sync_if_changed"](self.db))
+        self.assertIsNone(self.main["sync_if_changed"](self.db))
+        self.db.execute("UPDATE fonts SET label = 'Mo' WHERE name = 'Monaco'")
+        self.assertIsNotNone(self.main["sync_if_changed"](self.db))
+
     def test_never_show_hides_and_rating_unhides_keeping_mode(self):
         self.db.execute("INSERT INTO overrides (name, mode) VALUES ('Dark One', 'light')")
         self.assertTrue(self.main["never_show"](self.db, "Dark One"))
@@ -282,6 +306,45 @@ class HelperTest(unittest.TestCase):
             self.assertEqual(len(srcp_preset_history.past_versions(root, path)), 2)
             self.assertTrue(srcp_preset_history.from_repo(DARK, path, root))
             self.assertFalse(srcp_preset_history.from_repo(LIGHT, path, root))
+
+    def test_uninstall_removes_our_binding_and_restores_default_keymap(self):
+        defaults = {"0xf700-0x300000": {"Action": 10, "Text": ""}}
+        with tempfile.NamedTemporaryFile(suffix=".plist", delete=False) as f:
+            plistlib.dump(defaults, f)
+        self.addCleanup(os.remove, f.name)
+        real = srcp_uninstall_prefs.DEFAULT_MAP
+        srcp_uninstall_prefs.DEFAULT_MAP = f.name
+        self.addCleanup(setattr, srcp_uninstall_prefs, "DEFAULT_MAP", real)
+        ours = {"Action": 60, "Text": "save_profile()"}
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            prefs = {"GlobalKeyMap": {**defaults, "0x73-0x1c0000-0x1-0x1": ours}}
+            self.assertEqual(srcp_uninstall_prefs.remove_key_binding(prefs), ["GlobalKeyMap"])
+            self.assertEqual(prefs["GlobalKeyMap"], defaults)
+            edited = {**defaults, "0x61-0x100000": {"Action": 12, "Text": "x"}}
+            prefs = {"GlobalKeyMap": {**edited, "0x73-0x1c0000-0x1-0x1": ours}}
+            self.assertEqual(srcp_uninstall_prefs.remove_key_binding(prefs), [])
+            self.assertEqual(prefs["GlobalKeyMap"], edited)  # the user's own binding stays
+            self.assertIsNone(srcp_uninstall_prefs.remove_key_binding({"GlobalKeyMap": edited}))
+
+    def test_uninstall_removes_current_and_past_presets_but_keeps_edited(self):
+        with tempfile.TemporaryDirectory() as repo:
+            schemes = os.path.join(repo, "schemes")
+            os.makedirs(schemes)
+            env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+            git = ["git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@t"]
+            subprocess.run([*git[:3], "init", "-q"], check=True, env=env)
+            for version in (DARK, DARK_2):  # A changes upstream; B never does
+                for name, colors in (("A", version), ("B", LIGHT)):
+                    with open(os.path.join(schemes, f"{name}.itermcolors"), "wb") as f:
+                        plistlib.dump(colors, f)
+                subprocess.run([*git, "add", "."], check=True, env=env)
+                subprocess.run([*git, "commit", "-qm", "v", "--allow-empty"], check=True, env=env)
+            prefs = {"Custom Color Presets": {"A": DARK, "B": YELLOW, "Mine": LIGHT}}
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertTrue(srcp_uninstall_prefs.remove_presets(prefs, schemes))
+            # A was imported before upstream changed it: ours. B was edited; Mine isn't the repo's.
+            self.assertEqual(sorted(prefs["Custom Color Presets"]), ["B", "Mine"])
 
     def test_custom_settings_folder_is_refused_before_writing(self):
         prefs = {"LoadPrefsFromCustomFolder": True, "PrefsCustomFolder": "/elsewhere"}
