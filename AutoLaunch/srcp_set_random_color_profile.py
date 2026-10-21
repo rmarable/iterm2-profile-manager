@@ -35,7 +35,7 @@ from typing import IO, Any, TypeVar
 import iterm2
 from iterm2.capabilities import supports_context_menu_submenus_and_visibility
 
-VERSION = "0.6.6"  # bump on every change, so the Console shows which code is running
+VERSION = "0.6.7"  # bump on every change, so the Console shows which code is running
 DATA_DIR = os.path.expanduser("~/.local/share/iterm2-color-schemes")
 DB_PATH = os.path.join(DATA_DIR, "schemes.db")
 LOCK_PATH = os.path.join(DATA_DIR, ".lock")
@@ -50,6 +50,15 @@ DEFAULT_CONFIG = {
 }
 # Font for characters the main font lacks, e.g. Powerlevel10k prompt icons; config overrides.
 DEFAULT_NONASCII_FONT = "MesloLGSNFM-Regular"
+# Its file, and where fonts live: as SEED_FONTS and FONT_DIRS in .tools/srcp_build_scheme_db.py
+# (setup.sh installs this script without .tools/, so they're copied; a test keeps them equal).
+NONASCII_FONT_FILES = ["MesloLGSNerdFontMono-Regular.ttf"]
+FONT_DIRS = [
+    "~/Library/Fonts",
+    "/Library/Fonts",
+    "/System/Library/Fonts",
+    "/System/Library/Fonts/Supplemental",
+]
 MENU_ID = "com.rmarable.set-random-color-profile.save"
 REMOVE_MENU_ID = "com.rmarable.set-random-color-profile.remove"
 # iTerm2 watches this folder and updates the Profiles menu when the file changes.
@@ -222,10 +231,18 @@ def nonascii_font(db: sqlite3.Connection) -> str | None:
     value = DEFAULT_NONASCII_FONT if row is None or row[0] is None else str(row[0]).strip()
     if not value:
         return None
-    # The build disables seeded fonts that aren't installed (e.g. MesloLGS without Homebrew);
-    # a missing icon font would make iTerm2 fall back to another face for every icon.
-    enabled = db.execute("SELECT enabled FROM fonts WHERE name = ?", (value,)).fetchone()
-    return None if enabled is not None and not enabled[0] else value
+    # The default may not be installed (MesloLGS comes from Homebrew, which is optional);
+    # setting a missing icon font makes iTerm2 fall back to another face for every icon.
+    # Checks the file, not fonts.enabled: that only keeps a font out of the random pool.
+    installed = any(
+        os.path.exists(os.path.join(os.path.expanduser(d), f))
+        for d in FONT_DIRS
+        for f in NONASCII_FONT_FILES
+    )
+    if value == DEFAULT_NONASCII_FONT and not installed:
+        warn_once("no-nonascii-font", f"{value} isn't installed; icon font left as is")
+        return None
+    return value
 
 
 def random_font(db: sqlite3.Connection) -> str | None:
@@ -445,18 +462,20 @@ def sync_if_changed(db: sqlite3.Connection) -> int | None:
     Cheap enough to call for every new session, so restoring an export or editing
     favorites in sqlite3 shows up in the Profiles menu without a restart.
     """
-    state = "|".join(
-        str(v)
-        for v in db.execute(
-            "SELECT (SELECT group_concat(preset || ':' || font || ':' || stars || ':' || "
-            "ifnull(size, ''), ';') FROM (SELECT * FROM favorites ORDER BY preset, font)), "
-            "(SELECT group_concat(name, ';') FROM "
-            "(SELECT name FROM overrides WHERE include = 0 ORDER BY name)), "
-            "(SELECT value FROM config WHERE key = 'nonascii_font'), "
-            "(SELECT group_concat(name || ':' || enabled || ':' || ifnull(label, ''), ';') "
-            "FROM (SELECT * FROM fonts ORDER BY name))"
-        ).fetchone()
+    fonts = "name || ':' || enabled || ':' || ifnull(label, '')"
+    query = (
+        "SELECT (SELECT group_concat(preset || ':' || font || ':' || stars || ':' || "
+        "ifnull(size, ''), ';') FROM (SELECT * FROM favorites ORDER BY preset, font)), "
+        "(SELECT group_concat(name, ';') FROM "
+        "(SELECT name FROM overrides WHERE include = 0 ORDER BY name)), "
+        "(SELECT group_concat({}, ';') FROM (SELECT * FROM fonts ORDER BY name))"
     )
+    try:
+        row = db.execute(query.format(fonts)).fetchone()
+    except sqlite3.OperationalError:  # DB built before fonts.label existed
+        row = db.execute(query.format("name || ':' || enabled")).fetchone()
+    # The icon font as applied (it depends on the font file being installed, too).
+    state = "|".join(str(v) for v in (*row, nonascii_font(db)))
     if state == _profiles_state[0]:
         return None
     count = sync_profiles(db)

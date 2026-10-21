@@ -151,6 +151,9 @@ class BuildTest(DbTest):
         self.assertEqual(seeded, {k: float(v) for k, v in self.main["DEFAULT_CONFIG"].items()})
         self.assertEqual(build.SEED_CONFIG["nonascii_font"], self.main["DEFAULT_NONASCII_FONT"])
         self.assertEqual(self.main["BACKUP_KEEP"], srcp_db_backup.KEEP)
+        self.assertEqual(self.main["FONT_DIRS"], build.FONT_DIRS)
+        nonascii = self.main["DEFAULT_NONASCII_FONT"]
+        self.assertEqual(self.main["NONASCII_FONT_FILES"], build.SEED_FONTS[nonascii])
 
 
 class MainScriptTest(DbTest):
@@ -163,12 +166,27 @@ class MainScriptTest(DbTest):
         # None means the DB call failed (store.call); () means nothing fits.
         self.assertEqual(self.main["pick"](self.db, "light", {"Light One", "Yellow"}), ())
 
-    def test_icon_font_is_skipped_when_not_installed(self):
+    def test_icon_font_follows_its_file_not_the_random_font_pool(self):
+        fonts = os.path.join(self.tmp, "fonts")
+        os.makedirs(fonts)
+        self.main["FONT_DIRS"] = [fonts]
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertIsNone(self.main["nonascii_font"](self.db))  # not installed
+        open(os.path.join(fonts, self.main["NONASCII_FONT_FILES"][0]), "w").close()
         font = self.main["DEFAULT_NONASCII_FONT"]
-        self.db.execute("UPDATE fonts SET enabled = 1 WHERE name = ?", (font,))
         self.assertEqual(self.main["nonascii_font"](self.db), font)
+        # Disabled only means "not a random main font": still the icon font.
         self.db.execute("UPDATE fonts SET enabled = 0 WHERE name = ?", (font,))
-        self.assertIsNone(self.main["nonascii_font"](self.db))
+        self.assertEqual(self.main["nonascii_font"](self.db), font)
+
+    def test_profiles_sync_on_a_db_without_font_labels(self):
+        self.main["subprocess"] = types.SimpleNamespace(
+            run=lambda *a, **k: types.SimpleNamespace(stdout=plistlib.dumps({}))
+        )
+        self.main["_profiles_state"][0] = None
+        self.db.execute("ALTER TABLE fonts DROP COLUMN label")  # as in a schema-1 DB
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertIsNotNone(self.main["sync_if_changed"](self.db))
 
     def test_font_label_edits_trigger_a_profiles_rewrite(self):
         self.main["subprocess"] = types.SimpleNamespace(

@@ -84,7 +84,7 @@ sqlite3 ~/.local/share/iterm2-color-schemes/schemes.db
 | `favorite_target` | `10` | Favorite presets per mode needed to reach `favorite_share`. |
 | `recent_window` | `20` | Discovery picks before a preset can repeat. |
 | `colorful_weight` | `3` | Discovery weight of colored-background presets (OKLab chroma ≥ 0.05). `1` = no preference. |
-| `nonascii_font` | `MesloLGSNFM-Regular` | Font for icons and other non-ASCII characters. `''` keeps the profile's setting. |
+| `nonascii_font` | `MesloLGSNFM-Regular` | Font for icons and other non-ASCII characters. `''` keeps the profile's setting. The default is skipped while its font file isn't installed; disabling it in `fonts` only keeps it out of the random main fonts. |
 
 Default fonts: SF Mono, Menlo, Monaco, MesloLGS Nerd Font Mono. Fonts that aren't installed start disabled and stay disabled after you install them; enable one with `update fonts set enabled = 1 where name = '<name>'`.
 
