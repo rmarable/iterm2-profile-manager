@@ -164,7 +164,7 @@ Import (e.g. on another Mac after `setup.sh`):
 sqlite3 ~/.local/share/iterm2-color-schemes/schemes.db < ~/curation.sql
 ```
 
-Matching rows are updated, others kept; re-importing doesn't duplicate history. Fonts disabled in the target stay disabled, and fonts it doesn't have yet arrive disabled; the next rebuild there enables the default ones that are installed. Fonts you disabled yourself stay disabled in the target. If the target database's schema is older than the export's, nothing is imported: run `.tools/srcp_build_scheme_db.py` first.
+Matching rows are updated, others kept; re-importing doesn't duplicate history. Fonts disabled in the target stay disabled, and fonts it doesn't have yet arrive disabled; the next rebuild there enables the default ones that are installed. Fonts you disabled yourself stay disabled in the target. An export made before schema 5 can't tell those apart from fonts that were only missing: a font it adds or turns off stays off, even once installed, so enable it with `update fonts set enabled = 1 where name = '<name>'`. If the target database's schema is older than the export's, nothing is imported: run `.tools/srcp_build_scheme_db.py` first.
 
 Where to keep it (not this repo; `curation*.sql` is gitignored):
 
