@@ -18,6 +18,7 @@ import sys
 import tempfile
 import types
 import unittest
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, ".tools"))
@@ -155,6 +156,55 @@ class BuildTest(DbTest):
         self.assertEqual(self.main["FONT_DIRS"], build.FONT_DIRS)
         nonascii = self.main["DEFAULT_NONASCII_FONT"]
         self.assertEqual(self.main["NONASCII_FONT_FILES"], build.SEED_FONTS[nonascii])
+
+    def fonts(self):
+        return {
+            n: (e, m) for n, e, m in self.db.execute("SELECT name, enabled, missing FROM fonts")
+        }
+
+    def install_fonts(self, *names):
+        """Only these seeded fonts are installed, in a temp font folder."""
+        folder = os.path.join(self.tmp, "fonts")
+        shutil.rmtree(folder, ignore_errors=True)
+        os.makedirs(folder)
+        for name in names:
+            open(os.path.join(folder, build.SEED_FONTS[name][0]), "w").close()
+        return mock.patch.object(build, "FONT_DIRS", [folder])
+
+    def test_a_font_installed_later_is_enabled_but_one_you_disabled_is_not(self):
+        with self.install_fonts():
+            self.build()
+        self.assertEqual(set(self.fonts().values()), {(0, 1)})
+        self.db.execute("UPDATE fonts SET missing = 0 WHERE name = 'Monaco'")  # keep it off
+        with self.install_fonts("Menlo-Regular", "Monaco"):
+            self.build()
+        fonts = self.fonts()
+        self.assertEqual(fonts["Menlo-Regular"], (1, 0))
+        self.assertEqual(fonts["Monaco"], (0, 0))
+        self.assertEqual(fonts["SFMono-Regular"], (0, 1))
+        self.db.execute("UPDATE fonts SET enabled = 0 WHERE name = 'Menlo-Regular'")
+        with self.install_fonts("Menlo-Regular", "Monaco"):
+            self.build()
+        self.assertEqual(self.fonts()["Menlo-Regular"], (0, 0))
+        with self.install_fonts():  # uninstalled: off until it's back
+            self.build()
+        self.assertEqual(self.fonts()["Monaco"], (0, 0))
+        self.db.execute("UPDATE fonts SET enabled = 1 WHERE name = 'Monaco'")
+        with self.install_fonts():
+            self.build()
+        self.assertEqual(self.fonts()["Monaco"], (0, 1))
+
+    def test_schema_5_marks_disabled_fonts_that_are_still_missing(self):
+        self.db.execute("ALTER TABLE fonts DROP COLUMN missing")
+        self.db.execute("PRAGMA user_version = 4")
+        self.db.execute("UPDATE fonts SET enabled = 0")
+        self.db.execute("UPDATE fonts SET enabled = 1 WHERE name = 'Monaco'")
+        with self.install_fonts("Menlo-Regular", "Monaco"):
+            self.build()
+        fonts = self.fonts()
+        self.assertEqual(fonts["SFMono-Regular"], (0, 1))  # not installed: the build's doing
+        self.assertEqual(fonts["Menlo-Regular"], (0, 0))  # installed yet off: your choice
+        self.assertEqual(fonts["Monaco"], (1, 0))
 
 
 class MainScriptTest(DbTest):
@@ -399,6 +449,30 @@ class ExportTest(DbTest):
         self.assertEqual(db.execute("SELECT stars FROM favorites").fetchall(), [(4,)])
         enabled = db.execute("SELECT enabled FROM fonts WHERE name = 'Other-Regular'")
         self.assertEqual(enabled.fetchone(), (0,))
+
+    def test_fonts_you_disabled_carry_over_but_missing_ones_do_not(self):
+        self.db.execute("UPDATE fonts SET enabled = 0, missing = 0 WHERE name = 'Monaco'")
+        self.db.execute("UPDATE fonts SET enabled = 0, missing = 1 WHERE name = 'Menlo-Regular'")
+        self.db.execute("INSERT INTO fonts (name, enabled) VALUES ('Other-Regular', 1)")
+        sql = self.export()
+        target = os.path.join(self.tmp, "target", "schemes.db")
+        folder = os.path.join(self.tmp, "fonts")
+        os.makedirs(folder)
+        for files in build.SEED_FONTS.values():
+            open(os.path.join(folder, files[0]), "w").close()
+        with (
+            contextlib.redirect_stdout(io.StringIO()),
+            mock.patch.object(build, "FONT_DIRS", [folder]),
+        ):
+            rows, _ = build.build_rows(PRESETS, self.repo)
+            build.write_db(target, rows)
+        self.restore(sql, target)
+        db = sqlite3.connect(target)
+        self.addCleanup(db.close)
+        fonts = {n: (e, m) for n, e, m in db.execute("SELECT name, enabled, missing FROM fonts")}
+        self.assertEqual(fonts["Monaco"], (0, 0))
+        self.assertEqual(fonts["Menlo-Regular"], (1, 0))  # installed in the target
+        self.assertEqual(fonts["Other-Regular"], (0, 1))
 
 
 class ReportTest(DbTest):

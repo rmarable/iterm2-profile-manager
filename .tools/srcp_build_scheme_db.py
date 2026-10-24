@@ -255,6 +255,12 @@ MIGRATIONS = [
     );
     CREATE UNIQUE INDEX ratings_event ON ratings (at, preset, COALESCE(font, ''), action);
     """,
+    # 5: missing = 1: disabled by the build only because its file wasn't found, so the build
+    # enables it again once it is; a font you disable yourself has 0 and stays disabled.
+    # Backfilled in migrate().
+    """
+    ALTER TABLE fonts ADD COLUMN missing INTEGER NOT NULL DEFAULT 0;
+    """,
 ]
 
 # Ours, dropped and recreated on every build; views a user adds are left alone.
@@ -328,6 +334,11 @@ def migrate(db):
                 "INSERT OR IGNORE INTO overrides (name, include) VALUES (?, 1)",
                 [(n,) for n in SEED_INCLUDES],
             )
+        if i == 5:  # disabled seeded fonts still not installed were most likely disabled for that
+            db.executemany(
+                "UPDATE fonts SET missing = 1 WHERE name = ? AND enabled = 0",
+                [(n,) for n, files in SEED_FONTS.items() if not font_installed(files)],
+            )
         db.execute(f"PRAGMA user_version = {i}")
     seed_every_build(db)
 
@@ -338,10 +349,17 @@ def seed_every_build(db):
     for name, files in SEED_FONTS.items():
         installed = font_installed(files)
         db.execute(
-            "INSERT OR IGNORE INTO fonts (name, enabled) VALUES (?, ?)", (name, int(installed))
+            "INSERT OR IGNORE INTO fonts (name, enabled, missing) VALUES (?, ?, ?)",
+            (name, int(installed), int(not installed)),
         )
-        if not installed:  # e.g. re-enabled by a curation export from another Mac
-            db.execute("UPDATE fonts SET enabled = 0 WHERE name = ?", (name,))
+        if installed:  # installed since the build disabled it
+            db.execute(
+                "UPDATE fonts SET enabled = 1, missing = 0 WHERE name = ? AND missing = 1", (name,)
+            )
+        else:  # uninstalled since, or enabled by a curation export from another Mac
+            db.execute(
+                "UPDATE fonts SET enabled = 0, missing = 1 WHERE name = ? AND enabled = 1", (name,)
+            )
     db.executemany(
         "UPDATE fonts SET label = ? WHERE name = ? AND label IS NULL",
         [(label, n) for n, label in SEED_FONT_LABELS.items()],
@@ -449,7 +467,7 @@ def print_report(rows, report):
         print(f"[warn] skipped {name!r}: missing ANSI/fg/bg colors")
     for font, files in SEED_FONTS.items():
         if not font_installed(files):
-            print(f"[warn] font not installed: {font} (disabled in the DB until it is)")
+            print(f"[warn] font not installed: {font} (disabled until it is and you rebuild)")
 
 
 def warn_included_duplicates(path):

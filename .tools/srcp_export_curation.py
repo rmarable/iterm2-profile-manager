@@ -38,20 +38,28 @@ def restore_statement(table, cols, row):
         cols = [c for c in cols if c != "id"]
         verb = "INSERT OR IGNORE"
     elif table == "fonts":
-        # Never enable a font the target has disabled (it may not be installed there), and
-        # add fonts it doesn't know yet disabled, for the same reason; do carry over fonts
-        # you disabled, and your labels.
-        new = {**values, "enabled": 0} if "enabled" in values else values
+        # Never enable a font in the target (it may not be installed there): fonts it doesn't
+        # know yet arrive disabled, marked missing if they were in use here, so a rebuild
+        # enables them once installed. Fonts you disabled here, and your labels, carry over.
+        mine_off = values.get("enabled") == 0 and not values.get("missing")
+        new = dict(values)
+        if "enabled" in values:
+            new["enabled"] = 0
+        if "missing" in values:
+            new["missing"] = int(not mine_off)
         insert = (
             f'INSERT OR IGNORE INTO "fonts" ({", ".join(cols)}) '
             f"VALUES ({', '.join(sql_literal(new[c]) for c in cols)});\n"
         )
-        update = (
-            f"UPDATE fonts SET enabled = enabled AND {sql_literal(values.get('enabled'))}"
-            + (f", label = {sql_literal(values['label'])}" if values.get("label") else "")
-            + f" WHERE name = {sql_literal(values['name'])};\n"
-        )
-        return insert + update
+        sets = []
+        if mine_off:
+            sets.append("enabled = 0" + (", missing = 0" if "missing" in values else ""))
+        if values.get("label"):
+            sets.append(f"label = {sql_literal(values['label'])}")
+        if not sets:
+            return insert
+        name = sql_literal(values["name"])
+        return insert + f"UPDATE fonts SET {', '.join(sets)} WHERE name = {name};\n"
     else:
         verb = "INSERT OR REPLACE"
     literals = ", ".join(sql_literal(values[c]) for c in cols)

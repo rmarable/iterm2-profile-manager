@@ -108,6 +108,8 @@ else
 fi
 
 echo "==> Favorites' Dynamic Profiles"
+# iTerm2 also keeps copies in its settings ("Is Dynamic Profile"); at launch it removes any
+# whose file is gone (iTermDynamicProfileManager reallyReloadDynamicProfiles), so the file is enough.
 if [[ -e "$DYNAMIC" ]]; then
 	run rm -f "$DYNAMIC"
 else

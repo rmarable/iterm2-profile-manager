@@ -96,7 +96,7 @@ sqlite3 ~/.local/share/iterm2-color-schemes/schemes.db
 | `colorful_weight` | `3` | Discovery weight of colored-background presets (OKLab chroma ≥ 0.05). `1` = no preference. |
 | `nonascii_font` | `MesloLGSNFM-Regular` | Font for icons and other non-ASCII characters. `''` keeps the profile's setting. The default is skipped while its font file isn't installed; disabling it in `fonts` only keeps it out of the random main fonts. |
 
-Default fonts: SF Mono, Menlo, Monaco, MesloLGS Nerd Font Mono. Fonts that aren't installed start disabled and stay disabled after you install them; enable one with `update fonts set enabled = 1 where name = '<name>'`.
+Default fonts: SF Mono, Menlo, Monaco, MesloLGS Nerd Font Mono. Fonts that aren't installed are disabled (`missing = 1`) until you install them and rebuild (`./setup.sh`, or `python3 .tools/srcp_build_scheme_db.py`). A font you disable yourself stays disabled. To keep a missing one off after you install it, also `set missing = 0`.
 
 ```sql
 update config set value = '0.7' where key = 'favorite_share';
@@ -162,7 +162,7 @@ Import (e.g. on another Mac after `setup.sh`):
 sqlite3 ~/.local/share/iterm2-color-schemes/schemes.db < ~/curation.sql
 ```
 
-Matching rows are updated, others kept; re-importing doesn't duplicate history. Fonts disabled in the target stay disabled, and fonts it doesn't have yet arrive disabled (enable them once they're installed). If the target database's schema is older than the export's, nothing is imported: run `.tools/srcp_build_scheme_db.py` first.
+Matching rows are updated, others kept; re-importing doesn't duplicate history. Fonts disabled in the target stay disabled, and fonts it doesn't have yet arrive disabled; the next rebuild there enables the default ones that are installed. Fonts you disabled yourself stay disabled in the target. If the target database's schema is older than the export's, nothing is imported: run `.tools/srcp_build_scheme_db.py` first.
 
 Where to keep it (not this repo; `curation*.sql` is gitignored):
 
@@ -266,7 +266,7 @@ Double-clicking an `.itermcolors` file also imports it, with one dialog per file
 | `schemes` | One row per installed preset: `mode`, `mode_source`, `fg_contrast`, `accent_contrast`, `distinct_accents`, `monochrome`, `passes_gate`, `duplicate_of`, `bg_chroma`. Rebuilt by `srcp_build_scheme_db.py`. |
 | `overrides` | `name`, `mode` (force light/dark), `include` (1 = always pick, 0 = never). Seeded with 6 near-miss presets forced in. |
 | `config` | Settings (see [Configuration](#configuration)). |
-| `fonts` | `name` (PostScript name), `enabled`, `label`. |
+| `fonts` | `name` (PostScript name), `enabled`, `label`, `missing` (1: disabled only because its file wasn't found; a rebuild enables it once it is). |
 | `favorites` | `preset`, `font`, `size`, `stars`, `saved_at`. One row per preset and font. |
 | `ratings` | Every save, removal and Never show: `at`, `preset`, `font`, `action`, `stars`, `previous_stars`. Never cleared. Older databases have none from before it existed. |
 | `launches` | One row per session: `launched_at`, `preset`, `font`, `size`, `mode`, `source` (favorite or discovery), `stars`, `ended_at`, `duration_s`, `end_reason`. |
