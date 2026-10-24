@@ -5,22 +5,35 @@
 ObjC.import("Cocoa");
 
 // NSAlert gives Escape only to a button titled "Cancel" (a hidden one ignores keys, and a
-// button has one key, so Done can't take Escape without losing Return). The text view's
-// scroll view answers Escape instead, ending the alert as if Done (the first button) was
-// clicked. It answers Return and Enter the same way: left to the Done button, the first
-// Return was lost (the window closed on the second).
+// button has one key, so Done can't take Escape without losing Return). So Escape, Return
+// and Enter end the alert here, as if Done (the first button) was clicked. The text view
+// has the keyboard when the alert opens and takes keys as keyDown (it swallowed the first
+// Return); once it lets go, keys reach the scroll view as key equivalents.
+const CLOSE_KEYS = ["\u001b", "\r", "\u0003"];
+const closeOn = (event) => {
+  if (!CLOSE_KEYS.includes(event.charactersIgnoringModifiers.js)) return false;
+  $.NSApp.stopModalWithCode(1000);
+  return true;
+};
+ObjC.registerSubclass({
+  name: "SRCPPopupTextView",
+  superclass: "NSTextView",
+  methods: {
+    "keyDown:": {
+      types: ["void", ["id"]],
+      implementation: function (event) {
+        if (!closeOn(event)) ObjC.super(this).keyDown(event);
+      },
+    },
+  },
+});
 ObjC.registerSubclass({
   name: "SRCPPopupScrollView",
   superclass: "NSScrollView",
   methods: {
     "performKeyEquivalent:": {
       types: ["bool", ["id"]],
-      implementation: function (event) {
-        // Escape, Return, Enter.
-        if (!["\u001b", "\r", "\u0003"].includes(event.charactersIgnoringModifiers.js)) return false;
-        $.NSApp.stopModalWithCode(1000);
-        return true;
-      },
+      implementation: closeOn,
     },
   },
 });
@@ -48,7 +61,7 @@ function run(argv) {
   scroll.borderType = $.NSNoBorder;
   scroll.drawsBackground = false;
 
-  const view = $.NSTextView.alloc.initWithFrame($.NSMakeRect(0, 0, width, height));
+  const view = $.SRCPPopupTextView.alloc.initWithFrame($.NSMakeRect(0, 0, width, height));
   view.string = text;
   view.font = font;
   view.editable = false;
