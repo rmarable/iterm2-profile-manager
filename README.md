@@ -137,7 +137,7 @@ Kept: this repo, iTerm2 settings backups, shell config, and the Claude Code inte
 | Console: `preset not found: X` | Preset renamed or deleted in iTerm2. Run `python3 .tools/srcp_build_scheme_db.py`. |
 | Most presets show your default profile's colors | Settings → Profiles → Colors: turn off **Use separate colors for light and dark mode** (few presets define both). |
 | Always light, or always dark | Settings → Appearance → Theme: **Regular**, **Minimal** or **Compact**, not Light, Dark or High Contrast. |
-| Console: `another copy is already running; exiting` | Expected after a restart; a lock allows one copy. |
+| Console: `another copy is already running; exiting` | Expected after a restart; a lock allows one copy. But if new tabs stopped changing color after you relaunched iTerm2, a copy from before is stuck (fixed in 0.6.9). Quit iTerm2, run `pkill -f srcp_set_random_color_profile` in Terminal.app, and relaunch. |
 | A font never appears | Disabled or not installed: `select name, enabled from fonts`. If you installed it after setup, run `python3 .tools/srcp_build_scheme_db.py`. No restart needed. |
 | A favorite is missing from the Profiles menu | Preset not installed, or marked **Never show**. |
 | ⌃⌥⌘S does nothing | Check Settings → Keys → Key Bindings for `save_profile()`, and the Console for the main script's startup line. |
