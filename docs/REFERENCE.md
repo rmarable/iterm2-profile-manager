@@ -4,7 +4,7 @@ Details behind the [README](../README.md). The main script is `AutoLaunch/srcp_s
 
 ## Rating dialog
 
-Right-click a session → **Save/update this profile**, or press ⌃⌥⌘S. The rating dialog shows the preset, mode, font, current stars, and the preset's launch count and last launch (any font). Changes apply to the next new session.
+Right-click a session → **Save/update this profile**, or press ⌃⌥⌘S. The rating dialog shows the preset, mode, font, current stars, and the preset's launch count and last launch (any font). Changes apply to the next new session. Escape or **Cancel** closes it without saving; Return does nothing, so it can't save a rating by accident.
 
 | Button | Effect |
 |---|---|

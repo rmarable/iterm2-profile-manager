@@ -7,7 +7,8 @@ ObjC.import("Cocoa");
 // NSAlert gives Escape only to a button titled "Cancel" (a hidden one ignores keys, and a
 // button has one key, so Done can't take Escape without losing Return). The text view's
 // scroll view answers Escape instead, ending the alert as if Done (the first button) was
-// clicked.
+// clicked. It answers Return and Enter the same way: left to the Done button, the first
+// Return was lost (the window closed on the second).
 ObjC.registerSubclass({
   name: "SRCPPopupScrollView",
   superclass: "NSScrollView",
@@ -15,7 +16,8 @@ ObjC.registerSubclass({
     "performKeyEquivalent:": {
       types: ["bool", ["id"]],
       implementation: function (event) {
-        if (event.charactersIgnoringModifiers.js !== "\u001b") return false;
+        // Escape, Return, Enter.
+        if (!["\u001b", "\r", "\u0003"].includes(event.charactersIgnoringModifiers.js)) return false;
         $.NSApp.stopModalWithCode(1000);
         return true;
       },

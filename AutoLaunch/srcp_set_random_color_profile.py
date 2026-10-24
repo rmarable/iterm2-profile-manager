@@ -35,7 +35,7 @@ from typing import IO, Any, TypeVar
 import iterm2
 from iterm2.capabilities import supports_context_menu_submenus_and_visibility
 
-VERSION = "0.6.7"  # bump on every change, so the Console shows which code is running
+VERSION = "0.6.8"  # bump on every change, so the Console shows which code is running
 DATA_DIR = os.path.expanduser("~/.local/share/iterm2-color-schemes")
 DB_PATH = os.path.join(DATA_DIR, "schemes.db")
 LOCK_PATH = os.path.join(DATA_DIR, ".lock")
@@ -759,8 +759,9 @@ async def save_dialog(
     if stars:
         lines.append(f"Saved now with {STAR_BUTTONS[stars - 1]}.")
     alert = iterm2.Alert("Save/update this profile", "\n".join(lines), window_id)
-    # Remove favorite only appears when this (preset, font) is a favorite. Cancel goes first:
-    # the first button is the default, so Return closes the dialog instead of saving 1 star.
+    # Remove favorite only appears when this (preset, font) is a favorite. Cancel goes first so
+    # Return can't save 1 star: NSAlert gives Return to the first button and Escape to one
+    # titled Cancel, so here Escape cancels and Return only beeps (checked in iTerm2 3.7.6).
     buttons = [CANCEL, *STAR_BUTTONS, *([REMOVE] if stars else []), NEVER]
     for b in buttons:
         alert.add_button(b)
