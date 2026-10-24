@@ -27,6 +27,7 @@ import srcp_db_backup  # noqa: E402
 import srcp_export_curation  # noqa: E402
 import srcp_favorites  # noqa: E402
 import srcp_iterm_prefs  # noqa: E402
+import srcp_odds  # noqa: E402
 import srcp_preset_history  # noqa: E402
 import srcp_uninstall_prefs  # noqa: E402
 
@@ -261,6 +262,115 @@ class MainScriptTest(DbTest):
         guid = self.main["favorite_guid"]("Dark One", "Monaco")
         self.assertEqual(guid, self.main["favorite_guid"]("Dark One", "Monaco"))
         self.assertNotEqual(guid, self.main["favorite_guid"]("Dark One", "Menlo-Regular"))
+
+
+class PickOddsTest(DbTest):
+    """pick()'s odds as docs/REFERENCE.md "How a look is picked" states them.
+
+    The fixture's discovery pools: dark = Dark One, Dark Two; light = Light One, Yellow
+    (Yellow has a colored background). A fixed seed keeps every run the same.
+    """
+
+    N = 4000
+
+    def setUp(self):
+        super().setUp()
+        self.main["random"].seed(20261024)
+
+    def config(self, **values):
+        for key, value in values.items():
+            self.db.execute("UPDATE config SET value = ? WHERE key = ?", (str(value), key))
+
+    def picks(self, mode):
+        return [self.main["pick"](self.db, mode, set()) for _ in range(self.N)]
+
+    def share(self, picks, test):
+        return sum(1 for p in picks if test(p)) / len(picks)
+
+    def test_no_favorites_means_discovery_every_time(self):
+        self.assertTrue(all(p[2] == "discovery" for p in self.picks("dark")))
+
+    def test_favorite_share_ramps_with_favorite_presets(self):
+        self.main["save_favorite"](self.db, "Light One", "Monaco", 13, 3)
+        # One favorite preset of the default target 10: 0.5 x 1/10 = 5%.
+        self.assertAlmostEqual(
+            self.share(self.picks("light"), lambda p: p[2] == "favorite"), 0.05, delta=0.015
+        )
+        # At the target, the full favorite_share.
+        self.config(favorite_target=1)
+        self.assertAlmostEqual(
+            self.share(self.picks("light"), lambda p: p[2] == "favorite"), 0.5, delta=0.03
+        )
+        # More fonts of the same preset don't speed the ramp (it counts presets).
+        self.config(favorite_target=10)
+        self.main["save_favorite"](self.db, "Light One", "Menlo-Regular", 13, 3)
+        self.assertAlmostEqual(
+            self.share(self.picks("light"), lambda p: p[2] == "favorite"), 0.05, delta=0.015
+        )
+
+    def test_favorites_are_weighted_by_stars_per_preset_and_font(self):
+        self.config(favorite_share=1, favorite_target=1)  # always a favorite
+        self.main["save_favorite"](self.db, "Dark One", "Monaco", 13, 1)
+        self.main["save_favorite"](self.db, "Dark Two", "Monaco", 13, 5)
+        picks = self.picks("dark")
+        five = self.share(picks, lambda p: p[0] == "Dark Two")
+        self.assertAlmostEqual(five / (1 - five), 5, delta=0.6)  # 5 stars : 1 star
+        self.assertEqual({(p[2], p[3]) for p in picks if p[0] == "Dark Two"}, {("favorite", 5)})
+        # A second saved font is a second ticket: 1 + 1 stars against 5.
+        self.main["save_favorite"](self.db, "Dark One", "Menlo-Regular", 13, 1)
+        five = self.share(self.picks("dark"), lambda p: p[0] == "Dark Two")
+        self.assertAlmostEqual(five / (1 - five), 2.5, delta=0.3)
+
+    def test_colored_backgrounds_get_colorful_weight(self):
+        yellow = self.share(self.picks("light"), lambda p: p[0] == "Yellow")
+        self.assertAlmostEqual(yellow, 0.75, delta=0.03)  # default weight 3: 3 / (3 + 1)
+        self.config(colorful_weight=1)
+        yellow = self.share(self.picks("light"), lambda p: p[0] == "Yellow")
+        self.assertAlmostEqual(yellow, 0.5, delta=0.03)
+
+    def test_recent_discovery_picks_are_skipped_until_all_are_recent(self):
+        def launch(preset):
+            self.main["record_launch"](
+                self.db, preset, None, 13, "dark", "discovery", None, "p", preset
+            )
+
+        launch("Dark One")
+        self.assertEqual({p[0] for p in self.picks("dark")}, {"Dark Two"})
+        launch("Dark Two")  # every preset is recent: the window falls back to all of them
+        self.assertEqual({p[0] for p in self.picks("dark")}, {"Dark One", "Dark Two"})
+        self.config(recent_window=1)  # only Dark Two is recent now
+        self.assertEqual({p[0] for p in self.picks("dark")}, {"Dark One"})
+
+    def test_odds_report_matches_pick(self):
+        # .tools/srcp_odds.py computes pick()'s odds exactly; check it against pick() itself.
+        self.config(favorite_target=2)
+        self.main["save_favorite"](self.db, "Dark One", "Monaco", 13, 1)
+        self.main["save_favorite"](self.db, "Dark One", "Menlo-Regular", 13, 4)
+        self.main["save_favorite"](self.db, "Light One", "Monaco", 13, 3)
+        self.main["record_launch"](
+            self.db, "Dark Two", None, 13, "dark", "discovery", None, "p", "s"
+        )
+        for mode in ("light", "dark"):
+            expected = srcp_odds.odds(self.db, mode)
+            picks = self.picks(mode)
+            got = self.share(picks, lambda p: p[2] == "favorite")
+            self.assertAlmostEqual(got, expected["chance_favorite"], delta=0.02, msg=mode)
+            for fav in expected["favorites"]:
+                got = self.share(picks, lambda p, f=fav: (p[0], p[1]) == (f["preset"], f["font"]))
+                self.assertAlmostEqual(got, fav["chance"], delta=0.02, msg=fav)
+            for name, chance in expected["new"]["presets"].items():
+                got = self.share(picks, lambda p, n=name: p[0] == n and p[2] == "discovery")
+                self.assertAlmostEqual(got, chance, delta=0.02, msg=name)
+            total = sum(expected["fonts"].values())
+            self.assertAlmostEqual(total, expected["chance_favorite"] + expected["chance_new"])
+
+    def test_a_favorite_whose_font_was_disabled_gets_a_random_font(self):
+        self.config(favorite_share=1, favorite_target=1)
+        self.main["save_favorite"](self.db, "Dark One", "Monaco", 13, 4)
+        self.main["save_favorite"](self.db, "Dark Two", "Monaco", 13, 4)
+        self.assertEqual({p[1] for p in self.picks("dark")}, {"Monaco"})
+        self.db.execute("UPDATE fonts SET enabled = 0 WHERE name = 'Monaco'")
+        self.assertEqual({p[1] for p in self.picks("dark")}, {None})  # caller picks a random font
 
 
 class ExportTest(DbTest):

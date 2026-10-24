@@ -40,6 +40,16 @@ Stars  Preset          Font    Mode  Launches  Last used         Avg open  Saved
 5 ★    Selenized Dark  Monaco  dark  1         2026-10-17 21:03  2m 15s    2026-10-17
 ```
 
+## See the odds
+
+`.tools/srcp_odds.py` shows, as bar charts, the chance that the next new session gets a favorite or a new preset, which favorites, a colored background, and each font, computed exactly from your database the way the main script picks (a test keeps them in step). Read-only.
+
+```sh
+python3 .tools/srcp_odds.py                  # light and dark
+python3 .tools/srcp_odds.py --mode dark --top 20
+python3 .tools/srcp_odds.py --json           # the numbers, for other tools
+```
+
 ## How a look is picked
 
 For each new session, the main script:
@@ -241,6 +251,7 @@ Double-clicking an `.itermcolors` file also imports it, with one dialog per file
 | `.tools/srcp_import_presets.py` | Imports a folder of `.itermcolors` files without a dialog per file. |
 | `.tools/srcp_add_key_binding.py` | Binds ⌃⌥⌘S. |
 | `.tools/srcp_favorites.py` | Ratings report (CLI). |
+| `.tools/srcp_odds.py` | Odds of the next session's look, as bar charts or JSON. |
 | `.tools/srcp_popup.js` | Draws the ratings window for `srcp_ratings.py`. |
 | `.tools/srcp_export_curation.py` | Exports ratings and settings as SQL. |
 | `.tools/srcp_uninstall_prefs.py` | Removes the key binding and presets from iTerm2's settings (used by `uninstall.sh`). |
