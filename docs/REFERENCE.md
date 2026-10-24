@@ -50,6 +50,8 @@ python3 .tools/srcp_odds.py --mode dark --top 20
 python3 .tools/srcp_odds.py --json           # the numbers, for other tools
 ```
 
+These are the odds, not what you actually got. A view of your launch history is planned for late November 2026, once there's enough of it ([ROADMAP](ROADMAP.md)).
+
 ## How a look is picked
 
 For each new session, the main script:

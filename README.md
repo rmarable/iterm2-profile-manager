@@ -149,6 +149,7 @@ Kept: this repo, iTerm2 settings backups, shell config, and the Claude Code inte
 ## More
 
 - [docs/REFERENCE.md](docs/REFERENCE.md): how a look is picked, [seeing the odds](docs/REFERENCE.md#see-the-odds), configuration, backups and restoring, exporting ratings, the Claude Code integration, the database, and development.
+- [docs/ROADMAP.md](docs/ROADMAP.md): what's planned next.
 - [DISCLAIMER.md](DISCLAIMER.md): what this changes on your Mac.
 - If you use Claude Code or Codex, open it in this repo and ask it to explain or change anything here.
 
