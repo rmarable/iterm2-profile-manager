@@ -88,6 +88,7 @@ It backs up iTerm2's settings to `~/.local/share/iterm2-profile-manager/prefs-ba
 | See your ratings | **Scripts → srcp_ratings.py** |
 | See schemes you've hidden | **Scripts → srcp_ratings.py** → **Hidden** |
 | Bring a hidden scheme back | **Hidden** shows how; or rate it from a tab that still has it |
+| See the odds of the next look | In the repo: `python3 .tools/srcp_odds.py`. Bar charts of the chance of each favorite, a colored background, and each font. Changes nothing. |
 
 Changes apply to the next session you open. Sessions opened from a favorite profile keep that look.
 
@@ -147,7 +148,7 @@ Kept: this repo, iTerm2 settings backups, shell config, and the Claude Code inte
 
 ## More
 
-- [docs/REFERENCE.md](docs/REFERENCE.md): how a look is picked, configuration, backups and restoring, exporting ratings, the Claude Code integration, the database, and development.
+- [docs/REFERENCE.md](docs/REFERENCE.md): how a look is picked, [seeing the odds](docs/REFERENCE.md#see-the-odds), configuration, backups and restoring, exporting ratings, the Claude Code integration, the database, and development.
 - [DISCLAIMER.md](DISCLAIMER.md): what this changes on your Mac.
 - If you use Claude Code or Codex, open it in this repo and ask it to explain or change anything here.
 
