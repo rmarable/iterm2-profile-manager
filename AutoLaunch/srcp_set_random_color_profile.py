@@ -35,7 +35,7 @@ from typing import IO, Any, TypeVar
 import iterm2
 from iterm2.capabilities import supports_context_menu_submenus_and_visibility
 
-VERSION = "0.6.8"  # bump on every change, so the Console shows which code is running
+VERSION = "0.6.9"  # bump on every change, so the Console shows which code is running
 DATA_DIR = os.path.expanduser("~/.local/share/iterm2-color-schemes")
 DB_PATH = os.path.join(DATA_DIR, "schemes.db")
 LOCK_PATH = os.path.join(DATA_DIR, ".lock")
@@ -883,6 +883,7 @@ async def main(connection: iterm2.Connection) -> None:
         await asyncio.gather(
             watch_new(connection, app, store, new_sessions),
             watch_ended(store, ended_sessions),
+            exit_on_disconnect(connection),
         )
 
 
@@ -933,6 +934,15 @@ async def watch_ended(store: Store, mon: iterm2.SessionTerminationMonitor) -> No
             await store.call(record_end, session_id)
         except Exception as e:
             log("warn", f"recording session end failed: {e!r}")
+
+
+async def exit_on_disconnect(connection: iterm2.Connection) -> None:
+    # The monitors never return once iTerm2 quits, so without this the process outlives it
+    # and holds the lock, and the copy the next iTerm2 launch starts exits.
+    if connection.websocket is not None:
+        await connection.websocket.wait_closed()
+    log("info", "iTerm2 closed the connection; exiting")
+    sys.exit(0)  # returning would leave the watchers, and so the process, alive
 
 
 iterm2.run_forever(main)

@@ -7,6 +7,7 @@ touches the real database or iTerm2's settings. lint.sh runs it with
 The dot keeps this folder out of iTerm2's Scripts menu, like .tools/.
 """
 
+import asyncio
 import contextlib
 import io
 import os
@@ -229,6 +230,15 @@ class MainScriptTest(DbTest):
         # Disabled only means "not a random main font": still the icon font.
         self.db.execute("UPDATE fonts SET enabled = 0 WHERE name = ?", (font,))
         self.assertEqual(self.main["nonascii_font"](self.db), font)
+
+    def test_exits_when_iterm2_closes_the_connection(self):
+        async def closed():
+            return None
+
+        connection = types.SimpleNamespace(websocket=types.SimpleNamespace(wait_closed=closed))
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as cm:
+            asyncio.run(self.main["exit_on_disconnect"](connection))
+        self.assertEqual(cm.exception.code, 0)
 
     def test_profiles_sync_on_a_db_without_font_labels(self):
         self.main["subprocess"] = types.SimpleNamespace(
