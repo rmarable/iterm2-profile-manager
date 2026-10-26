@@ -8,7 +8,8 @@ recent_window picks, with colored-background presets weighted by colorful_weight
 Records every launch and when it ended, and snapshots the DB once a day.
 "Save/update this profile" (right-click) or the save_profile() key binding stars the
 current look; "Remove from favorites" (right-click; hidden on non-favorites only where
-iTerm2 supports API protocol 1.23+) un-stars it. Every favorite is also an
+iTerm2 supports API protocol 1.23+) un-stars it; "Change to another profile" (right-click)
+re-rolls the session's look. Every favorite is also an
 iTerm2 profile ("Kibble - Menlo"), kept in a Dynamic Profiles file.
 """
 
@@ -35,7 +36,7 @@ from typing import IO, Any, TypeVar
 import iterm2
 from iterm2.capabilities import supports_context_menu_submenus_and_visibility
 
-VERSION = "0.6.9"  # bump on every change, so the Console shows which code is running
+VERSION = "0.7.0"  # bump on every change, so the Console shows which code is running
 DATA_DIR = os.path.expanduser("~/.local/share/iterm2-color-schemes")
 DB_PATH = os.path.join(DATA_DIR, "schemes.db")
 LOCK_PATH = os.path.join(DATA_DIR, ".lock")
@@ -61,6 +62,7 @@ FONT_DIRS = [
 ]
 MENU_ID = "com.rmarable.set-random-color-profile.save"
 REMOVE_MENU_ID = "com.rmarable.set-random-color-profile.remove"
+CHANGE_MENU_ID = "com.rmarable.set-random-color-profile.change"
 # iTerm2 watches this folder and updates the Profiles menu when the file changes.
 DYNAMIC_PATH = os.path.expanduser(
     "~/Library/Application Support/iTerm2/DynamicProfiles/iterm2-profile-manager.plist"
@@ -261,13 +263,14 @@ def record_launch(db: sqlite3.Connection, *values: Any) -> None:
     )
 
 
-def record_end(db: sqlite3.Connection, session_id: str) -> None:
+def record_end(db: sqlite3.Connection, session_id: str, reason: str = "closed") -> None:
+    """reason: 'closed' (session ended) or 'changed' (re-rolled from the menu)."""
     t = now()
     db.execute(
-        "UPDATE launches SET ended_at = ?, end_reason = 'closed', "
+        "UPDATE launches SET ended_at = ?, end_reason = ?, "
         "duration_s = CAST(round((julianday(?) - julianday(launched_at)) * 86400) AS INTEGER) "
         "WHERE session_id = ? AND ended_at IS NULL AND end_reason IS NULL",
-        (t, t, session_id),
+        (t, reason, t, session_id),
     )
 
 
@@ -604,19 +607,25 @@ async def keep_favorite_profile(
 
 
 async def color_session(
-    connection: iterm2.Connection, app: iterm2.App, store: Store, session: iterm2.Session
+    connection: iterm2.Connection,
+    app: iterm2.App,
+    store: Store,
+    session: iterm2.Session,
+    reroll: bool = False,
 ) -> None:
+    """reroll: replace the session's look (the menu's Change), even a favorite profile's."""
+    current = await session.async_get_variable("user.color_preset")
     # Already has a look: a restored window, or one startup() colored while it was also
     # queued as new. Coloring again would change it and log a second launch.
-    if await session.async_get_variable("user.color_preset"):
+    if current and not reroll:
         return
     theme = await app.async_get_theme()
     mode = "dark" if "dark" in theme else "light"
     await sync_and_log(store)  # picks up favorites changed outside the dialog
     profile = await session.async_get_profile()
-    if await keep_favorite_profile(store, session, profile):
+    if not reroll and await keep_favorite_profile(store, session, profile):
         return
-    exclude: set[str] = set()
+    exclude: set[str] = {current} if current else set()  # a re-roll never gives the same back
     for _ in range(3):
         choice = await store.call(pick, mode, exclude)
         if choice is None:  # store.call already logged why
@@ -651,6 +660,8 @@ async def color_session(
         variables["font"] = font
         variables["is_favorite"] = int(bool(await store.call(is_favorite, preset_name, font)))
     await set_variables(session, **variables)
+    if reroll:
+        await store.call(record_end, session.session_id, "changed")
     await store.call(
         record_launch,
         preset_name,
@@ -805,10 +816,21 @@ async def remove_from_menu(
     await iterm2.Alert("Remove from favorites", text, window_id).async_run(connection)
 
 
+async def change_from_menu(
+    connection: iterm2.Connection, app: iterm2.App, store: Store, session_id: str
+) -> None:
+    session = app.get_session_by_id(session_id)
+    if not session:
+        log("warn", f"change: session {session_id} not found")
+        return
+    await color_session(connection, app, store, session, reroll=True)
+
+
 async def register_save_handlers(
     connection: iterm2.Connection, app: iterm2.App, store: Store
 ) -> None:
-    """Save (right-click and save_profile() key) and Remove from favorites (right-click)."""
+    """Save (right-click and save_profile() key), Remove from favorites and Change to another
+    profile (right-click)."""
     running: dict[str, asyncio.Task[None]] = {}
 
     def start(key: str, coro: Coroutine[Any, Any, None]) -> None:
@@ -842,8 +864,15 @@ async def register_save_handlers(
     async def remove_favorite_menu(session_id: str = iterm2.Reference("id")) -> None:  # pyright: ignore[reportArgumentType]  # Reference resolves to the id at call time
         start(f"remove:{session_id}", remove_from_menu(connection, app, store, session_id))
 
+    @iterm2.ContextMenuProviderRPC
+    async def change_profile_menu(session_id: str = iterm2.Reference("id")) -> None:  # pyright: ignore[reportArgumentType]  # Reference resolves to the id at call time
+        start(f"change:{session_id}", change_from_menu(connection, app, store, session_id))
+
     await save_profile.async_register(connection)
     await save_profile_menu.async_register(connection, "Save/update this profile", MENU_ID)
+    await change_profile_menu.async_register(
+        connection, "Change to another profile", CHANGE_MENU_ID
+    )
     # Hide the item on non-favorites where iTerm2 can (API protocol 1.23+, newer than 3.7.6);
     # elsewhere it shows on every tab and remove_from_menu explains. Passing visible_when to
     # an older iTerm2 only adds a warning to the Console.

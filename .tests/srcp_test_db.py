@@ -240,6 +240,44 @@ class MainScriptTest(DbTest):
             asyncio.run(self.main["exit_on_disconnect"](connection))
         self.assertEqual(cm.exception.code, 0)
 
+    def test_change_ends_the_old_launch_and_close_ends_the_new(self):
+        launch = ("Dark One", "Monaco", 13, "dark", "discovery", None, "Default", "s1")
+        self.main["record_launch"](self.db, *launch)
+        self.main["record_end"](self.db, "s1", "changed")
+        self.main["record_launch"](self.db, "Dark Two", *launch[1:])
+        self.main["record_end"](self.db, "s1")
+        rows = self.db.execute("SELECT preset, end_reason, duration_s FROM launches ORDER BY id")
+        self.assertEqual(rows.fetchall(), [("Dark One", "changed", 0), ("Dark Two", "closed", 0)])
+
+    def test_reroll_replaces_the_look_and_never_repeats_it(self):
+        self.main["FONT_DIRS"] = []  # no icon font
+        self.main["sync_and_log"] = mock.AsyncMock()
+        self.main["get_preset"] = mock.AsyncMock(side_effect=lambda _c, name: name)
+        variables = {"user.color_preset": "Dark One"}
+
+        async def set_variable(name, value):
+            variables[name] = value
+
+        profile = mock.AsyncMock(normal_font="Monaco 13")
+        profile.name = "Default"  # not a constructor argument: name= names the mock
+        session = mock.AsyncMock(session_id="s1", async_set_variable=set_variable)
+        session.async_get_variable.side_effect = variables.get
+        session.async_get_profile.return_value = profile
+        app = mock.AsyncMock()
+        app.async_get_theme.return_value = ["dark"]
+        store = self.main["Store"](self.db_path)
+        color = self.main["color_session"]
+        launch = ("Dark One", "Monaco", 13, "dark", "discovery", None, "Default", "s1")
+        self.main["record_launch"](self.db, *launch)
+        with contextlib.redirect_stdout(io.StringIO()):
+            asyncio.run(color(None, app, store, session))  # has a look: left alone
+            profile.async_set_color_preset.assert_not_called()
+            asyncio.run(color(None, app, store, session, reroll=True))
+        profile.async_set_color_preset.assert_called_once_with("Dark Two")
+        self.assertEqual(variables["user.color_preset"], "Dark Two")
+        rows = self.db.execute("SELECT preset, end_reason FROM launches ORDER BY id")
+        self.assertEqual(rows.fetchall(), [("Dark One", "changed"), ("Dark Two", None)])
+
     def test_profiles_sync_on_a_db_without_font_labels(self):
         self.main["subprocess"] = types.SimpleNamespace(
             run=lambda *a, **k: types.SimpleNamespace(stdout=plistlib.dumps({}))

@@ -82,6 +82,7 @@ It backs up iTerm2's settings to `~/.local/share/iterm2-profile-manager/prefs-ba
 | To | Do |
 |---|---|
 | Keep a look you like | Right-click → **Save/update this profile**, or press ⌃⌥⌘S, then pick 1 to 5 stars. Rate again to change. |
+| Try a different look in this tab | Right-click → **Change to another profile**. Repeat until one sticks. |
 | Open a saved look | **Profiles → Favorites → \<name\>** |
 | Drop a favorite | Same dialog → **Remove favorite** |
 | Never see a scheme again | Same dialog → **Never show**. It's gone for good, with every font, and survives updates. |

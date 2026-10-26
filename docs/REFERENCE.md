@@ -15,6 +15,10 @@ Right-click a session → **Save/update this profile**, or press ⌃⌥⌘S. The
 
 Right-click → **Remove from favorites** does the same as **Remove favorite**, without the dialog. iTerm2 3.7.6 shows it on every session and, on a non-favorite, says so and changes nothing. iTerm2 with Python API protocol 1.23+ hides it on non-favorites; the script uses that when available.
 
+## Change to another profile
+
+Right-click a session → **Change to another profile** re-rolls its look on the spot: a new pick for the current light/dark mode, made exactly as for a new session (favorite or discovery, font included), never the preset it has now. Works on any session, including ones opened from a favorite profile (only that session changes). The old look's `launches` row ends with `end_reason = 'changed'`, and the new look gets its own row. A second click while one change is still running is ignored.
+
 ## Favorite profiles
 
 Each favorite becomes a profile named `<preset> - <font>` under **Profiles → Favorites**. Sessions opened from one keep that look.
@@ -62,7 +66,7 @@ For each new session, the main script:
    - **Favorite:** weighted by stars per saved preset + font (a 5 ★ is picked 5× as often as a 1 ★; a preset saved with three fonts has three chances), in its saved font. If that font has since been disabled, a random one.
    - **Discovery:** a preset of this mode that passes the readability checks, isn't a favorite, and isn't among the last 20 discovery picks in this mode. Colored-background presets (yellow, pink, teal rather than white, grey or black) get 3× weight. They are rare, so this lifts them to roughly a fifth of light and a third of dark sessions. Random font.
 4. **Applies the preset and font** to this session only, at the profile's font size. Also sets the non-ASCII font to MesloLGS Nerd Font (`nonascii_font`), so prompt icons (Powerlevel10k etc.) render with any font.
-5. **Logs the launch**, and the close time when the session ends. Sessions open when iTerm2 quits get `end_reason = 'unknown'` at the next start.
+5. **Logs the launch**, and the close time when the session ends. Sessions open when iTerm2 quits get `end_reason = 'unknown'` at the next start. A look replaced by **Change to another profile** ends with `end_reason = 'changed'`.
 
 ### Light or dark
 
@@ -271,7 +275,7 @@ Double-clicking an `.itermcolors` file also imports it, with one dialog per file
 | `fonts` | `name` (PostScript name), `enabled`, `label`, `missing` (1: disabled only because its file wasn't found; a rebuild enables it once it is). |
 | `favorites` | `preset`, `font`, `size`, `stars`, `saved_at`. One row per preset and font. |
 | `ratings` | Every save, removal and Never show: `at`, `preset`, `font`, `action`, `stars`, `previous_stars`. Never cleared. Older databases have none from before it existed. |
-| `launches` | One row per session: `launched_at`, `preset`, `font`, `size`, `mode`, `source` (favorite or discovery), `stars`, `ended_at`, `duration_s`, `end_reason`. |
+| `launches` | One row per look shown in a session: `launched_at`, `preset`, `font`, `size`, `mode`, `source` (favorite or discovery), `stars`, `ended_at`, `duration_s`, `end_reason` (`closed`, `changed` or `unknown`). |
 | `effective` (view) | `schemes` with `overrides` applied. |
 | `discovery` (view) | Presets eligible for discovery, with `colorful` (1 = colored background). |
 | `favorite_pool` (view) | Favorites that can be picked, with their mode. |
