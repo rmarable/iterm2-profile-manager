@@ -21,8 +21,10 @@ DEFAULT_DB = os.path.expanduser("~/.local/share/iterm2-color-schemes/schemes.db"
 
 FAVORITES = """
 SELECT f.stars, f.preset, COALESCE(fo.label, f.font) AS font, e.mode,
-       count(l.id) AS launches, max(l.launched_at) AS last_used,
-       CAST(avg(l.duration_s) AS INTEGER) AS avg_open, f.saved_at
+       count(l.id) AS launches, COALESCE(sum(l.end_reason = 'changed'), 0) AS changed,
+       max(l.launched_at) AS last_used,
+       CAST(avg(CASE WHEN l.end_reason IS NOT 'changed' THEN l.duration_s END) AS INTEGER)
+           AS avg_open, f.saved_at
 FROM favorites f
 LEFT JOIN effective e ON e.name = f.preset
 LEFT JOIN fonts fo ON fo.name = f.font
@@ -86,10 +88,20 @@ def show_favorites(db, mode, min_stars, cli_hints=True):
         print("No favorites match." if mode or min_stars > 1 else "No favorites yet.")
         return
     table(
-        ["Stars", "Preset", "Font", "Mode", "Launches", "Last used", "Avg open", "Saved"],
         [
-            (stars(st), p, f, m or "?", n, local(last), duration(avg), local(saved, "%Y-%m-%d"))
-            for st, p, f, m, n, last, avg, saved in rows
+            "Stars",
+            "Preset",
+            "Font",
+            "Mode",
+            "Launches",
+            "Changed",
+            "Last used",
+            "Avg open",
+            "Saved",
+        ],
+        [
+            (stars(st), p, f, m or "?", n, ch, local(last), duration(avg), local(saved, "%Y-%m-%d"))
+            for st, p, f, m, n, ch, last, avg, saved in rows
         ],
     )
     hidden = db.execute("SELECT count(*) FROM overrides WHERE include = 0").fetchone()[0]

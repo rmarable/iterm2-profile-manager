@@ -289,8 +289,11 @@ CREATE VIEW launch_stats AS
            max(l.launched_at) AS last_launched,
            sum(l.source = 'favorite') AS favorite_launches,
            sum(l.source = 'discovery') AS discovery_launches,
+           sum(l.end_reason = 'changed') AS changed_launches,
            sum(l.duration_s) AS total_duration_s,
-           CAST(avg(l.duration_s) AS INTEGER) AS avg_duration_s,
+           -- a look re-rolled away from (Change to another profile) isn't a session's length
+           CAST(avg(CASE WHEN l.end_reason IS NOT 'changed' THEN l.duration_s END) AS INTEGER)
+               AS avg_duration_s,
            (SELECT max(stars) FROM favorites f WHERE f.preset = l.preset) AS stars
     FROM launches l GROUP BY l.preset;
 """

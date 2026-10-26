@@ -36,7 +36,7 @@ from typing import IO, Any, TypeVar
 import iterm2
 from iterm2.capabilities import supports_context_menu_submenus_and_visibility
 
-VERSION = "0.7.0"  # bump on every change, so the Console shows which code is running
+VERSION = "0.7.1"  # bump on every change, so the Console shows which code is running
 DATA_DIR = os.path.expanduser("~/.local/share/iterm2-color-schemes")
 DB_PATH = os.path.join(DATA_DIR, "schemes.db")
 LOCK_PATH = os.path.join(DATA_DIR, ".lock")
@@ -295,9 +295,13 @@ def close_stale(db: sqlite3.Connection, live_ids: set[str], started: str) -> int
 
 def preset_info(
     db: sqlite3.Connection, preset: str, font: str
-) -> tuple[tuple[int, str] | None, int | None]:
+) -> tuple[tuple[int, str, int] | None, int | None]:
+    """((launches, last launched, changed away from) or None, stars or None)."""
+    # From launches, not the launch_stats view, so a DB not rebuilt since 0.7.1 still works.
     stats = db.execute(
-        "SELECT launches, last_launched FROM launch_stats WHERE preset = ?", (preset,)
+        "SELECT count(*), max(launched_at), sum(end_reason = 'changed') FROM launches "
+        "WHERE preset = ? GROUP BY preset",
+        (preset,),
     ).fetchone()
     stars = db.execute(
         "SELECT stars FROM favorites WHERE preset = ? AND font = ?", (preset, font)
@@ -764,7 +768,8 @@ async def save_dialog(
     lines = [f"{preset} ({mode})", f"{await store.call(font_label, font) or font} {size}"]
     if stats:
         times = "1 time" if stats[0] == 1 else f"{stats[0]} times"
-        lines.append(f"Launched {times}, last {local_time(stats[1])}.")
+        changed = f", changed away from {stats[2]}" if stats[2] else ""
+        lines.append(f"Launched {times}, last {local_time(stats[1])}{changed}.")
     else:
         lines.append("Not launched before.")
     if stars:

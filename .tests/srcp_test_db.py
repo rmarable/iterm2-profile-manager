@@ -249,6 +249,23 @@ class MainScriptTest(DbTest):
         rows = self.db.execute("SELECT preset, end_reason, duration_s FROM launches ORDER BY id")
         self.assertEqual(rows.fetchall(), [("Dark One", "changed", 0), ("Dark Two", "closed", 0)])
 
+    def test_changed_looks_count_apart_and_stay_out_of_the_average(self):
+        for duration, reason in ((60, "closed"), (120, "closed"), (2, "changed")):
+            self.db.execute(
+                "INSERT INTO launches (launched_at, preset, font, size, mode, source, "
+                "duration_s, end_reason) VALUES ('2026-10-26 12:00:00', 'Dark One', 'Monaco', "
+                "13, 'dark', 'discovery', ?, ?)",
+                (duration, reason),
+            )
+        row = self.db.execute(
+            "SELECT launches, changed_launches, avg_duration_s, total_duration_s "
+            "FROM launch_stats WHERE preset = 'Dark One'"
+        )
+        self.assertEqual(row.fetchone(), (3, 1, 90, 182))
+        stats, stars = self.main["preset_info"](self.db, "Dark One", "Monaco")
+        self.assertEqual((stats, stars), ((3, "2026-10-26 12:00:00", 1), None))
+        self.assertIsNone(self.main["preset_info"](self.db, "Dark Two", "Monaco")[0])
+
     def test_reroll_replaces_the_look_and_never_repeats_it(self):
         self.main["FONT_DIRS"] = []  # no icon font
         self.main["sync_and_log"] = mock.AsyncMock()
@@ -527,7 +544,13 @@ class ReportTest(DbTest):
     def test_all_views_render(self):
         self.main["save_favorite"](self.db, "Dark One", "Monaco", 13, 4)
         self.db.execute("UPDATE favorites SET saved_at = '2026-10-21'")  # edited by hand
+        self.main["save_favorite"](self.db, "Dark Two", "Monaco", 13, 2)  # never launched
         self.main["never_show"](self.db, "Yellow")
+        self.db.execute(
+            "INSERT INTO launches (launched_at, preset, font, size, mode, source, duration_s, "
+            "end_reason) VALUES ('2026-10-26 12:00:00', 'Dark One', 'Monaco', 13, 'dark', "
+            "'favorite', 5, 'changed')"
+        )
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             srcp_favorites.show_favorites(self.db, None, 1, cli_hints=False)
@@ -536,6 +559,10 @@ class ReportTest(DbTest):
         text = out.getvalue()
         for expected in ("Dark One", "2026-10-21", "Yellow", "1 hidden."):
             self.assertIn(expected, text)
+        rows = {r[1]: r[4:8] for r in self.db.execute(srcp_favorites.FAVORITES, (1, None, None))}
+        self.assertEqual(rows["Dark One"][:2], (1, 1))  # launches, changed
+        self.assertIsNone(rows["Dark One"][3])  # avg open leaves the changed look out
+        self.assertEqual(rows["Dark Two"][:2], (0, 0))  # no launches: 0, not blank
 
 
 class HelperTest(unittest.TestCase):

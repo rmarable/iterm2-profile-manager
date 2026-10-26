@@ -17,7 +17,7 @@ Right-click → **Remove from favorites** does the same as **Remove favorite**, 
 
 ## Change to another profile
 
-Right-click a session → **Change to another profile** re-rolls its look on the spot: a new pick for the current light/dark mode, made exactly as for a new session (favorite or discovery, font included), never the preset it has now. Works on any session, including ones opened from a favorite profile (only that session changes). The old look's `launches` row ends with `end_reason = 'changed'`, and the new look gets its own row. A second click while one change is still running is ignored.
+Right-click a session → **Change to another profile** re-rolls its look on the spot: a new pick for the current light/dark mode, made exactly as for a new session (favorite or discovery, font included), never the preset it has now. Works on any session, including ones opened from a favorite profile (only that session changes). The old look's `launches` row ends with `end_reason = 'changed'`, and the new look gets its own row. A second click while one change is still running is ignored. Re-rolled looks still count as launches; reports show them as **Changed** (the rating dialog: "changed away from N") and leave them out of average time open.
 
 ## Favorite profiles
 
@@ -32,16 +32,16 @@ The main script writes these profiles to a Dynamic Profiles file (see [Files on 
 From the repo:
 
 ```sh
-python3 .tools/srcp_favorites.py                          # favorites: stars, launches, last used, average time open
+python3 .tools/srcp_favorites.py                          # favorites: stars, launches, re-rolls, last used, average time open
 python3 .tools/srcp_favorites.py --mode dark --min-stars 4
 python3 .tools/srcp_favorites.py --history                # last 30 rating changes; --history N for more
 python3 .tools/srcp_favorites.py --hidden                 # Never show presets and how to undo
 ```
 
 ```text
-Stars  Preset          Font    Mode  Launches  Last used         Avg open  Saved
------  --------------  ------  ----  --------  ----------------  --------  ----------
-5 ★    Selenized Dark  Monaco  dark  1         2026-10-17 21:03  2m 15s    2026-10-17
+Stars  Preset          Font    Mode  Launches  Changed  Last used         Avg open  Saved
+-----  --------------  ------  ----  --------  -------  ----------------  --------  ----------
+5 ★    Selenized Dark  Monaco  dark  1         0        2026-10-17 21:03  2m 15s    2026-10-17
 ```
 
 ## See the odds
@@ -279,7 +279,7 @@ Double-clicking an `.itermcolors` file also imports it, with one dialog per file
 | `effective` (view) | `schemes` with `overrides` applied. |
 | `discovery` (view) | Presets eligible for discovery, with `colorful` (1 = colored background). |
 | `favorite_pool` (view) | Favorites that can be picked, with their mode. |
-| `launch_stats` (view) | Per preset: launch counts, first and last use, time open, stars. |
+| `launch_stats` (view) | Per preset: launch counts (`changed_launches`: re-rolled away from), first and last use, time open (`avg_duration_s` leaves out `changed` rows), stars. |
 
 Times are stored in UTC. A rebuild replaces only `schemes` and the four views; everything else, including views you add, is kept.
 
