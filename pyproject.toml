@@ -8,6 +8,7 @@ extend-exclude = ["archive"]
 [tool.ruff.per-file-target-version]
 "srcp_score_presets.py" = "py312" # these run under iTerm2's Python, like AutoLaunch/
 "srcp_ratings.py" = "py312"
+"srcp_never_show.py" = "py312"
 ".tests/*.py" = "py312" # run under iTerm2's Python: they exec the AutoLaunch script
 
 [tool.ruff.lint]
@@ -25,10 +26,10 @@ ignore = [
 
 [tool.pyright]
 # .tools/ is checked by lint.sh from a temp copy: pyright skips dot-folders.
-include = ["AutoLaunch", "srcp_score_presets.py", "srcp_ratings.py"]
+include = ["AutoLaunch", "srcp_score_presets.py", "srcp_ratings.py", "srcp_never_show.py"]
 exclude = ["archive"]
 typeCheckingMode = "standard"
 executionEnvironments = [
     { root = "AutoLaunch", pythonVersion = "3.12" },
-    { root = ".", pythonVersion = "3.12", extraPaths = [".tools"] }, # srcp_ratings imports srcp_favorites
+    { root = ".", pythonVersion = "3.12", extraPaths = [".tools"] }, # menu scripts import .tools/
 ]

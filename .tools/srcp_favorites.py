@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Review your favorites, their ratings and use, plus rating history and hidden presets.
 
-Reads the scheme DB only; safe any time:
+Reads the scheme DB only, except --show-again; safe any time, even while iTerm2 runs:
     python3 .tools/srcp_favorites.py                     # favorites, best first
     python3 .tools/srcp_favorites.py --mode dark --min-stars 4
     python3 .tools/srcp_favorites.py --history [N]       # last N rating changes (default 30)
     python3 .tools/srcp_favorites.py --hidden            # presets marked Never show
+    python3 .tools/srcp_favorites.py --show-again NAME   # undo Never show for NAME
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ import os
 import sqlite3
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 DEFAULT_DB = os.path.expanduser("~/.local/share/iterm2-color-schemes/schemes.db")
 
@@ -46,6 +48,17 @@ SELECT o.name, COALESCE(o.mode, s.mode, '?'),
 FROM overrides o LEFT JOIN schemes s ON s.name = o.name
 WHERE o.include = 0 ORDER BY o.name
 """
+
+# Undo Never show. A mode override survives; a preset that fails the readability gate is
+# forced in (include 1), since it was showing before, unless it's a byte-identical twin.
+# The AutoLaunch script has the same string as UNHIDE (it's installed without .tools/);
+# a test keeps the two equal.
+UNHIDE = (
+    "UPDATE overrides SET include = CASE WHEN "
+    "(SELECT passes_gate FROM schemes WHERE name = :name) = 0 AND "
+    "(SELECT duplicate_of FROM schemes WHERE name = :name) IS NULL THEN 1 END "
+    "WHERE name = :name AND include = 0"
+)
 
 
 def stars(n):
@@ -133,19 +146,80 @@ def show_history(db, limit):
     )
 
 
-def show_hidden(db):
+SHOW_AGAIN_HINT = "Show one again: python3 .tools/srcp_favorites.py --show-again '<preset>'"
+
+
+def hidden_rows(db):
+    """(name, mode, hidden at) of each Never show preset."""
     query = HIDDEN
     if not has_table(db, "ratings"):  # DB from before rating history: no "hidden" times
         query = HIDDEN.replace(
             "(SELECT max(at) FROM ratings r WHERE r.preset = o.name AND r.action = 'never_show')",
             "NULL",
         )
-    rows = db.execute(query).fetchall()
+    return db.execute(query).fetchall()
+
+
+def show_hidden(db, hint=SHOW_AGAIN_HINT):
+    """Print the Never show table; hint is printed under it ('' for none). Returns the rows."""
+    rows = hidden_rows(db)
     if not rows:
         print("No hidden presets.")
-        return
+        return rows
     table(["Preset", "Mode", "Hidden"], [(n, m, local(at)) for n, m, at in rows])
-    print("\nUnhide: update overrides set include = null where name = '<preset>';")
+    if hint:
+        print(f"\n{hint}")
+    return rows
+
+
+class ShownAgain(NamedTuple):
+    shown: bool  # False: it wasn't hidden
+    installed: bool  # has a schemes row, so it can be picked
+    forced: bool  # fails the readability gate, so it's back with include = 1
+
+
+def shown_again_note(preset, result):
+    """What Show again did, in plain words (the popup and the command line share it)."""
+    if not result.shown:
+        return f"{preset} isn't hidden (shown again already?)."
+    if not result.installed:
+        return f"{preset} is back, but it isn't an installed preset, so it won't come up."
+    if result.forced:
+        return (
+            f"{preset} is back. It fails the readability check, "
+            "but it's allowed anyway since you had it before."
+        )
+    return f"{preset} is back."
+
+
+def is_busy(error):
+    """The DB was locked past the timeout (e.g. the main script was writing)."""
+    return "locked" in str(error) or "busy" in str(error)
+
+
+def show_again(db, preset):
+    """Undo Never show for preset; see ShownAgain.
+
+    db must be in autocommit mode (isolation_level=None) so BEGIN IMMEDIATE takes the lock.
+    """
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        shown = db.execute(UNHIDE, {"name": preset}).rowcount > 0
+        installed = db.execute("SELECT 1 FROM schemes WHERE name = ?", (preset,)).fetchone()
+        forced = db.execute("SELECT include FROM overrides WHERE name = ?", (preset,)).fetchone()
+        db.execute("COMMIT")
+    except BaseException:
+        db.execute("ROLLBACK")
+        raise
+    return ShownAgain(shown, installed is not None, shown and forced is not None and forced[0] == 1)
+
+
+def connect(path, timeout=5.0):
+    """Read-write connection in autocommit mode; mode=rw never creates an empty DB."""
+    # mode=rw even to read: mode=ro can fail on a WAL DB that nothing else has open.
+    return sqlite3.connect(
+        Path(path).resolve().as_uri() + "?mode=rw", uri=True, timeout=timeout, isolation_level=None
+    )
 
 
 def main():
@@ -156,21 +230,29 @@ def main():
         "--history", type=int, nargs="?", const=30, metavar="N", help="last N rating changes"
     )
     ap.add_argument("--hidden", action="store_true", help="presets marked Never show")
+    ap.add_argument("--show-again", metavar="NAME", help="undo Never show for this preset")
     ap.add_argument("--db", default=DEFAULT_DB, help=f"database path (default {DEFAULT_DB})")
     args = ap.parse_args()
 
     if not os.path.exists(args.db):
         sys.exit(f"No database at {args.db}. Build it with .tools/srcp_build_scheme_db.py.")
-    # mode=rw (it only reads): mode=ro can fail on a WAL DB that nothing else has open.
-    db = sqlite3.connect(Path(args.db).resolve().as_uri() + "?mode=rw", uri=True)
+    db = connect(args.db)
     try:
-        if args.history is not None:
+        if args.show_again is not None:
+            result = show_again(db, args.show_again)
+            note = shown_again_note(args.show_again, result)
+            if not result.shown:
+                sys.exit(f"{note} See --hidden.")
+            print(note)
+        elif args.history is not None:
             show_history(db, args.history)
         elif args.hidden:
             show_hidden(db)
         else:
             show_favorites(db, args.mode, args.min_stars)
     except sqlite3.OperationalError as e:  # e.g. a restored snapshot from an older schema
+        if is_busy(e):
+            sys.exit(f"The DB is busy ({e}). Try again in a moment.")
         sys.exit(
             f"The DB can't show this ({e}). Rebuild it: python3 .tools/srcp_build_scheme_db.py"
         )

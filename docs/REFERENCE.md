@@ -10,8 +10,10 @@ Right-click a session → **Save/update this profile**, or press ⌃⌥⌘S. The
 |---|---|
 | **1 ★** … **5 ★★★★★** | Saves preset + font as a favorite with that many stars. Rate again to change. |
 | **Remove favorite** | Favorites only. Deletes this favorite. The preset returns to discovery once no font of it is a favorite. |
-| **Never show** | Excludes the preset from all picks and deletes its favorites. Rating it again undoes this. |
+| **Never show** | Excludes the preset from all picks and deletes its favorites. Undo: rate it again, **Scripts → srcp_never_show.py** → **Show again**, or `srcp_favorites.py --show-again`. |
 | **Cancel** | Closes the dialog. |
+
+Right-click → **Never show this profile** does the same as **Never show**, without the rating dialog, then re-rolls the session as in [Change to another profile](#change-to-another-profile). For a favorite it first lists the fonts and stars it will delete (**Cancel** or Escape keeps everything). Like the other items, iTerm2 3.7.6 shows it on every session; on one the script didn't color, it says so.
 
 Right-click → **Remove from favorites** does the same as **Remove favorite**, without the dialog. iTerm2 3.7.6 shows it on every session and, on a non-favorite, says so and changes nothing. iTerm2 with Python API protocol 1.23+ hides it on non-favorites; the script uses that when available.
 
@@ -29,13 +31,16 @@ The main script writes these profiles to a Dynamic Profiles file (see [Files on 
 
 **Scripts → srcp_ratings.py** lists your favorites in a window. **History** shows the last 50 rating changes; **Hidden** shows **Never show** presets. Text is selectable.
 
+**Scripts → srcp_never_show.py** lists **Never show** presets with a dropdown: pick one, then **Show again**. It sets `overrides.include` back to `NULL` (a `mode` override stays), or to `1` when the preset fails the readability checks (it was showing before), except for a `duplicate_of` twin. Rating a hidden preset un-hides it by the same rule; since 0.8.0 a twin is no longer forced in that way (twins are never picked either way). Deleted favorites aren't restored, and no `ratings` row is written. The main script picks the change up at the next new session.
+
 From the repo:
 
 ```sh
 python3 .tools/srcp_favorites.py                          # favorites: stars, launches, re-rolls, last used, average time open
 python3 .tools/srcp_favorites.py --mode dark --min-stars 4
 python3 .tools/srcp_favorites.py --history                # last 30 rating changes; --history N for more
-python3 .tools/srcp_favorites.py --hidden                 # Never show presets and how to undo
+python3 .tools/srcp_favorites.py --hidden                 # Never show presets
+python3 .tools/srcp_favorites.py --show-again '<preset>'  # undo Never show (the one write this tool does)
 ```
 
 ```text
@@ -222,9 +227,9 @@ python3 .tools/srcp_build_scheme_db.py                                     # saf
 python3 .tools/srcp_add_key_binding.py                                     # iTerm2 must be quit
 mkdir -p ~/Library/Application\ Support/iTerm2/Scripts/AutoLaunch
 cp AutoLaunch/srcp_set_random_color_profile.py ~/Library/Application\ Support/iTerm2/Scripts/AutoLaunch/
-cp srcp_ratings.py srcp_score_presets.py ~/Library/Application\ Support/iTerm2/Scripts/
+cp srcp_ratings.py srcp_never_show.py srcp_score_presets.py ~/Library/Application\ Support/iTerm2/Scripts/
 mkdir -p ~/Library/Application\ Support/iTerm2/Scripts/.tools
-cp .tools/srcp_favorites.py .tools/srcp_popup.js ~/Library/Application\ Support/iTerm2/Scripts/.tools/
+cp .tools/srcp_favorites.py .tools/srcp_popup.py .tools/srcp_popup.js ~/Library/Application\ Support/iTerm2/Scripts/.tools/
 ```
 
 Every tool that writes takes `--dryrun`. Manual key binding: Settings → Keys → Key Bindings → **+**, shortcut ⌃⌥⌘S, action **Invoke Script Function**, function `save_profile()`.
@@ -250,15 +255,16 @@ Double-clicking an `.itermcolors` file also imports it, with one dialog per file
 |---|---|
 | `AutoLaunch/srcp_set_random_color_profile.py` | Main script. Starts with iTerm2; picks each session's look, logs launches, provides the rating dialog and right-click menu items, writes favorite profiles, takes daily snapshots. |
 | `srcp_ratings.py` | Scripts menu: ratings window. |
+| `srcp_never_show.py` | Scripts menu: list Never show presets, show one again. |
 | `srcp_score_presets.py` | Scripts menu: ranks presets by saturation (report only). |
 | `setup.sh`, `uninstall.sh` | Install and uninstall. |
 | `.tools/` | Command-line tools. The leading dot keeps them out of iTerm2's Scripts menu. |
 | `.tools/srcp_build_scheme_db.py` | Sets each preset's mode, runs the readability checks, writes the database. |
 | `.tools/srcp_import_presets.py` | Imports a folder of `.itermcolors` files without a dialog per file. |
 | `.tools/srcp_add_key_binding.py` | Binds ⌃⌥⌘S. |
-| `.tools/srcp_favorites.py` | Ratings report (CLI). |
+| `.tools/srcp_favorites.py` | Ratings report (CLI) and `--show-again`; also used by the menu scripts. |
 | `.tools/srcp_odds.py` | Odds of the next session's look, as bar charts or JSON. |
-| `.tools/srcp_popup.js` | Draws the ratings window for `srcp_ratings.py`. |
+| `.tools/srcp_popup.js`, `.tools/srcp_popup.py` | The window for `srcp_ratings.py` and `srcp_never_show.py` (JXA `NSAlert`, optional dropdown), and the Python side that runs it. |
 | `.tools/srcp_export_curation.py` | Exports ratings and settings as SQL. |
 | `.tools/srcp_uninstall_prefs.py` | Removes the key binding and presets from iTerm2's settings (used by `uninstall.sh`). |
 | `.tools/srcp_iterm_prefs.py`, `.tools/srcp_db_backup.py`, `.tools/srcp_preset_history.py` | Shared helpers: iTerm2 settings access, snapshots, past versions of the repo's presets. |

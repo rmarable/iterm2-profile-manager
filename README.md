@@ -10,7 +10,7 @@ If you answered "yes" to any of the above questions, meet your new best friend, 
 
 The presets come from [iTerm2-Color-Schemes](https://github.com/mbadolato/iTerm2-Color-Schemes) (800+). Light presets are used when macOS is in Light Mode and dark ones in Dark Mode. About 5% are hard to read and never get picked.
 
-Press ⌃⌥⌘S to rate the current preset and font from 1 to 5 stars. Rated combinations come up more often and are saved as profiles under **Profiles → Favorites**. **Never show** in the same dialog removes a preset for good.
+Press ⌃⌥⌘S to rate the current preset and font from 1 to 5 stars. Rated combinations come up more often and are saved as profiles under **Profiles → Favorites**. **Never show** in the same dialog, or right-click → **Never show this profile**, hides a preset until you bring it back.
 
 ![One iTerm2 window split three ways: two Claude Code sessions and a shell, each with its own color scheme](images/profile-chooser.jpg)
 
@@ -85,10 +85,10 @@ It backs up iTerm2's settings to `~/.local/share/iterm2-profile-manager/prefs-ba
 | Try a different look in this tab | Right-click → **Change to another profile**. Repeat until one sticks. |
 | Open a saved look | **Profiles → Favorites → \<name\>** |
 | Drop a favorite | Same dialog → **Remove favorite** |
-| Never see a scheme again | Same dialog → **Never show**. It's gone for good, with every font, and survives updates. |
+| Never see a scheme again | Right-click → **Never show this profile**, and the tab switches to another look. If it's a favorite, you're asked first, since its stars are deleted. Or in the rating dialog (⌃⌥⌘S) → **Never show**. Either way it's hidden with every font and stays hidden through updates. |
 | See your ratings | **Scripts → srcp_ratings.py** |
-| See schemes you've hidden | **Scripts → srcp_ratings.py** → **Hidden** |
-| Bring a hidden scheme back | **Hidden** shows how; or rate it from a tab that still has it |
+| See schemes you've hidden | **Scripts → srcp_never_show.py** (or **srcp_ratings.py** → **Hidden**) |
+| Bring a hidden scheme back | **Scripts → srcp_never_show.py**, pick it in the list, then **Show again**. Its old stars don't come back; rate it again if you want it as a favorite. |
 | See the odds of the next look | In the repo: `python3 .tools/srcp_odds.py`. Bar charts of the chance of each favorite, a colored background, and each font. Changes nothing. |
 
 Changes apply to the next session you open. Sessions opened from a favorite profile keep that look.

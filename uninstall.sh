@@ -100,9 +100,10 @@ if [[ "$HERE" == "$SCRIPTS_REAL" ]]; then
 	echo "  = this checkout is the Scripts folder; its files stay (delete the checkout to remove them)"
 else
 	run rm -f "$SCRIPTS_DIR/srcp_score_presets.py" "$SCRIPTS_DIR/srcp_ratings.py" \
-		"$SCRIPTS_DIR/.tools/srcp_favorites.py" "$SCRIPTS_DIR/.tools/srcp_popup.js"
+		"$SCRIPTS_DIR/srcp_never_show.py" "$SCRIPTS_DIR/.tools/srcp_favorites.py" \
+		"$SCRIPTS_DIR/.tools/srcp_popup.py" "$SCRIPTS_DIR/.tools/srcp_popup.js"
 	if [[ -d "$SCRIPTS_DIR/.tools" ]] && ! $DRYRUN; then
-		rm -rf "$SCRIPTS_DIR/.tools/__pycache__" # left by srcp_ratings.py importing srcp_favorites
+		rm -rf "$SCRIPTS_DIR/.tools/__pycache__" # left by the menu scripts importing .tools/
 		rmdir "$SCRIPTS_DIR/.tools" 2>/dev/null || true # only if now empty
 	fi
 fi

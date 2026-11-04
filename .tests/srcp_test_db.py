@@ -540,6 +540,194 @@ class ExportTest(DbTest):
         self.assertEqual(fonts["Other-Regular"], (0, 1))
 
 
+class NeverShowTest(DbTest):
+    """Right-click Never show this profile, and Show again (srcp_never_show.py's DB side)."""
+
+    def show_again(self, name):
+        return srcp_favorites.show_again(self.db, name)
+
+    def include(self, name):
+        row = self.db.execute("SELECT include FROM overrides WHERE name = ?", (name,)).fetchone()
+        return row[0] if row else "no row"
+
+    def test_unhide_rule_is_the_same_in_both_scripts(self):
+        self.assertEqual(self.main["UNHIDE"], srcp_favorites.UNHIDE)
+
+    def test_show_again_brings_it_back_keeping_its_mode_override(self):
+        self.db.execute("INSERT INTO overrides (name, mode) VALUES ('Dark One', 'light')")
+        self.main["never_show"](self.db, "Dark One")
+        self.assertNotIn("Dark One", self.discovery("light"))
+        self.assertEqual(self.show_again("Dark One"), (True, True, False))
+        self.assertIn("Dark One", self.discovery("light"))
+        self.assertIsNone(self.include("Dark One"))
+
+    def test_show_again_forces_in_an_unreadable_preset_but_not_a_twin(self):
+        self.main["never_show"](self.db, "Murky")
+        self.assertEqual(self.show_again("Murky"), (True, True, True))
+        self.assertIn("Murky", self.discovery("dark"))
+        self.db.execute("UPDATE schemes SET passes_gate = 0 WHERE name = 'Dark Two Copy'")
+        self.main["never_show"](self.db, "Dark Two Copy")
+        self.assertEqual(self.show_again("Dark Two Copy"), (True, True, False))
+        self.assertIsNone(self.include("Dark Two Copy"))  # a twin stays out of discovery
+
+    def test_show_again_on_a_preset_that_isnt_hidden_changes_nothing(self):
+        self.assertFalse(self.show_again("Dark One").shown)
+        self.assertEqual(self.include("Dark One"), "no row")
+        self.assertFalse(self.db.in_transaction)
+
+    def test_show_again_on_a_preset_no_longer_installed_says_so(self):
+        self.main["never_show"](self.db, "Gone")  # no schemes row
+        result = self.show_again("Gone")
+        self.assertEqual(result, (True, False, False))
+        self.assertIn("isn't an installed preset", srcp_favorites.shown_again_note("Gone", result))
+
+    def test_show_again_command_line(self):
+        self.main["never_show"](self.db, "Yellow")
+        tool = os.path.join(ROOT, ".tools", "srcp_favorites.py")
+        run = [sys.executable, "-I", tool, "--db", self.db_path, "--show-again"]
+        done = subprocess.run([*run, "Yellow"], capture_output=True, text=True, check=False)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("Yellow is back.", done.stdout)
+        again = subprocess.run([*run, "Yellow"], capture_output=True, text=True, check=False)
+        self.assertIn("isn't hidden", again.stderr)
+        self.assertNotEqual(again.returncode, 0)
+
+    def menu(self, preset, button="Never show", fail=False, never_show=None):
+        """Run the right-click item on a tab showing preset; return the alerts' texts.
+
+        fail: no DB at all; never_show: replaces the main script's never_show.
+        """
+        if never_show is not None:
+            self.main["never_show"] = never_show
+        self.main["FONT_DIRS"] = []  # no icon font
+        self.main["sync_and_log"] = mock.AsyncMock()
+        self.main["get_preset"] = mock.AsyncMock(side_effect=lambda _c, name: name)
+        variables = {"user.color_preset": preset, "user.font": "Monaco"}
+
+        async def set_variable(name, value):
+            variables[name] = value
+
+        profile = mock.AsyncMock(normal_font="Monaco 13")
+        profile.name = "Default"
+        session = mock.AsyncMock(session_id="s1", async_set_variable=set_variable)
+        session.async_get_variable.side_effect = variables.get
+        session.async_get_profile.return_value = profile
+        app = mock.MagicMock(windows=[])
+        app.get_session_by_id.return_value = session
+        app.get_window_and_tab_for_session.return_value = (None, None)
+        app.async_get_theme = mock.AsyncMock(return_value=["dark"])
+        store = self.main["Store"](self.db_path if not fail else os.path.join(self.tmp, "none"))
+        self.main["record_launch"](
+            self.db, preset, "Monaco", 13, "dark", "discovery", None, "Default", "s1"
+        )
+        texts = []
+
+        class Alert:
+            def __init__(self, title, text, window_id=None):
+                texts.append(text)
+                self.buttons = []
+
+            def add_button(self, title):
+                self.buttons.append(title)
+
+            async def async_run(self, connection):
+                return 1000 + self.buttons.index(button) if self.buttons else 1000
+
+        with (
+            mock.patch.object(self.main["iterm2"], "Alert", Alert),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            asyncio.run(self.main["never_show_from_menu"](None, app, store, "s1"))
+        self.variables, self.profile = variables, profile
+        return texts
+
+    def test_menu_hides_the_preset_and_rerolls_the_tab(self):
+        self.assertEqual(self.menu("Dark One"), [])  # not a favorite: no question asked
+        self.assertNotIn("Dark One", self.discovery("dark"))
+        self.profile.async_set_color_preset.assert_called_once_with("Dark Two")
+        rows = self.db.execute("SELECT preset, end_reason FROM launches ORDER BY id")
+        self.assertEqual(rows.fetchall(), [("Dark One", "changed"), ("Dark Two", None)])
+
+    def test_menu_asks_first_for_a_favorite_and_cancel_keeps_it(self):
+        self.main["save_favorite"](self.db, "Dark One", "Monaco", 13, 4)
+        texts = self.menu("Dark One", button="Cancel")
+        self.assertEqual(len(texts), 1)
+        self.assertIn("4 ★★★★", texts[0])
+        self.assertEqual(self.include("Dark One"), "no row")  # not hidden
+        self.assertTrue(self.main["is_favorite"](self.db, "Dark One", "Monaco"))
+        self.profile.async_set_color_preset.assert_not_called()
+        self.menu("Dark One")
+        self.assertFalse(self.main["is_favorite"](self.db, "Dark One", "Monaco"))
+        self.assertEqual(self.include("Dark One"), 0)
+
+    def test_menu_on_a_preset_already_hidden_elsewhere_still_rerolls(self):
+        self.main["never_show"](self.db, "Dark One")  # hidden from another tab
+        self.assertEqual(self.menu("Dark One"), [])
+        self.profile.async_set_color_preset.assert_called_once_with("Dark Two")
+
+    def test_menu_says_so_when_no_other_preset_is_left(self):
+        self.main["never_show"](self.db, "Dark Two")
+        texts = self.menu("Dark One")
+        self.assertEqual(len(texts), 1)
+        self.assertIn("couldn't switch to another look", texts[0])
+        self.assertEqual(self.variables["user.color_preset"], "Dark One")
+        self.assertEqual(self.include("Dark One"), 0)
+
+    def test_menu_when_hiding_fails_after_the_question_keeps_the_look(self):
+        self.main["save_favorite"](self.db, "Dark One", "Monaco", 13, 4)
+
+        def broken(db, preset):
+            raise sqlite3.OperationalError("database is locked")
+
+        texts = self.menu("Dark One", never_show=broken)
+        self.assertEqual(len(texts), 2)  # the question, then "didn't take"
+        self.assertIn("didn't take", texts[1])
+        self.profile.async_set_color_preset.assert_not_called()
+        self.assertTrue(self.main["is_favorite"](self.db, "Dark One", "Monaco"))
+
+    def test_popup_output_never_wraps_to_the_last_name(self):
+        import srcp_popup  # noqa: PLC0415  (.tools is on sys.path; only these tests need it)
+
+        buttons, names = ["Done", "Show again"], ["A", "B"]
+        self.assertEqual(srcp_popup.parse_result("1\t1\n", buttons, names), ("Show again", "B"))
+        self.assertEqual(srcp_popup.parse_result("1\t-1", buttons, names), ("Show again", None))
+        self.assertEqual(srcp_popup.parse_result("1\t5", buttons, names), ("Show again", None))
+        self.assertEqual(srcp_popup.parse_result("0", buttons, names), ("Done", None))
+        self.assertIsNone(srcp_popup.parse_result("", buttons, names))
+        self.assertIsNone(srcp_popup.parse_result("-1", buttons, names))
+        with contextlib.redirect_stdout(io.StringIO()):
+            _, offered = srcp_popup.popup_args("T", "x", buttons, ["A", "", "B"])
+        self.assertEqual(offered, ["A", "B"])  # srcp_popup.js drops empty lines too
+
+    def test_menu_without_a_db_alerts_and_keeps_the_look(self):
+        texts = self.menu("Dark One", fail=True)
+        self.assertEqual(len(texts), 1)
+        self.assertIn("didn't take", texts[0])
+        self.profile.async_set_color_preset.assert_not_called()
+
+    @unittest.skipUnless(shutil.which("osascript"), "needs macOS")
+    def test_popup_lists_the_choices(self):
+        sys_path = os.path.join(ROOT, ".tools")
+        import srcp_popup  # noqa: PLC0415  (.tools is on sys.path; only this test needs it)
+
+        self.assertTrue(srcp_popup.POPUP_JS.startswith(sys_path))
+        with contextlib.redirect_stdout(io.StringIO()):
+            buttons = ["Done", "Show again"]
+            args, offered = srcp_popup.popup_args("T", "a\nb", buttons, ["X", "Y\tZ"])
+        self.assertEqual(offered, ["X"])  # a tab can't be read back
+        env = {**os.environ, "SRCP_POPUP_DRYRUN": "1"}
+        try:
+            out = subprocess.run(
+                args, capture_output=True, text=True, env=env, timeout=20, check=False
+            )
+        except subprocess.TimeoutExpired:
+            self.skipTest("osascript hung (no window server?)")
+        if out.returncode != 0:
+            self.skipTest(f"osascript can't build the alert here: {out.stderr.strip()}")
+        self.assertIn("choices=1", out.stdout)
+        self.assertIn("buttons=2", out.stdout)
+
+
 class ReportTest(DbTest):
     def test_all_views_render(self):
         self.main["save_favorite"](self.db, "Dark One", "Monaco", 13, 4)

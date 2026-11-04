@@ -9,7 +9,8 @@ Records every launch and when it ended, and snapshots the DB once a day.
 "Save/update this profile" (right-click) or the save_profile() key binding stars the
 current look; "Remove from favorites" (right-click; hidden on non-favorites only where
 iTerm2 supports API protocol 1.23+) un-stars it; "Change to another profile" (right-click)
-re-rolls the session's look. Every favorite is also an
+re-rolls the session's look; "Never show this profile" (right-click) hides the preset and
+re-rolls (Scripts > srcp_never_show.py undoes it). Every favorite is also an
 iTerm2 profile ("Kibble - Menlo"), kept in a Dynamic Profiles file.
 """
 
@@ -36,7 +37,7 @@ from typing import IO, Any, TypeVar
 import iterm2
 from iterm2.capabilities import supports_context_menu_submenus_and_visibility
 
-VERSION = "0.7.1"  # bump on every change, so the Console shows which code is running
+VERSION = "0.8.0"  # bump on every change, so the Console shows which code is running
 DATA_DIR = os.path.expanduser("~/.local/share/iterm2-color-schemes")
 DB_PATH = os.path.join(DATA_DIR, "schemes.db")
 LOCK_PATH = os.path.join(DATA_DIR, ".lock")
@@ -63,6 +64,7 @@ FONT_DIRS = [
 MENU_ID = "com.rmarable.set-random-color-profile.save"
 REMOVE_MENU_ID = "com.rmarable.set-random-color-profile.remove"
 CHANGE_MENU_ID = "com.rmarable.set-random-color-profile.change"
+NEVER_MENU_ID = "com.rmarable.set-random-color-profile.never"
 # iTerm2 watches this folder and updates the Profiles menu when the file changes.
 DYNAMIC_PATH = os.path.expanduser(
     "~/Library/Application Support/iTerm2/DynamicProfiles/iterm2-profile-manager.plist"
@@ -72,6 +74,15 @@ GUID_NAMESPACE = uuid.UUID("468579c8-bf93-425d-9e25-ff5f7ddebd11")  # fixed: GUI
 STAR_BUTTONS = [f"{n} {'★' * n}" for n in range(1, 6)]  # "3 ★★★"
 REMOVE, NEVER, CANCEL = "Remove favorite", "Never show", "Cancel"
 PRESET_ERRORS = (iterm2.GetPresetException, iterm2.ListPresetsException)
+# Undo Never show: same string as UNHIDE in .tools/srcp_favorites.py (this script is installed
+# without .tools/; a test keeps them equal). A mode override survives; a preset that fails
+# the gate is forced in (include 1), since it was wanted, unless it's a byte-identical twin.
+UNHIDE = (
+    "UPDATE overrides SET include = CASE WHEN "
+    "(SELECT passes_gate FROM schemes WHERE name = :name) = 0 AND "
+    "(SELECT duplicate_of FROM schemes WHERE name = :name) IS NULL THEN 1 END "
+    "WHERE name = :name AND include = 0"
+)
 
 T = TypeVar("T")
 Pick = tuple[str, str | None, str, int | None]  # preset, font, source, stars
@@ -166,7 +177,7 @@ class Store:
         return await asyncio.to_thread(run)
 
 
-# ---- DB calls (run in a worker thread) ----
+# DB calls: each runs in a worker thread through Store.call, which rolls back on failure.
 
 
 def read_config(db: sqlite3.Connection) -> dict[str, float]:
@@ -335,14 +346,9 @@ def save_favorite(db: sqlite3.Connection, preset: str, font: str, size: float, s
     db.execute("BEGIN IMMEDIATE")  # Store.call rolls back if anything below fails
     # Starring a preset marked Never show (e.g. in a tab opened before) unhides it;
     # otherwise the favorite would never be picked or get a profile. Update rather than
-    # delete, so a mode override survives; one that fails the gate is forced in (include 1),
-    # since rating it says it's wanted (and it may have been a seeded near-miss).
-    db.execute(
-        "UPDATE overrides SET include = CASE WHEN "
-        "(SELECT passes_gate FROM schemes WHERE name = ?) = 0 THEN 1 END "
-        "WHERE name = ? AND include = 0",
-        (preset, preset),
-    )
+    # delete (UNHIDE), so a mode override survives; rating it says it's wanted (and it may
+    # have been a seeded near-miss).
+    db.execute(UNHIDE, {"name": preset})
     log_rating(db, preset, font, "save", stars)
     db.execute(
         "INSERT INTO favorites (preset, font, size, stars, saved_at) VALUES (?, ?, ?, ?, ?) "
@@ -364,6 +370,17 @@ def remove_favorite(db: sqlite3.Connection, preset: str, font: str) -> bool:
     db.execute("DELETE FROM favorites WHERE preset = ? AND font = ?", (preset, font))
     db.execute("COMMIT")
     return True
+
+
+def favorite_fonts(db: sqlite3.Connection, preset: str) -> list[tuple[str, int]]:
+    """(font label, stars) of each favorite of preset, best first."""
+    return [
+        (font_label(db, font), stars)
+        for font, stars in db.execute(
+            "SELECT font, stars FROM favorites WHERE preset = ? ORDER BY stars DESC, font",
+            (preset,),
+        ).fetchall()
+    ]
 
 
 def is_favorite(db: sqlite3.Connection, preset: str, font: str) -> bool:
@@ -542,7 +559,7 @@ def daily_snapshot(db: sqlite3.Connection) -> str | None:
     return dest
 
 
-# ---- iTerm2 side ----
+# The iTerm2 side: coloring sessions, the dialogs and the right-click menu items.
 
 
 def local_time(utc: str) -> str:
@@ -744,10 +761,7 @@ async def save_dialog(
     preset = await session.async_get_variable("user.color_preset")
     if not preset:
         await iterm2.Alert(
-            "Save/update this profile",
-            "This session wasn't colored by srcp_set_random_color_profile.py, "
-            "so there's nothing to save.",
-            window_id,
+            "Save/update this profile", not_colored("there's nothing to save"), window_id
         ).async_run(connection)
         return
     # The font the script applied. Reading it back from the session gave the wrong face
@@ -787,6 +801,11 @@ async def save_dialog(
         await db_failed_alert(connection, "Save/update this profile", window_id)
 
 
+def not_colored(consequence: str) -> str:
+    """Text for a menu item used on a tab this script didn't color."""
+    return f"This tab wasn't colored by srcp_set_random_color_profile.py, so {consequence}."
+
+
 async def db_failed_alert(connection: iterm2.Connection, title: str, window_id: str | None) -> None:
     """Tell the user a dialog action was lost to a DB failure (store.call gave None)."""
     await iterm2.Alert(
@@ -817,7 +836,7 @@ async def remove_from_menu(
         label = await store.call(font_label, font) or font
         text = f"{preset} with {label} isn't a favorite, so there's nothing to remove."
     else:
-        text = "This tab wasn't colored by srcp_set_random_color_profile.py, so it has no favorite."
+        text = not_colored("it has no favorite")
     await iterm2.Alert("Remove from favorites", text, window_id).async_run(connection)
 
 
@@ -831,11 +850,68 @@ async def change_from_menu(
     await color_session(connection, app, store, session, reroll=True)
 
 
+async def never_show_from_menu(
+    connection: iterm2.Connection, app: iterm2.App, store: Store, session_id: str
+) -> None:
+    """Hide the tab's preset (asking first if it's a favorite), then give the tab a new look."""
+    title = "Never show this profile"
+    session = app.get_session_by_id(session_id)
+    if not session:
+        log("warn", f"never show: session {session_id} not found")
+        return
+    window, _ = app.get_window_and_tab_for_session(session)
+    window_id = window.window_id if window else None
+    preset = await session.async_get_variable("user.color_preset")
+    if not preset:
+        await iterm2.Alert(title, not_colored("there's nothing to hide"), window_id).async_run(
+            connection
+        )
+        return
+    favs = await store.call(favorite_fonts, preset)
+    if favs is None:
+        await db_failed_alert(connection, title, window_id)
+        return
+    if favs:
+        lines = [f"{preset} is a favorite:"]
+        lines += [f"  {label} {STAR_BUTTONS[stars - 1]}" for label, stars in favs]
+        lines.append("Never show removes it from your favorites and from Profiles > Favorites.")
+        alert = iterm2.Alert(title, "\n".join(lines), window_id)
+        buttons = [CANCEL, NEVER]  # Cancel first: Escape cancels and Return can't hide it
+        for b in buttons:
+            alert.add_button(b)
+        index = await alert.async_run(connection) - 1000
+        if not (0 <= index < len(buttons)) or buttons[index] != NEVER:
+            return
+    # Not apply_choice: that needs the tab's font, which a tab without one doesn't have.
+    hidden = await store.call(never_show, preset)
+    if hidden is None:
+        await db_failed_alert(connection, title, window_id)
+        return  # nothing hidden, so keep the look rather than re-roll into confusion
+    if hidden:
+        log("info", f"never show: {preset}")
+        await favorites_changed(app, store, preset)
+    else:
+        log("info", f"never show: {preset} was already hidden")
+    try:
+        await color_session(connection, app, store, session, reroll=True)
+        new = await session.async_get_variable("user.color_preset")
+    except iterm2.RPCException as e:  # closed while the question was up: it's hidden anyway
+        log("info", f"never show: {preset} hidden; its tab closed before the new look ({e})")
+        return
+    if new == preset:  # no other preset left, or the DB failed (color_session logged which)
+        text = (
+            f"{preset} is hidden, but this tab couldn't switch to another look, so it keeps "
+            "this one until you close it. Scripts > Manage > Console says why (usually: "
+            "no other preset of this light/dark mode is left)."
+        )
+        await iterm2.Alert(title, text, window_id).async_run(connection)
+
+
 async def register_save_handlers(
     connection: iterm2.Connection, app: iterm2.App, store: Store
 ) -> None:
-    """Save (right-click and save_profile() key), Remove from favorites and Change to another
-    profile (right-click)."""
+    """Save (right-click and save_profile() key), and the right-click Remove from favorites,
+    Change to another profile and Never show this profile."""
     running: dict[str, asyncio.Task[None]] = {}
 
     def start(key: str, coro: Coroutine[Any, Any, None]) -> None:
@@ -873,11 +949,16 @@ async def register_save_handlers(
     async def change_profile_menu(session_id: str = iterm2.Reference("id")) -> None:  # pyright: ignore[reportArgumentType]  # Reference resolves to the id at call time
         start(f"change:{session_id}", change_from_menu(connection, app, store, session_id))
 
+    @iterm2.ContextMenuProviderRPC
+    async def never_show_menu(session_id: str = iterm2.Reference("id")) -> None:  # pyright: ignore[reportArgumentType]  # Reference resolves to the id at call time
+        start(f"never:{session_id}", never_show_from_menu(connection, app, store, session_id))
+
     await save_profile.async_register(connection)
     await save_profile_menu.async_register(connection, "Save/update this profile", MENU_ID)
     await change_profile_menu.async_register(
         connection, "Change to another profile", CHANGE_MENU_ID
     )
+    await never_show_menu.async_register(connection, "Never show this profile", NEVER_MENU_ID)
     # Hide the item on non-favorites where iTerm2 can (API protocol 1.23+, newer than 3.7.6);
     # elsewhere it shows on every tab and remove_from_menu explains. Passing visible_when to
     # an older iTerm2 only adds a warning to the Console.

@@ -86,7 +86,8 @@ FONT_DIRS = [
 ]
 
 
-# ---- color math ----
+# What the build learns about each preset (color math: WCAG contrast, OKLab; the readability
+# gate; a color hash to find twins; the repo's yaml variants), and whether a font is installed.
 
 
 def rgb(c):
@@ -192,7 +193,7 @@ def font_installed(files):
     )
 
 
-# ---- database ----
+# The database: migrations (one per schema version), the rebuild and its views.
 
 MIGRATIONS = [
     # 1: tables that survive rebuilds; seeds are added in migrate().

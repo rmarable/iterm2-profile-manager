@@ -2,17 +2,40 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Rules
+
+1. Do not tell lies.
+2. Do not make up facts. If something is unknown or unverified, say so; a "verified" fact cites its source and date.
+3. Always confirm before writing project files (code, docs, config; `./lint.sh --fix` too). Local notes (`CLAUDE-STATE.md`, `docs/archived-decisions.md`) and scratch files need no asking. Commits, pushes and tags: see Git.
+
 ## State tracking
 
 Read `CLAUDE-STATE.md` at the start of a session and update it when the state changes or a decision is made. It and `docs/archived-decisions.md` are local working notes, gitignored: a fresh clone has neither, so create them if missing.
-- Keep `CLAUDE-STATE.md` to 100 lines or fewer in total.
-- Keep its "Recent decisions" section to 10 lines or fewer, one dated line per decision (`YYYY-MM-DD: ...`).
-- When adding a decision would go over 10 lines, move the oldest entries to the end of `docs/archived-decisions.md`.
+- At most 100 lines; "Recent decisions" at most 10 lines, one dated line each (`YYYY-MM-DD: ...`).
+- Entries are pointers, not logs: one short line saying what, where (commit, file) and the next action. Detail lives in git, the docs or `docs/archived-decisions.md`.
+- Another session may be editing it: re-read it right before each write and change only your own lines.
+- Finished work and decisions past the 10 move to the end of `docs/archived-decisions.md` in the same update, leaving a one-line pointer; delete anything stale (done, superseded, pointing at something gone).
+
+## Reviews and models
+
+- Every feature plan gets an adversarial review before any of it is built, and the finished change gets a diff review before it is committed. Read-only agents, run in parallel, told to attack, not summarise, and to cite file:line.
+- Size: 2 reviewers (safety and correctness; design) for a small, contained change; 4 (safety, correctness, design, performance) for anything that changes the gate, picking, the schema or setup/uninstall.
+- Fable runs a plan's review and a change's first diff review; Opus runs later rounds (draft re-checks, fix checks). When Fable is out of credits Opus runs the round, and the findings say so. Sonnet doesn't review.
+- Findings are merged into one list (P1…) by severity, key claims are spot-checked against the code, the user decides each, and the plan is amended before it is built.
 
 ## Git
 
 - Always confirm with the user before every `git commit`, `git push`, or `git tag` (including `gh` commands that push or tag). Approval for one doesn't carry over to the next.
+- A commit message ends with exactly one trailer: `Co-Authored-By: Claude <noreply@anthropic.com>`. Never name the model, never add other trailers.
 - Remote: public GitHub repo `rmarable/iterm2-profile-manager`, default branch `main`.
+
+## Changelog
+
+`CHANGELOG.md`: each user-visible change adds one plain-language line (what changed for someone using it) under `## Unreleased`, newest first, no commit hashes. Refactors, test-only and internal doc changes don't. At a release the heading becomes `## vX.Y.Z (YYYY-MM-DD)`, and the GitHub release notes are taken from it.
+
+## Code comments
+
+No banner or divider comments (`# ---- name ----`). A section comment in a long module is one to three plain lines saying what the section holds and why.
 
 ## Docs
 
@@ -21,9 +44,9 @@ Read `CLAUDE-STATE.md` at the start of a session and update it when the state ch
 
 ## What this is
 
-iTerm2 Python API scripts living in iTerm2's own Scripts folder. There is no build; scripts are run by iTerm2 itself, not from the shell (they need the `iterm2` module and a live connection to the app). `.tests/srcp_test_db.py` (unittest, run by `lint.sh` under iTerm2's Python, temp folder only) covers the database layer; add a test with each DB change. `.tests/` is dot-named so it stays out of the Scripts menu.
+iTerm2 Python API scripts living in iTerm2's own Scripts folder. There is no build; scripts are run by iTerm2 itself, not from the shell (they need the `iterm2` module and a live connection to the app). `.tests/srcp_test_db.py` (unittest, run by `lint.sh` under iTerm2's Python, temp folder only) covers the database layer and, with mocks, the menu-item paths; add a test with each DB change. `.tests/` is dot-named so it stays out of the Scripts menu.
 
-- **Lint after every code change:** `./lint.sh` (ruff format --check, ruff check, pyright, shellcheck; `--fix` applies formatting and safe fixes). It must pass before a change is done. Settings in `pyproject.toml` and `AutoLaunch/ruff.toml`: Black style at 100 columns, `.tools/` py39, `AutoLaunch/`, `srcp_score_presets.py` and `srcp_ratings.py` py312. Suppressions name the exact rule and say why.
+- **Lint after every code change:** `./lint.sh` (ruff format --check, ruff check, pyright, shellcheck; `--fix` applies formatting and safe fixes). It must pass before a change is done. Settings in `pyproject.toml` and `AutoLaunch/ruff.toml`: Black style at 100 columns, `.tools/` py39, `AutoLaunch/`, `srcp_score_presets.py`, `srcp_ratings.py` and `srcp_never_show.py` py312. Suppressions name the exact rule and say why.
 - **Testing without iTerm2:** run `srcp_build_scheme_db.py --db <scratch path>`, and exercise the AutoLaunch script's DB functions by exec'ing its source minus the `iterm2.run_forever(main)` line under iTerm2's Python against a scratch DB. Never point tests at `~/.local/share/iterm2-color-schemes/`.
 
 - **Run a script manually:** iTerm2 menu → Scripts → `srcp_score_presets.py`. Output appears in Scripts → Manage → Console.
@@ -32,7 +55,7 @@ iTerm2 Python API scripts living in iTerm2's own Scripts folder. There is no bui
 - **Uninstall:** `./uninstall.sh` undoes `setup.sh` (defaults: AutoLaunch script, menu scripts, favorites' Dynamic Profiles, key binding; opt-in `--data`, `--presets`, `--fonts`, `--repo`, `--all`). Its prefs part is `.tools/srcp_uninstall_prefs.py`. Anything new that `setup.sh` installs needs a matching undo there.
 - Prefs writers share `.tools/srcp_iterm_prefs.py` (`load_prefs`, `save_prefs` with backup, `iterm_running`). `save_prefs` backs up to `~/.local/share/iterm2-profile-manager/prefs-backups/` (newest 10), takes `delete=` for top-level keys (`defaults import` only merges), and refuses when iTerm2 loads its settings from a custom folder (`LoadPrefsFromCustomFolder`), which would overwrite our writes; `setup.sh` and `uninstall.sh` check it up front too. An installed preset equal to any committed version of its repo file (`.tools/srcp_preset_history.py`) counts as ours: the import updates it, `--presets` removes it. `iterm_running` uses `ps`, not `pgrep -x iTerm2`, which misses iTerm2 from Claude's sandboxed shell. Never test a writer by running it for real to see the guard fire.
 - `srcp_enable_claude_integration.py` is optional and run by hand; `setup.sh` deliberately doesn't run it, so it isn't imposed on other users. It mirrors what iTerm2 3.7.6 itself installed (cc-status symlink, hooks in `~/.claude/settings.json`, per-profile workgroup triggers, two prefs flags). It deliberately leaves iTerm2's AI chat/API settings (`AIVendor`, `AiModel`, `AitermURL`, API key) alone; keep it that way. If iTerm2 changes its integration, re-derive from a Mac where it was enabled through the app.
-- **`.tools/`** holds the command-line tools; the dot keeps them out of iTerm2's Scripts menu (the menu can't pass arguments, and several tools refuse while iTerm2 runs). Menu-runnable scripts live at the top level (`srcp_ratings.py`, `srcp_score_presets.py`) or in `AutoLaunch/`. iTerm2's own `Alert` can't change font or width, so `srcp_ratings.py` shows the report via `.tools/srcp_popup.js` (JXA NSAlert with a Menlo text view; `SRCP_POPUP_DRYRUN=1` builds it without showing it, for tests). Pyright skips dot-folders, so `lint.sh` type-checks a temp copy of `.tools/`.
+- **`.tools/`** holds the command-line tools; the dot keeps them out of iTerm2's Scripts menu (the menu can't pass arguments, and several tools refuse while iTerm2 runs). Menu-runnable scripts live at the top level (`srcp_ratings.py`, `srcp_never_show.py`, `srcp_score_presets.py`) or in `AutoLaunch/`; one can't import another (importing runs it), so code they share goes in `.tools/`. iTerm2's own `Alert` can't change font or width, so they show their window via `.tools/srcp_popup.py` → `.tools/srcp_popup.js` (JXA NSAlert with a Menlo text view, and with `--choose` a dropdown that refuses the keyboard so Return/Escape still close it; `SRCP_POPUP_DRYRUN=1` builds it without showing it, for tests). Pyright skips dot-folders, so `lint.sh` type-checks a temp copy of `.tools/`.
 - **Naming:** every Python file starts with `srcp_` so ours are easy to find in iTerm2's Scripts menu (it lists every `.py` in the folder); keep that for new ones.
 - **Version:** bump `VERSION` in `AutoLaunch/srcp_set_random_color_profile.py` on every change to it; the script logs it (with the file's mtime and pid) at startup, so the Console shows which code is running.
 - **AutoLaunch:** any `.py` in `AutoLaunch/` starts automatically when iTerm2 launches. This checkout *is* iTerm2's Scripts folder, so adding a `.py` there enables it; never put a helper module there. A script being reviewed is parked as `.py.disabled` (ruff and pyright skip it in place: lint a copy named `.py`). After editing `srcp_set_random_color_profile.py`, restart it from the Scripts menu (or relaunch iTerm2); its flock on `~/.local/share/iterm2-color-schemes/.lock` makes a second copy exit.
@@ -41,7 +64,7 @@ iTerm2 Python API scripts living in iTerm2's own Scripts folder. There is no bui
 
 1. `.tools/srcp_build_scheme_db.py` reads `Custom Color Presets` from the prefs and writes `~/.local/share/iterm2-color-schemes/schemes.db`: each preset's mode (yaml `variant:` from the repo, else bg vs fg luminance) and a readability gate (text contrast ≥ 4.5; 4 of ANSI 1-6 at contrast ≥ 2; the largest set of ANSI 1-6 all ≥ 0.04 apart in OKLab has ≥ 5; monochrome themes skip the accent checks). It snapshots the DB to `backups/` first (`.tools/srcp_db_backup.py`, newest 14 kept). A rebuild replaces only `schemes` and its own four views (`VIEW_NAMES`; user views survive); `overrides`, `config`, `fonts`, `favorites`, `ratings`, `launches` persist. Schema changes go in `MIGRATIONS` (tracked by `PRAGMA user_version`), never by editing migration 1.
 2. `AutoLaunch/srcp_set_random_color_profile.py` runs forever. For each new session (`NewSessionMonitor`) it gets the mode from `app.async_get_theme()`, picks a favorite (weighted by stars, saved font) or a discovery preset (from the `discovery` view, skipping recent ones, presets with `colorful = 1` (background OKLab chroma ≥ `COLORFUL_BG_CHROMA` 0.05, set by the build) weighted by `config.colorful_weight`, default 3; random enabled font), applies it to the session's profile copy, sets `user.*` session variables, and logs a `launches` row. `SessionTerminationMonitor` fills in the end time. At startup it snapshots the DB if the newest snapshot is over a day old; its `daily_snapshot()` duplicates `.tools/srcp_db_backup.snapshot()` because `setup.sh` installs the script without `.tools/`, so keep the two in step. "Save/update this profile" (context menu) and `save_profile()` (⌃⌥⌘S) share one dialog, run in a task so the RPC timeout can't cut it off; "Remove from favorites" (context menu, `visible_when="user.is_favorite == 1"`; the variable is set as 1/0, not a bool; passed only when iTerm2 reports API protocol 1.23+, which 3.7.6 (1.21) does not, so there the item shows everywhere and explains on non-favorites. The iterm2 module's docs wrongly say 3.7.6) skips the dialog. "Change to another profile" (context menu) re-runs `color_session(reroll=True)`: same picker, excludes the current preset, ends the old `launches` row with `end_reason = 'changed'`. The script mirrors `favorites` into `~/Library/Application Support/iTerm2/DynamicProfiles/iterm2-profile-manager.plist` (`sync_profiles`; GUIDs are uuid5 of preset+font under a fixed namespace, so never change `GUID_NAMESPACE`), and sessions opened from those profiles keep their look. Saves use the applied font (`user.font`), not the font read back from the session.
-3. Saves, removals and Never show also append to `ratings` (history, migration 3) in the same transaction; on an older DB the script skips history with one warning. `.tools/srcp_favorites.py` reports favorites (with per preset+font launch stats), `--history` and `--hidden`; read-only.
+3. Saves, removals and Never show also append to `ratings` (history, migration 3) in the same transaction; on an older DB the script skips history with one warning. `.tools/srcp_favorites.py` reports favorites (with per preset+font launch stats), `--history` and `--hidden`; read-only except `show_again()` / `--show-again`, which undoes Never show with `UNHIDE` (the main script has the same string for `save_favorite`; a test keeps them equal; no `ratings` row, since the action CHECK has no `show_again`). Right-click "Never show this profile" (`never_show_from_menu`) hides the tab's preset (confirming first if it has favorites), then re-rolls the tab; `srcp_never_show.py` (Scripts menu) lists hidden presets with a dropdown and Show again.
 4. `.tools/srcp_export_curation.py` dumps `favorites`, `ratings`, `overrides`, `config`, `fonts` as SQL for keeping off this Mac (`INSERT OR REPLACE`; ratings and fonts `INSERT OR IGNORE`, fonts never enabled in the target; `fonts.missing` (schema 5) marks fonts the build disabled only for a missing file, and the build re-enables those once installed) (docs/REFERENCE.md: Backups).
 5. `srcp_score_presets.py` is a report only, not used for selection.
 
