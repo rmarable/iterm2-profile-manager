@@ -31,7 +31,7 @@ The main script writes these profiles to a Dynamic Profiles file (see [Files on 
 
 **Scripts → srcp_ratings.py** lists your favorites in a window. **History** shows the last 50 rating changes; **Hidden** shows **Never show** presets. Text is selectable.
 
-**Scripts → srcp_never_show.py** lists **Never show** presets with a dropdown: pick one, then **Show again**. It sets `overrides.include` back to `NULL` (a `mode` override stays), or to `1` when the preset fails the readability checks (it was showing before), except for a `duplicate_of` twin. Rating a hidden preset un-hides it by the same rule; since 0.8.0 a twin is no longer forced in that way (twins are never picked either way). Deleted favorites aren't restored, and no `ratings` row is written. The main script picks the change up at the next new session.
+**Scripts → srcp_never_show.py** lists **Never show** presets with a dropdown: pick one, then **Show again**. It sets `overrides.include` back to `NULL` (a `mode` override stays). With `fix_colors` off, a preset that fails the readability checks gets `1` instead (it was showing before), except for a `duplicate_of` twin; with it on (the default) it's picked anyway, with its [color adjustments](#color-adjustments). Rating a hidden preset un-hides it by the same rule; since 0.8.0 a twin is no longer forced in that way (twins are never picked either way). Deleted favorites aren't restored, and no `ratings` row is written. The main script picks the change up at the next new session.
 
 From the repo:
 
@@ -69,8 +69,8 @@ For each new session, the main script:
 2. **Reads the mode** from iTerm2 (follows macOS with the Regular, Minimal or Compact theme). Open sessions keep their colors when the mode changes.
 3. **Chooses a favorite or a discovery preset.** Chance of a favorite: `favorite_share × min(1, favorite presets in this mode / favorite_target)`. With defaults that is 5% per favorite preset, capped at 50% from 10 on. No favorites means discovery every time.
    - **Favorite:** weighted by stars per saved preset + font (a 5 ★ is picked 5× as often as a 1 ★; a preset saved with three fonts has three chances), in its saved font. If that font has since been disabled, a random one.
-   - **Discovery:** a preset of this mode that passes the readability checks, isn't a favorite, and isn't among the last 20 discovery picks in this mode. Colored-background presets (yellow, pink, teal rather than white, grey or black) get 3× weight. They are rare, so this lifts them to roughly a fifth of light and a third of dark sessions. Random font.
-4. **Applies the preset and font** to this session only, at the profile's font size. Also sets the non-ASCII font to MesloLGS Nerd Font (`nonascii_font`), so prompt icons (Powerlevel10k etc.) render with any font.
+   - **Discovery:** a preset of this mode (with `fix_colors` off: only one that passes the readability checks) that isn't a favorite, and isn't among the last 20 discovery picks in this mode. Colored-background presets (yellow, pink, teal rather than white, grey or black) get 3× weight. They are rare, so this lifts them to roughly a fifth of light and a third of dark sessions. Random font.
+4. **Applies the preset and font** to this session only, at the profile's font size, with the preset's [color adjustments](#color-adjustments) (the Console line ends ", N colors adjusted"). Also sets the non-ASCII font to MesloLGS Nerd Font (`nonascii_font`), so prompt icons (Powerlevel10k etc.) render with any font.
 5. **Logs the launch**, and the close time when the session ends. Sessions open when iTerm2 quits get `end_reason = 'unknown'` at the next start. A look replaced by **Change to another profile** ends with `end_reason = 'changed'`.
 
 ### Light or dark
@@ -79,7 +79,7 @@ Where the schemes repo labels a preset (`variant:` in `yaml/<name>.yml`), the la
 
 ### Readability checks
 
-Discovery uses only presets that pass all three:
+With `fix_colors = 0`, discovery uses only presets that pass all three (by default every preset is used, with its [color adjustments](#color-adjustments)):
 
 | Check | Rule |
 |---|---|
@@ -88,6 +88,25 @@ Discovery uses only presets that pass all three:
 | Colors distinct | ≥ 5 of those 6 are all ≥ 0.04 apart in OKLab. |
 
 Monochrome presets (one hue, or near-grey) need only the Text check. `overrides.include` forces a preset in or out.
+
+### Color adjustments
+
+`srcp_build_scheme_db.py` moves each color that is too close to its background until it reaches its target, and the main script applies the result to each new session and to favorites' profiles. iTerm2's installed presets are never changed.
+
+| Color | Target contrast against the background |
+|---|---|
+| Text (`Foreground Color`) | 4.5 |
+| ANSI 1-6 and 9-14 (red ... cyan, normal and bright) | 2 |
+| ANSI 8 (bright black: comments, shell autosuggestions) | 1.5, so it stays dimmer than text |
+
+- A color moves in OKLCH lightness (steps of 0.005) with its hue kept, toward white or black, whichever can reach the target (the side it's on first; one of them always reaches 4.5). Chroma drops only as far as needed to stay in gamut, and a colored ANSI color never so far that it stops counting as colored (OKLab chroma above 0.02); text may turn grey. If keeping the color stops it short of the target near white or black, it gets the best value on the way (e.g. Unikitty's bright magenta).
+- A bright color (ANSI 9-14) that would end up identical to its normal one gets a little more contrast, so the two stay apart.
+- If ANSI 1-6 still have fewer than 5 distinct colors, a color from the closest pair moves 0.01 in lightness away from the other, preferring a move that also raises its contrast (at most 40 moves per accent, shared among them: 240 in all; never below its target). If that doesn't reach 5, those moves are dropped. They can lower an already readable color's contrast a little.
+- Not adjusted: the background, ANSI 0, 7 and 15, cursor, bold, selection, and the separate `(Light)`/`(Dark)` colors a few presets carry for iTerm2's "separate colors for light and dark mode".
+- The math treats every color's components as sRGB, as the readability checks do; an adjusted color keeps its own color space (many presets use Calibrated or P3).
+- Adjustments are tied to the preset's colors at build time (`schemes.color_hash`, over 32-bit-rounded components, as iTerm2's API sends them). If a preset changes in iTerm2 after a build, its adjustments are skipped, with a Console warning, until the next rebuild.
+- After a rebuild, restart the main script so new sessions get the new adjustments.
+- `fix_colors = 0` turns all of this off: original colors, and only presets that pass the readability checks. Failing presets you showed again or rated while it was on then drop out too.
 
 A few installed presets are byte-identical copies under an older name (`base16 icy` = `base16-icy`), and the repo has a few identical twins of its own (`Zenbones` = `Zenbones Light`). Discovery uses only one name for each: the repo's, and the first in sort order.
 
@@ -105,6 +124,7 @@ sqlite3 ~/.local/share/iterm2-color-schemes/schemes.db
 | `favorite_target` | `10` | Favorite presets per mode needed to reach `favorite_share`. |
 | `recent_window` | `20` | Discovery picks before a preset can repeat. |
 | `colorful_weight` | `3` | Discovery weight of colored-background presets (OKLab chroma ≥ 0.05). `1` = no preference. |
+| `fix_colors` | `1` | [Color adjustments](#color-adjustments). `0` (or `0.0`) turns them off; anything else, or no row, means on. Applies to new sessions without a rebuild. |
 | `nonascii_font` | `MesloLGSNFM-Regular` | Font for icons and other non-ASCII characters. `''` keeps the profile's setting. The default is skipped while its font file isn't installed; disabling it in `fonts` only keeps it out of the random main fonts. |
 
 Default fonts: SF Mono, Menlo, Monaco, MesloLGS Nerd Font Mono. Fonts that aren't installed are disabled (`missing = 1`) until you install them and rebuild (`./setup.sh`, or `python3 .tools/srcp_build_scheme_db.py`). A font you disable yourself stays disabled. To keep a missing one off after you install it, also `set missing = 0`.
@@ -113,6 +133,7 @@ Default fonts: SF Mono, Menlo, Monaco, MesloLGS Nerd Font Mono. Fonts that aren'
 update config set value = '0.7' where key = 'favorite_share';
 update config set value = '1' where key = 'colorful_weight';
 update config set value = '' where key = 'nonascii_font';
+update config set value = '0' where key = 'fix_colors';        -- original colors
 
 -- fonts: name = PostScript name, label = name shown in profile names
 update fonts set enabled = 0 where name = 'Monaco';
@@ -275,7 +296,7 @@ Double-clicking an `.itermcolors` file also imports it, with one dialog per file
 
 | Table or view | Contents |
 |---|---|
-| `schemes` | One row per installed preset: `mode`, `mode_source`, `fg_contrast`, `accent_contrast`, `distinct_accents`, `monochrome`, `passes_gate`, `duplicate_of`, `bg_chroma`. Rebuilt by `srcp_build_scheme_db.py`. |
+| `schemes` | One row per installed preset: `mode`, `mode_source`, `fg_contrast`, `accent_contrast`, `distinct_accents`, `monochrome`, `passes_gate`, `duplicate_of`, `bg_chroma`, `fixes` (JSON `{key: [r, g, b, contrast before, contrast after]}`, or NULL), `fix_count`, `passes_gate_fixed` (the checks on the adjusted colors). Rebuilt by `srcp_build_scheme_db.py`. |
 | `overrides` | `name`, `mode` (force light/dark), `include` (1 = always pick, 0 = never). Seeded with 6 near-miss presets forced in. |
 | `config` | Settings (see [Configuration](#configuration)). |
 | `fonts` | `name` (PostScript name), `enabled`, `label`, `missing` (1: disabled only because its file wasn't found; a rebuild enables it once it is). |
@@ -295,6 +316,8 @@ select mode, count(*), sum(colorful) from discovery group by mode;    -- discove
 select * from launch_stats order by launches desc limit 10;
 select preset, font, launched_at, duration_s from launches order by id desc limit 20;
 select name, fg_contrast, accent_contrast, distinct_accents from schemes where passes_gate = 0;
+select name, fix_count from schemes where fix_count > 0 order by fix_count desc limit 20;  -- most adjusted
+select s.name, j.key, j.value from schemes s, json_each(s.fixes) j where s.name = 'Coffee Theme';
 select * from favorites where preset not in (select name from schemes);  -- favorites whose preset is gone
 ```
 

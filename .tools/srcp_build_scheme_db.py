@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Build the scheme database that AutoLaunch/srcp_set_random_color_profile.py picks from.
 
-Classifies every installed color preset as light or dark and runs a readability
-gate over it. A rebuild replaces only the derived `schemes` table and the views;
-`overrides`, `config`, `fonts`, `favorites`, `ratings` and `launches` are kept. An existing DB
-is snapshotted to backups/ first.
+Classifies every installed color preset as light or dark, runs a readability gate over
+it, and works out small color adjustments that make hard-to-see colors readable (the
+AutoLaunch script applies them; config fix_colors = 0 turns that off). A rebuild replaces
+only the derived `schemes` table (adjustments included) and the views; `overrides`, `config`,
+`fonts`, `favorites`, `ratings` and `launches` are kept. An existing DB is snapshotted to
+backups/ first.
 
 Reads iTerm2's prefs without writing them, so it's safe with iTerm2 running:
     python3 .tools/srcp_build_scheme_db.py [--dryrun] [--repo DIR] [--db PATH]
@@ -16,10 +18,12 @@ import argparse
 import glob
 import hashlib
 import itertools
+import json
 import math
 import os
 import re
 import sqlite3
+import struct
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # works under python3 -I too
@@ -48,6 +52,28 @@ MONO_ARC_DEG = 40  # colored accents within this hue arc = monochrome theme
 # Background OKLab chroma at or above which a preset counts as colorful (config colorful_weight).
 COLORFUL_BG_CHROMA = 0.05
 
+# Color adjustments: each of these colors is moved (OKLCH lightness, hue kept) until it reaches
+# its contrast against the background. ANSI 8 (comments, shell suggestions) gets a lower bar
+# so it stays dimmer than text. The background, ANSI 0/7/15, cursor, bold and selection stay.
+MIN_DIM_CONTRAST = 1.5
+FIX_TARGETS = {
+    "Foreground Color": MIN_TEXT_CONTRAST,
+    **{f"Ansi {i} Color": MIN_ACCENT_CONTRAST for i in (1, 2, 3, 4, 5, 6, 9, 10, 11, 12, 13, 14)},
+    "Ansi 8 Color": MIN_DIM_CONTRAST,
+}
+FIX_STEP = 0.005  # OKLCH lightness (and chroma) per step
+FIX_MAX_STEPS = 200  # enough to cross the whole 0-1 lightness range
+DISTINCT_STEP = 2 * FIX_STEP  # lightness per move when separating look-alike accents
+DISTINCT_MAX_STEPS = 40  # moves per accent, in all
+GAMUT_EPS = 1e-6
+GAMUT_FLOOR_MARGIN = 0.001  # last-resort chroma floor above CHROMA_MIN: still counts as colored
+# Whether adjustments are on: config fix_colors, anything but '0' / '0.0' (missing = on). The
+# views embed it, so changing the setting needs no rebuild. Copies, kept equal by a test:
+# FIX_ON_SQL in AutoLaunch/srcp_set_random_color_profile.py and .tools/srcp_favorites.py.
+FIX_ON_SQL = (
+    "(COALESCE(trim((SELECT value FROM config WHERE key = 'fix_colors')), '1') NOT IN ('0', '0.0'))"
+)
+
 # Old-rotation presets just under the gate, included on the first build.
 SEED_INCLUDES = [
     "Hot Dog Stand",
@@ -63,6 +89,7 @@ SEED_CONFIG = {
     "recent_window": "20",
     "colorful_weight": "3",  # colorful-background presets picked this many times as often
     "nonascii_font": "MesloLGSNFM-Regular",  # prompt icons; '' turns it off
+    "fix_colors": "1",  # adjust hard-to-see colors; 0 turns it off
 }
 # PostScript name -> readable label, used in favorite profile names ("Kibble - Menlo").
 SEED_FONT_LABELS = {
@@ -167,8 +194,178 @@ def classify(colors):
     }
 
 
+def srgb(v):
+    """Inverse of linear() (same 0.03928 threshold, so the two round-trip)."""
+    if v <= 0.03928 / 12.92:
+        return v * 12.92
+    return 1.055 * v ** (1 / 2.4) - 0.055
+
+
+def oklab_to_linear(lab):
+    """Linear RGB for an OKLab color; components outside 0-1 mean out of gamut."""
+    lightness, a, b = lab
+    lc = (lightness + 0.3963377774 * a + 0.2158037573 * b) ** 3
+    mc = (lightness - 0.1055613458 * a - 0.0638541728 * b) ** 3
+    sc = (lightness - 0.0894841775 * a - 1.2914855480 * b) ** 3
+    return (
+        4.0767416621 * lc - 3.3077115913 * mc + 0.2309699292 * sc,
+        -1.2684380046 * lc + 2.6097574011 * mc - 0.3413193965 * sc,
+        -0.0041960863 * lc - 0.7034186147 * mc + 1.7076147010 * sc,
+    )
+
+
+def lch_to_rgb(lightness, chroma, hue):
+    """Rounded sRGB (4 decimals, as color_hash), or None if out of gamut."""
+    lin = oklab_to_linear((lightness, chroma * math.cos(hue), chroma * math.sin(hue)))
+    if any(v < -GAMUT_EPS or v > 1 + GAMUT_EPS for v in lin):
+        return None
+    # Clamped before srgb(): a tiny negative would make ** a complex number.
+    return tuple(round(srgb(min(1.0, max(0.0, v))), 4) for v in lin)
+
+
+def move_to_contrast(c, bg, target, floor):
+    """c moved in lightness (hue kept) until its contrast with bg reaches target.
+
+    Steps toward whichever end (white or black) can reach the target, preferring the side c
+    is already on (one of them always reaches 4.5, the highest target). Chroma drops only as
+    far as needed to stay in gamut, never below floor. Returns the first point that reaches
+    the target, else the best point found (the floor ran out of gamut first), or None if
+    nothing beat c.
+    """
+    lightness, a, b = oklab(c)
+    chroma, hue = math.hypot(a, b), math.atan2(b, a)
+    up, down = contrast_ratio((1, 1, 1), bg), contrast_ratio((0, 0, 0), bg)
+    lighter = relative_luminance(c) >= relative_luminance(bg)
+    if (up if lighter else down) >= target:
+        direction = 1 if lighter else -1
+    else:
+        direction = -1 if lighter else 1
+    best, best_contrast = None, contrast_ratio(c, bg)
+    for step in range(1, FIX_MAX_STEPS + 1):
+        lt = lightness + direction * step * FIX_STEP
+        if not 0.0 <= lt <= 1.0:
+            break
+        cc, rgb_ = chroma, lch_to_rgb(lt, chroma, hue)
+        while rgb_ is None and cc > floor:
+            cc = max(floor, cc - FIX_STEP)
+            rgb_ = lch_to_rgb(lt, cc, hue)
+        if rgb_ is None:  # even the chroma floor is out of gamut here: keep the best so far
+            break
+        contrast = contrast_ratio(rgb_, bg)
+        if contrast >= target:
+            return rgb_
+        if contrast > best_contrast:
+            best, best_contrast = rgb_, contrast
+    return best
+
+
+def adjust_one(c, bg, target, is_ansi):
+    """move_to_contrast with the chroma floors in order: a colored ANSI color first keeps a
+    margin above CHROMA_MIN; if that misses the target, just above it (still colored, so the
+    gate's monochrome check can't flip). Text may go grey. None if nothing beat c."""
+    chroma = math.hypot(*oklab(c)[1:])
+    if not is_ansi or chroma <= CHROMA_MIN:  # text, or an ANSI grey: may lose its tint
+        floors = [min(chroma, CHROMA_MIN + FIX_STEP) if is_ansi else 0.0, 0.0]
+    else:
+        floors = [CHROMA_MIN + FIX_STEP, CHROMA_MIN + GAMUT_FLOOR_MARGIN]
+    best = None
+    for floor in floors:
+        moved = move_to_contrast(c, bg, target, min(chroma, floor))
+        if moved is not None and (
+            best is None or contrast_ratio(moved, bg) > contrast_ratio(best, bg)
+        ):
+            best = moved
+        if best is not None and contrast_ratio(best, bg) >= target:
+            break
+    return best
+
+
+def separate_accents(palette, bg):
+    """Nudge look-alike accents (ANSI 1-6) apart until 5 are distinct; None if it can't.
+
+    Deterministic, at most DISTINCT_MAX_STEPS moves per accent in all: each move takes one of
+    the closest pair DISTINCT_STEP in lightness away from the other, preferring a move that
+    also raises its contrast, and never below its contrast target.
+    """
+    work = dict(palette)
+    bg_lightness = oklab(bg)[0]
+    for _ in range(DISTINCT_MAX_STEPS * len(ACCENT_KEYS)):
+        labs = {k: oklab(work[k]) for k in ACCENT_KEYS}
+        if distinct_accents(list(labs.values())) >= MIN_DISTINCT_ACCENTS:
+            return work
+        k1, k2 = min(
+            itertools.combinations(ACCENT_KEYS, 2), key=lambda p: math.dist(labs[p[0]], labs[p[1]])
+        )
+        options = []
+        for k, other in ((k1, k2), (k2, k1)):
+            lightness, a, b = labs[k]
+            direction = 1 if lightness >= labs[other][0] else -1
+            candidate = lch_to_rgb(
+                lightness + direction * DISTINCT_STEP, math.hypot(a, b), math.atan2(b, a)
+            )
+            if candidate and contrast_ratio(candidate, bg) >= FIX_TARGETS[k]:
+                raises = (lightness >= bg_lightness) == (direction > 0)
+                options.append((not raises, ACCENT_KEYS.index(k), k, candidate))
+        if not options:
+            return None
+        _, _, k, candidate = min(options)
+        work[k] = candidate
+    return None
+
+
+def fix_colors(colors):
+    """{key: (r, g, b, contrast before, contrast after)} for the colors to adjust; {} if none.
+
+    A fixed point: fix_colors() of a palette with these applied returns {}.
+    """
+    bg = rgb(colors["Background Color"])
+    palette = {k: rgb(colors[k]) for k in FIX_TARGETS}
+    for key, target in FIX_TARGETS.items():
+        if contrast_ratio(palette[key], bg) < target:
+            moved = adjust_one(palette[key], bg, target, key != "Foreground Color")
+            if moved is not None:
+                palette[key] = moved
+    # A bright color (ANSI 9-14) that ended up identical to its normal one, though they
+    # differed, gets a little more contrast so the two stay apart.
+    for i in range(1, 7):
+        normal, bright = f"Ansi {i} Color", f"Ansi {i + 8} Color"
+        if palette[bright] == palette[normal] and rgb(colors[bright]) != rgb(colors[normal]):
+            nudged = adjust_one(
+                palette[bright], bg, contrast_ratio(palette[bright], bg) + 0.1, True
+            )
+            if nudged is not None:
+                palette[bright] = nudged
+    labs = [oklab(palette[k]) for k in ACCENT_KEYS]
+    if not is_monochrome(labs) and distinct_accents(labs) < MIN_DISTINCT_ACCENTS:
+        palette = separate_accents(palette, bg) or palette  # best effort: keep contrast fixes
+    out = {}
+    for k, v in palette.items():
+        before = rgb(colors[k])
+        if v != before:
+            out[k] = (*v, round(contrast_ratio(before, bg), 2), round(contrast_ratio(v, bg), 2))
+    return out
+
+
+def fixes_json(fixes):
+    """schemes.fixes: {key: [r, g, b, contrast before, contrast after]}, or None."""
+    return json.dumps({k: list(v) for k, v in fixes.items()}, sort_keys=True) if fixes else None
+
+
+def apply_fixes(colors, fixes):
+    """A copy of colors with fixes applied (each color keeps its other keys: space, alpha)."""
+    out = dict(colors)
+    for key, (r, g, b, *_) in fixes.items():
+        out[key] = {**colors[key], COMPONENTS[0]: r, COMPONENTS[1]: g, COMPONENTS[2]: b}
+    return out
+
+
+def float32(v):
+    """v as iTerm2's API sends it (32-bit), so the script's hash of a live preset matches."""
+    return struct.unpack("f", struct.pack("f", v))[0]
+
+
 def color_hash(colors):
-    parts = [",".join(f"{v:.4f}" for v in rgb(colors[k])) for k in HASH_KEYS]
+    parts = [",".join(f"{float32(v):.4f}" for v in rgb(colors[k])) for k in HASH_KEYS]
     return hashlib.sha1("|".join(parts).encode(), usedforsecurity=False).hexdigest()
 
 
@@ -269,13 +466,14 @@ VIEW_NAMES = ["launch_stats", "favorite_pool", "discovery", "effective"]
 VIEWS = """
 CREATE VIEW effective AS
     SELECT s.name, COALESCE(o.mode, s.mode) AS mode, o.include, s.passes_gate, s.duplicate_of,
-           s.bg_chroma
+           s.bg_chroma, s.fix_count, s.passes_gate_fixed
     FROM schemes s LEFT JOIN overrides o ON o.name = s.name;
 
+-- With adjustments on (config fix_colors), presets that fail the gate are picked too.
 CREATE VIEW discovery AS
     SELECT name, mode, bg_chroma >= {colorful} AS colorful FROM effective
     WHERE duplicate_of IS NULL
-      AND (include = 1 OR (include IS NULL AND passes_gate = 1))
+      AND (include = 1 OR (include IS NULL AND (passes_gate = 1 OR {fix_on})))
       AND name NOT IN (SELECT preset FROM favorites);
 
 CREATE VIEW favorite_pool AS
@@ -312,7 +510,10 @@ CREATE TABLE schemes (
     in_repo INTEGER NOT NULL,
     color_hash TEXT,
     duplicate_of TEXT,
-    bg_chroma REAL
+    bg_chroma REAL,
+    fixes TEXT,
+    fix_count INTEGER NOT NULL DEFAULT 0,
+    passes_gate_fixed INTEGER
 )
 """
 
@@ -383,8 +584,8 @@ def write_db(path, rows):
             migrate(db)
             db.execute("DROP TABLE IF EXISTS schemes")
             db.execute(SCHEMES_TABLE)
-            db.executemany("INSERT INTO schemes VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", rows)
-            execute_all(db, VIEWS.format(colorful=COLORFUL_BG_CHROMA))
+            db.executemany("INSERT INTO schemes VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+            execute_all(db, VIEWS.format(colorful=COLORFUL_BG_CHROMA, fix_on=FIX_ON_SQL))
             db.execute("COMMIT")
         except BaseException:
             db.execute("ROLLBACK")
@@ -408,13 +609,13 @@ def build_rows(presets, repo):
         if not has_colors(presets[name]):
             skipped.append(name)
             continue
-        info[name] = classify(presets[name]), color_hash(presets[name])
+        info[name] = classify(presets[name]), color_hash(presets[name]), fix_colors(presets[name])
         if name in repo_names:
             repo_hashes.setdefault(info[name][1], name)
 
     rows, disagree = [], []
     fails = {"text": 0, "accent": 0, "distinct": 0}
-    for name, (c, h) in info.items():
+    for name, (c, h, fixes) in info.items():
         mode, source = c["lum_mode"], "luminance"
         if name in variants:
             mode, source = variants[name], "yaml"
@@ -424,6 +625,7 @@ def build_rows(presets, repo):
         passes = c["text_ok"] and c["accent_ok"] and c["distinct_ok"]
         for check in fails:
             fails[check] += not c[f"{check}_ok"]
+        fixed = classify(apply_fixes(presets[name], fixes)) if fixes else c
         rows.append(
             (
                 name,
@@ -440,6 +642,9 @@ def build_rows(presets, repo):
                 # (e.g. Zenbones = Zenbones Light): only the first repo name is picked.
                 twin if (twin := repo_hashes.get(h)) != name else None,
                 c["bg_chroma"],
+                fixes_json(fixes),
+                len(fixes),
+                int(fixed["text_ok"] and fixed["accent_ok"] and fixed["distinct_ok"]),
             )
         )
     return rows, {"disagree": disagree, "fails": fails, "skipped": skipped}
@@ -467,11 +672,45 @@ def print_report(rows, report):
         f"repeated accents {f['distinct']}"
     )
     print(f"duplicates (old spellings, repo twins): {sum(r[10] is not None for r in rows)}")
+    adjusted = [r for r in rows if r[13]]
+    still = sum(not r[14] for r in rows if r[10] is None)  # twins are never picked
+    print(
+        f"colors adjusted for readability: {sum(r[13] for r in rows)} in {len(adjusted)} presets; "
+        f"{still} still fail the gate after adjusting (picked anyway unless config fix_colors = 0)"
+    )
     for name in report["skipped"]:
         print(f"[warn] skipped {name!r}: missing ANSI/fg/bg colors")
     for font, files in SEED_FONTS.items():
         if not font_installed(files):
             print(f"[warn] font not installed: {font} (disabled until it is and you rebuild)")
+
+
+def favorite_fixes(path):
+    """{preset: fixes JSON} for the favorites in the DB at path, or None if it can't tell."""
+    if not os.path.exists(path):
+        return None
+    db = sqlite3.connect(path)
+    try:
+        return dict(
+            db.execute(
+                "SELECT DISTINCT f.preset, s.fixes FROM favorites f "
+                "LEFT JOIN schemes s ON s.name = f.preset"
+            )
+        )
+    except sqlite3.OperationalError:  # older DB: no fixes column (or no favorites table)
+        return {}
+    finally:
+        db.close()
+
+
+def report_changed_favorites(before, after):
+    changed = sorted(p for p in after if before is not None and before.get(p) != after[p])
+    if changed:
+        print(f"color adjustments changed for favorites: {', '.join(changed)}")
+    print(
+        "Restart srcp_set_random_color_profile.py (Scripts menu, or relaunch iTerm2) "
+        "so new tabs get these adjustments."
+    )
 
 
 def warn_included_duplicates(path):
@@ -536,6 +775,7 @@ def main():
     if args.dry_run:
         print("(dry run: nothing written)")
         return
+    before = favorite_fixes(args.db)
     backup = snapshot(args.db)
     if backup:
         print(f"Backup: {backup}")
@@ -550,6 +790,7 @@ def main():
         )
     warn_included_duplicates(args.db)
     print(f"Wrote {args.db}")
+    report_changed_favorites(before, favorite_fixes(args.db) or {})
 
 
 if __name__ == "__main__":

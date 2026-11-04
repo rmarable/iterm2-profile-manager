@@ -8,7 +8,7 @@
 
 If you answered "yes" to any of the above questions, meet your new best friend, the iTerm2 Profile Manager. It gives every iTerm2 tab and window its own look and fixed-width font, so you can easily tell your sessions apart at a glance. Rate and save your favorite combinations, review your past choices, and more.
 
-The presets come from [iTerm2-Color-Schemes](https://github.com/mbadolato/iTerm2-Color-Schemes) (800+). Light presets are used when macOS is in Light Mode and dark ones in Dark Mode. About 5% are hard to read and never get picked.
+The presets come from [iTerm2-Color-Schemes](https://github.com/mbadolato/iTerm2-Color-Schemes) (800+). Light presets are used when macOS is in Light Mode and dark ones in Dark Mode. Colors that are hard to see against their background are adjusted a little, so most presets are readable. (You can turn that off; see [docs/REFERENCE.md](docs/REFERENCE.md#color-adjustments).)
 
 Press ⌃⌥⌘S to rate the current preset and font from 1 to 5 stars. Rated combinations come up more often and are saved as profiles under **Profiles → Favorites**. **Never show** in the same dialog, or right-click → **Never show this profile**, hides a preset until you bring it back.
 
@@ -136,6 +136,8 @@ Kept: this repo, iTerm2 settings backups, shell config, and the Claude Code inte
 | Tabs don't change color | Check **Scripts → Manage → Console** for errors, and that the Python API is enabled. |
 | Console: `no scheme DB at ...` | Run `python3 .tools/srcp_build_scheme_db.py`. No restart needed. |
 | Console: `preset not found: X` | Preset renamed or deleted in iTerm2. Run `python3 .tools/srcp_build_scheme_db.py`. |
+| Console: `X changed since the DB was built; its color adjustments are skipped` | You edited or re-imported the preset after the last build, so its colors show unadjusted. Run `python3 .tools/srcp_build_scheme_db.py`, then restart the main script from the Scripts menu. |
+| A preset looks a little different from its screenshots | Colors that were hard to see are adjusted. To see the originals, turn that off: [docs/REFERENCE.md](docs/REFERENCE.md#color-adjustments). |
 | Most presets show your default profile's colors | Settings → Profiles → Colors: turn off **Use separate colors for light and dark mode** (few presets define both). |
 | Always light, or always dark | Settings → Appearance → Theme: **Regular**, **Minimal** or **Compact**, not Light, Dark or High Contrast. |
 | Console: `another copy is already running; exiting` | Expected after a restart; a lock allows one copy. But if new tabs stopped changing color after you relaunched iTerm2, a copy from before is stuck (fixed in 0.6.9). Quit iTerm2, run `pkill -f srcp_set_random_color_profile` in Terminal.app, and relaunch. |

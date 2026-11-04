@@ -5,7 +5,8 @@ Picks from the scheme DB built by .tools/srcp_build_scheme_db.py: sometimes
 (favorite_share, ramped by the number of favorites) a starred favorite of the current
 mode, weighted by stars; otherwise a preset from the discovery view not among the last
 recent_window picks, with colored-background presets weighted by colorful_weight.
-Records every launch and when it ended, and snapshots the DB once a day.
+Colors the build found hard to see get its adjustments applied (config fix_colors = 0 turns
+that off). Records every launch and when it ended, and snapshots the DB once a day.
 "Save/update this profile" (right-click) or the save_profile() key binding stars the
 current look; "Remove from favorites" (right-click; hidden on non-favorites only where
 iTerm2 supports API protocol 1.23+) un-stars it; "Change to another profile" (right-click)
@@ -21,10 +22,13 @@ import calendar
 import contextlib
 import fcntl
 import glob
+import hashlib
+import json
 import os
 import plistlib
 import random
 import sqlite3
+import struct
 import subprocess
 import sys
 import threading
@@ -37,7 +41,7 @@ from typing import IO, Any, TypeVar
 import iterm2
 from iterm2.capabilities import supports_context_menu_submenus_and_visibility
 
-VERSION = "0.8.0"  # bump on every change, so the Console shows which code is running
+VERSION = "0.9.0"  # bump on every change, so the Console shows which code is running
 DATA_DIR = os.path.expanduser("~/.local/share/iterm2-color-schemes")
 DB_PATH = os.path.join(DATA_DIR, "schemes.db")
 LOCK_PATH = os.path.join(DATA_DIR, ".lock")
@@ -74,14 +78,24 @@ GUID_NAMESPACE = uuid.UUID("468579c8-bf93-425d-9e25-ff5f7ddebd11")  # fixed: GUI
 STAR_BUTTONS = [f"{n} {'★' * n}" for n in range(1, 6)]  # "3 ★★★"
 REMOVE, NEVER, CANCEL = "Remove favorite", "Never show", "Cancel"
 PRESET_ERRORS = (iterm2.GetPresetException, iterm2.ListPresetsException)
-# Undo Never show: same string as UNHIDE in .tools/srcp_favorites.py (this script is installed
-# without .tools/; a test keeps them equal). A mode override survives; a preset that fails
-# the gate is forced in (include 1), since it was wanted, unless it's a byte-identical twin.
+# Copies of .tools/srcp_build_scheme_db.py constants (this script is installed without
+# .tools/; a test keeps them equal). FIX_ON_SQL: whether color adjustments are on (config
+# fix_colors, anything but '0' / '0.0'); HASH_KEYS and COMPONENTS: what color_hash covers.
+FIX_ON_SQL = (
+    "(COALESCE(trim((SELECT value FROM config WHERE key = 'fix_colors')), '1') NOT IN ('0', '0.0'))"
+)
+HASH_KEYS = [*(f"Ansi {i} Color" for i in range(16)), "Foreground Color", "Background Color"]
+COMPONENTS = ("Red Component", "Green Component", "Blue Component")
+# Undo Never show: same string as UNHIDE in .tools/srcp_favorites.py (kept equal by a test).
+# A mode override survives. A preset that fails the gate is forced in (include 1), since it
+# was wanted, unless it's a byte-identical twin or adjustments are on (it's picked anyway, and
+# turning them off then puts things back as they were).
 UNHIDE = (
-    "UPDATE overrides SET include = CASE WHEN "
+    "UPDATE overrides SET include = CASE WHEN "  # noqa: S608  (constants only)
     "(SELECT passes_gate FROM schemes WHERE name = :name) = 0 AND "
-    "(SELECT duplicate_of FROM schemes WHERE name = :name) IS NULL THEN 1 END "
-    "WHERE name = :name AND include = 0"
+    "(SELECT duplicate_of FROM schemes WHERE name = :name) IS NULL AND NOT "
+    + FIX_ON_SQL
+    + " THEN 1 END WHERE name = :name AND include = 0"
 )
 
 T = TypeVar("T")
@@ -236,6 +250,107 @@ def pick(db: sqlite3.Connection, mode: str, exclude: set[str]) -> Pick | tuple[(
     weights = [weight if colorful else 1.0 for _, colorful in pool]
     preset = random.choices(pool, weights=weights if sum(weights) > 0 else None)[0][0]
     return preset, None, "discovery", None
+
+
+def look_fixes(db: sqlite3.Connection, preset: str) -> tuple[str | None, str | None]:
+    """(adjustments as JSON or None, the build's color_hash) for preset."""
+    try:
+        row = db.execute(
+            "SELECT CASE WHEN " + FIX_ON_SQL + " THEN fixes END, color_hash "
+            "FROM schemes WHERE name = ?",
+            (preset,),
+        ).fetchone()
+    except sqlite3.OperationalError:  # DB built before 0.9.0
+        warn_once("no-fixes", "the DB has no color adjustments; rebuild it to get them")
+        return None, None
+    return (row[0], row[1]) if row else (None, None)
+
+
+def pick_look(
+    db: sqlite3.Connection, mode: str, exclude: set[str]
+) -> tuple[Pick, str | None, str | None] | tuple[()]:
+    """pick(), plus the chosen preset's adjustments, in one Store.call."""
+    choice = pick(db, mode, exclude)
+    if not choice:
+        return ()
+    return (choice, *look_fixes(db, choice[0]))
+
+
+def float32(v: float) -> float:
+    """As in the build: iTerm2's API sends colors as 32-bit floats, prefs hold 64-bit ones."""
+    return struct.unpack("f", struct.pack("f", v))[0]
+
+
+def colors_hash(colors: dict[str, tuple[float, float, float]]) -> str | None:
+    """The build's color_hash, from {key: (r, g, b)} with components 0-1."""
+    try:
+        parts = [",".join(f"{float32(v):.4f}" for v in colors[k]) for k in HASH_KEYS]
+    except KeyError:
+        return None
+    return hashlib.sha1("|".join(parts).encode(), usedforsecurity=False).hexdigest()
+
+
+def usable_fixes(
+    preset: str,
+    fixes_json: str | None,
+    built_hash: str | None,
+    live: dict[str, tuple[float, float, float]],
+) -> dict[str, tuple[float, float, float]]:
+    """{key: (r, g, b)} to apply to preset, or {} (none, or its colors changed since the build).
+
+    live: the installed preset's own colors, before any adjustment.
+    """
+    if not fixes_json:
+        return {}
+    if colors_hash(live) != built_hash:
+        warn_once(
+            f"fixes-stale-{preset}",
+            f"{preset} changed since the DB was built; its color adjustments are skipped "
+            "until you rebuild (.tools/srcp_build_scheme_db.py)",
+        )
+        return {}
+    try:
+        return {
+            k: (float(v[0]), float(v[1]), float(v[2])) for k, v in json.loads(fixes_json).items()
+        }
+    except (ValueError, TypeError, IndexError, AttributeError) as e:
+        warn_once(f"fixes-bad-{preset}", f"{preset}: unreadable color adjustments ({e}); skipped")
+        return {}
+
+
+def adjust_preset(
+    name: str, preset: iterm2.ColorPreset, fixes_json: str | None, built_hash: str | None
+) -> int:
+    """Apply the adjustments to preset's colors in place (each keeps its color space)."""
+    live = {v.key: (v.red / 255, v.green / 255, v.blue / 255) for v in preset.values}
+    fixes = usable_fixes(name, fixes_json, built_hash, live)
+    for v in preset.values:
+        if v.key in fixes:
+            v.red, v.green, v.blue = (c * 255 for c in fixes[v.key])
+    return len(fixes)
+
+
+_profile_adjusted: dict[str, int] = {}  # preset -> colors adjusted in its favorite profiles
+
+
+def adjust_colors(
+    name: str, colors: dict[str, Any], fixes_json: str | None, built_hash: str | None
+) -> dict[str, Any]:
+    """A copy of a prefs preset dict with the adjustments (color space and alpha kept).
+
+    Notes how many were applied, so a session opened from the profile reports what it shows.
+    """
+    live = {
+        k: tuple(float(v[c]) for c in COMPONENTS)
+        for k, v in colors.items()
+        if isinstance(v, dict) and all(c in v for c in COMPONENTS)
+    }
+    fixes = usable_fixes(name, fixes_json, built_hash, live)  # pyright: ignore[reportArgumentType]  # 3-tuples by construction
+    _profile_adjusted[name] = len(fixes)
+    adjusted = {
+        k: {**colors[k], **dict(zip(COMPONENTS, rgb, strict=True))} for k, rgb in fixes.items()
+    }
+    return {**colors, **adjusted}
 
 
 def nonascii_font(db: sqlite3.Connection) -> str | None:
@@ -396,14 +511,21 @@ def favorite_guid(preset: str, font: str) -> str:
     return str(uuid.uuid5(GUID_NAMESPACE, f"{preset}\0{font}")).upper()
 
 
-def favorite_by_guid(db: sqlite3.Connection, guid: str) -> tuple[str, str, int, str] | None:
-    """(preset, font, stars, mode) of the favorite whose profile has this GUID."""
-    for preset, font, stars, mode in db.execute(
-        "SELECT f.preset, f.font, f.stars, COALESCE(e.mode, '?') "
+def favorite_by_guid(db: sqlite3.Connection, guid: str) -> tuple[str, str, int, str, int] | None:
+    """(preset, font, stars, mode, colors adjusted) of the favorite whose profile has this GUID."""
+    query = (
+        "SELECT f.preset, f.font, f.stars, COALESCE(e.mode, '?'), {adjusted} "
         "FROM favorites f LEFT JOIN effective e ON e.name = f.preset"
-    ):
+    )
+    try:
+        rows = db.execute(
+            query.format(adjusted="CASE WHEN " + FIX_ON_SQL + " THEN e.fix_count ELSE 0 END")
+        ).fetchall()
+    except sqlite3.OperationalError:  # DB built before 0.9.0
+        rows = db.execute(query.format(adjusted="0")).fetchall()
+    for preset, font, stars, mode, adjusted in rows:
         if favorite_guid(preset, font) == guid:
-            return preset, font, stars, mode
+            return preset, font, stars, mode, adjusted or 0
     return None
 
 
@@ -433,11 +555,22 @@ def sync_profiles(db: sqlite3.Connection) -> int | None:
     )
     fallback = nonascii_font(db)
     profiles = []
-    for preset, font, size in db.execute(
-        "SELECT preset, font, size FROM favorites "
-        "WHERE preset NOT IN (SELECT name FROM overrides WHERE include = 0) "
-        "ORDER BY preset, font"
-    ):
+    where = "WHERE f.preset NOT IN (SELECT name FROM overrides WHERE include = 0) "
+    try:
+        rows = db.execute(
+            "SELECT f.preset, f.font, f.size, CASE WHEN " + FIX_ON_SQL + " THEN s.fixes END, "  # noqa: S608  (constants only)
+            "s.color_hash FROM favorites f LEFT JOIN schemes s ON s.name = f.preset "
+            + where
+            + "ORDER BY f.preset, f.font"
+        ).fetchall()
+    except sqlite3.OperationalError:  # DB built before 0.9.0: no adjustments
+        rows = [
+            (*r, None, None)
+            for r in db.execute(
+                "SELECT f.preset, f.font, f.size FROM favorites f " + where + "ORDER BY 1, 2"  # noqa: S608  (constants only)
+            )
+        ]
+    for preset, font, size, fixes_json, built_hash in rows:
         if preset not in presets:
             warn_once(f"profile-{preset}", f"favorite {preset!r} isn't an installed preset")
             continue
@@ -445,7 +578,7 @@ def sync_profiles(db: sqlite3.Connection) -> int | None:
         size_text = str(int(pt)) if pt.is_integer() else str(pt)
         profiles.append(
             {
-                **presets[preset],
+                **adjust_colors(preset, presets[preset], fixes_json, built_hash),
                 "Name": f"{preset} - {font_label(db, font)}",
                 "Guid": favorite_guid(preset, font),
                 "Dynamic Profile Parent Name": parent,
@@ -481,7 +614,8 @@ _profiles_state: list[str | None] = [None]  # what sync_profiles last wrote from
 
 
 def sync_if_changed(db: sqlite3.Connection) -> int | None:
-    """sync_profiles, but only when favorites, Never show, the icon font or fonts changed.
+    """sync_profiles, but only when favorites, Never show, the icon font, fonts or the
+    favorites' color adjustments changed.
 
     Cheap enough to call for every new session, so restoring an export or editing
     favorites in sqlite3 shows up in the Profiles menu without a restart.
@@ -498,8 +632,16 @@ def sync_if_changed(db: sqlite3.Connection) -> int | None:
         row = db.execute(query.format(fonts)).fetchone()
     except sqlite3.OperationalError:  # DB built before fonts.label existed
         row = db.execute(query.format("name || ':' || enabled")).fetchone()
+    try:  # the favorites' adjustments, so a rebuild that changes them rewrites the profiles
+        fixes = db.execute(
+            "SELECT " + FIX_ON_SQL + ", (SELECT group_concat(n || ':' || ifnull(fx, ''), ';') "  # noqa: S608  (constants only)
+            "FROM (SELECT DISTINCT f.preset AS n, s.fixes AS fx FROM favorites f "
+            "LEFT JOIN schemes s ON s.name = f.preset ORDER BY f.preset))"
+        ).fetchone()
+    except sqlite3.OperationalError:  # DB built before 0.9.0
+        fixes = ()
     # The icon font as applied (it depends on the font file being installed, too).
-    state = "|".join(str(v) for v in (*row, nonascii_font(db)))
+    state = "|".join(str(v) for v in (*row, *fixes, nonascii_font(db)))
     if state == _profiles_state[0]:
         return None
     count = sync_profiles(db)
@@ -601,10 +743,14 @@ async def keep_favorite_profile(
     fav = await store.call(favorite_by_guid, guid) if guid else None
     if not fav:
         return False
-    preset, font, stars, preset_mode = fav
+    preset, font, stars, preset_mode, adjusted = fav
+    # What its profile file got (none if the preset changed since the build), when known.
+    adjusted = _profile_adjusted.get(preset, adjusted)
     _, size = split_font(profile.normal_font)
     # The preset's own mode, not the current theme: a dark favorite can be opened in light mode.
-    log("info", f"{preset_mode} favorite profile {stars} ★: {preset} | {font} {size}")
+    # Its profile file already holds the adjusted colors (sync_profiles).
+    note = f", {colors_adjusted(adjusted)}" if adjusted else ""
+    log("info", f"{preset_mode} favorite profile {stars} ★: {preset} | {font} {size}{note}")
     await set_variables(
         session,
         color_preset=preset,
@@ -612,6 +758,7 @@ async def keep_favorite_profile(
         font_size=size,
         mode=preset_mode,
         is_favorite=1,  # 1/0, not True/False: the menu's visible_when compares with 1
+        adjusted=adjusted,
     )
     await store.call(
         record_launch,
@@ -648,14 +795,14 @@ async def color_session(
         return
     exclude: set[str] = {current} if current else set()  # a re-roll never gives the same back
     for _ in range(3):
-        choice = await store.call(pick, mode, exclude)
-        if choice is None:  # store.call already logged why
+        look = await store.call(pick_look, mode, exclude)
+        if look is None:  # store.call already logged why
             log("warn", "couldn't read the DB; session left as is")
             return
-        if not choice:
+        if not look:
             warn_once(f"empty-{mode}", f"no {mode} presets to pick from; sessions left as is")
             return
-        preset_name, font, source, stars = choice
+        (preset_name, font, source, stars), fixes_json, built_hash = look
         preset = await get_preset(connection, preset_name)
         if preset:
             break
@@ -664,6 +811,7 @@ async def color_session(
     else:
         return
 
+    adjusted = adjust_preset(preset_name, preset, fixes_json, built_hash)
     await profile.async_set_color_preset(preset)
     _, size = split_font(profile.normal_font)
     font = font or await store.call(random_font)
@@ -675,8 +823,14 @@ async def color_session(
         await profile.async_set_use_non_ascii_font(True)
 
     label = f"favorite {stars} ★" if source == "favorite" else "discovery"
-    log("info", f"{mode} {label}: {preset_name} | {font or '(profile font)'} {size}")
-    variables: dict[str, Any] = {"color_preset": preset_name, "font_size": size, "mode": mode}
+    note = f", {colors_adjusted(adjusted)}" if adjusted else ""
+    log("info", f"{mode} {label}: {preset_name} | {font or '(profile font)'} {size}{note}")
+    variables: dict[str, Any] = {
+        "color_preset": preset_name,
+        "font_size": size,
+        "mode": mode,
+        "adjusted": adjusted,  # for the rating dialog
+    }
     if font:
         variables["font"] = font
         variables["is_favorite"] = int(bool(await store.call(is_favorite, preset_name, font)))
@@ -694,6 +848,10 @@ async def color_session(
         profile.name,
         session.session_id,
     )
+
+
+def colors_adjusted(n: int) -> str:
+    return "1 color adjusted" if n == 1 else f"{n} colors adjusted"
 
 
 async def sync_and_log(store: Store) -> None:
@@ -788,6 +946,9 @@ async def save_dialog(
         lines.append("Not launched before.")
     if stars:
         lines.append(f"Saved now with {STAR_BUTTONS[stars - 1]}.")
+    adjusted = await session.async_get_variable("user.adjusted")
+    if adjusted:
+        lines.append(f"{colors_adjusted(int(adjusted))} so they're easier to see.")
     alert = iterm2.Alert("Save/update this profile", "\n".join(lines), window_id)
     # Remove favorite only appears when this (preset, font) is a favorite. Cancel goes first so
     # Return can't save 1 star: NSAlert gives Return to the first button and Escape to one

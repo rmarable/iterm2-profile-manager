@@ -10,6 +10,8 @@ The dot keeps this folder out of iTerm2's Scripts menu, like .tools/.
 import asyncio
 import contextlib
 import io
+import json
+import math
 import os
 import plistlib
 import shutil
@@ -19,6 +21,7 @@ import sys
 import tempfile
 import types
 import unittest
+from typing import ClassVar
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -83,6 +86,12 @@ PRESETS = {
 REPO_NAMES = ["Dark One", "Dark Two", "Dark Two Copy", "Light One", "Yellow", "Murky"]
 
 
+class FakePreset(str):
+    """What get_preset returns in the tests: the preset's name, with no colors to adjust."""
+
+    values = ()
+
+
 class DbTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="srcp-test-")
@@ -112,6 +121,12 @@ class DbTest(unittest.TestCase):
     def discovery(self, mode):
         return {n for (n,) in self.db.execute("SELECT name FROM discovery WHERE mode = ?", (mode,))}
 
+    def fixing(self, value):
+        """Set config fix_colors (None deletes it)."""
+        self.db.execute("DELETE FROM config WHERE key = 'fix_colors'")
+        if value is not None:
+            self.db.execute("INSERT INTO config VALUES ('fix_colors', ?)", (value,))
+
 
 class BuildTest(DbTest):
     def test_schema_version_and_rebuild_keeps_user_data(self):
@@ -134,6 +149,8 @@ class BuildTest(DbTest):
         self.assertEqual(self.scheme("dark one")[2], "Dark One")  # old spelling
         self.assertEqual(self.scheme("Dark Two Copy")[2], "Dark Two")  # repo twin
         self.assertIsNone(self.scheme("Dark Two")[2])
+        self.assertEqual(self.discovery("dark"), {"Dark One", "Dark Two", "Murky"})  # adjusted
+        self.fixing("0")
         self.assertEqual(self.discovery("dark"), {"Dark One", "Dark Two"})
 
     def test_newer_schema_is_refused(self):
@@ -210,6 +227,7 @@ class BuildTest(DbTest):
 
 class MainScriptTest(DbTest):
     def test_pick_respects_mode_and_exclude(self):
+        self.fixing("0")  # Murky (unreadable) stays out
         for _ in range(50):
             name, font, source, _stars = self.main["pick"](self.db, "dark", {"Dark Two"})
             self.assertEqual((name, font, source), ("Dark One", None, "discovery"))
@@ -269,7 +287,8 @@ class MainScriptTest(DbTest):
     def test_reroll_replaces_the_look_and_never_repeats_it(self):
         self.main["FONT_DIRS"] = []  # no icon font
         self.main["sync_and_log"] = mock.AsyncMock()
-        self.main["get_preset"] = mock.AsyncMock(side_effect=lambda _c, name: name)
+        self.main["get_preset"] = mock.AsyncMock(side_effect=lambda _c, name: FakePreset(name))
+        self.fixing("0")  # Murky (unreadable) stays out of the re-roll
         variables = {"user.color_preset": "Dark One"}
 
         async def set_variable(name, value):
@@ -324,7 +343,8 @@ class MainScriptTest(DbTest):
         row = self.db.execute("SELECT mode, include FROM overrides WHERE name = 'Dark One'")
         self.assertEqual(row.fetchone(), ("light", None))
 
-    def test_rating_a_hidden_unreadable_preset_forces_it_in(self):
+    def test_with_adjustments_off_rating_a_hidden_unreadable_preset_forces_it_in(self):
+        self.fixing("0")
         self.main["never_show"](self.db, "Murky")
         self.main["save_favorite"](self.db, "Murky", "Monaco", 13, 2)
         self.main["remove_favorite"](self.db, "Murky", "Monaco")
@@ -449,6 +469,7 @@ class PickOddsTest(DbTest):
                 self.db, preset, None, 13, "dark", "discovery", None, "p", preset
             )
 
+        self.fixing("0")  # Murky (unreadable) stays out
         launch("Dark One")
         self.assertEqual({p[0] for p in self.picks("dark")}, {"Dark Two"})
         launch("Dark Two")  # every preset is recent: the window falls back to all of them
@@ -540,6 +561,303 @@ class ExportTest(DbTest):
         self.assertEqual(fonts["Other-Regular"], (0, 1))
 
 
+def with_colors(base, **changes):
+    """A copy of a test preset with some colors replaced: key=(r, g, b), spaces in key → _."""
+    out = {k: dict(v) for k, v in base.items()}
+    for key, rgb in changes.items():
+        out[key.replace("_", " ")] = {**out[key.replace("_", " ")], **color(*rgb)}
+    return out
+
+
+class ColorFixTest(DbTest):
+    """Color adjustments: the build's fix_colors(), and how the script applies them."""
+
+    CASES: ClassVar[dict[str, dict]] = {
+        # Light-on-light accents, as in Coffee Theme: only darker can reach the target.
+        "light on light": with_colors(
+            LIGHT, Background_Color=(0.95, 0.92, 0.88), Ansi_3_Color=(0.95, 0.93, 0.6)
+        ),
+        "dark ANSI 8 on dark": with_colors(DARK, Ansi_8_Color=(0.05, 0.05, 0.05)),
+        "ANSI 8 equal to bg": with_colors(DARK, Ansi_8_Color=(0.1, 0.1, 0.1)),
+        # White text on red, as in Hot Dog Stand: white tops out at 4.0, black reaches 5.25.
+        "black beats white": with_colors(
+            DARK, Background_Color=(1.0, 0.0, 0.0), Foreground_Color=(1.0, 1.0, 1.0)
+        ),
+        "saturated accent leaves gamut": with_colors(
+            DARK, Background_Color=(0.05, 0.05, 0.25), Ansi_4_Color=(0.0, 0.0, 1.0)
+        ),
+        "unreadable text": UNREADABLE,
+        # Two pairs of near-identical readable accents: only 4 of 6 distinct until some move.
+        "look-alike accents": with_colors(
+            DARK,
+            Ansi_2_Color=(0.9, 0.21, 0.21),
+            Ansi_6_Color=(0.9, 0.31, 0.9),
+            Ansi_8_Color=(0.5, 0.5, 0.5),
+        ),
+    }
+
+    def test_every_bad_color_reaches_its_target_and_nothing_else_moves(self):
+        for name, colors in self.CASES.items():
+            with self.subTest(name):
+                fixes = build.fix_colors(colors)
+                self.assertTrue(fixes, "something to fix")
+                bg = build.rgb(colors["Background Color"])
+                after = build.apply_fixes(colors, fixes)
+                for key, target in build.FIX_TARGETS.items():
+                    reachable = max(
+                        build.contrast_ratio((1, 1, 1), bg), build.contrast_ratio((0, 0, 0), bg)
+                    )
+                    if reachable >= target:
+                        got = build.contrast_ratio(build.rgb(after[key]), bg)
+                        self.assertGreaterEqual(got, target, key)
+                for key, target in build.FIX_TARGETS.items():
+                    already = build.contrast_ratio(build.rgb(colors[key]), bg) >= target
+                    # Separating look-alikes may move readable accents (ANSI 1-6), nothing else.
+                    separating = name == "look-alike accents" and key in build.ACCENT_KEYS
+                    if already and not separating:
+                        self.assertNotIn(key, fixes, key)
+                for key in ("Background Color", "Ansi 0 Color", "Ansi 7 Color", "Ansi 15 Color"):
+                    self.assertNotIn(key, fixes)
+                for key, (r, g, b, *_) in fixes.items():
+                    self.assertTrue(all(0 <= v <= 1 for v in (r, g, b)), key)
+
+    def test_hue_and_the_monochrome_check_are_kept(self):
+        for name, colors in self.CASES.items():
+            with self.subTest(name):
+                fixes = build.fix_colors(colors)
+                after = build.apply_fixes(colors, fixes)
+                self.assertEqual(
+                    build.classify(after)["monochrome"], build.classify(colors)["monochrome"]
+                )
+                for key, (r, g, b, *_) in fixes.items():
+                    _, a1, b1 = build.oklab(build.rgb(colors[key]))
+                    _, a2, b2 = build.oklab((r, g, b))
+                    if min(math.hypot(a1, b1), math.hypot(a2, b2)) < build.CHROMA_MIN:
+                        continue  # a gray has no hue to keep
+                    drift = math.degrees(math.atan2(b1, a1) - math.atan2(b2, a2))
+                    self.assertLess(abs((drift + 180) % 360 - 180), 1.0, key)
+
+    def test_fixing_twice_changes_nothing(self):
+        for name, colors in self.CASES.items():
+            with self.subTest(name):
+                after = build.apply_fixes(colors, build.fix_colors(colors))
+                self.assertEqual(build.fix_colors(after), {})
+        self.assertEqual(build.fix_colors(LIGHT), {})  # already readable
+
+    def test_look_alike_accents_are_moved_apart_or_left_alone(self):
+        colors = self.CASES["look-alike accents"]
+        labs = [build.oklab(build.rgb(colors[k])) for k in build.ACCENT_KEYS]
+        self.assertLess(build.distinct_accents(labs), build.MIN_DISTINCT_ACCENTS)
+        fixes = build.fix_colors(colors)
+        after = build.apply_fixes(colors, fixes)
+        labs = [build.oklab(build.rgb(after[k])) for k in build.ACCENT_KEYS]
+        self.assertGreaterEqual(build.distinct_accents(labs), build.MIN_DISTINCT_ACCENTS)
+        self.assertTrue(set(fixes) & set(build.ACCENT_KEYS))
+        # If they can't be separated, those moves are dropped and the rest stays a fixed point.
+        with mock.patch.object(build, "DISTINCT_MAX_STEPS", 0):
+            fixes = build.fix_colors(colors)
+            self.assertFalse(set(fixes) & set(build.ACCENT_KEYS))
+            self.assertEqual(build.fix_colors(build.apply_fixes(colors, fixes)), {})
+
+    def test_a_bright_color_never_ends_up_identical_to_its_normal_one(self):
+        colors = with_colors(DARK, Ansi_4_Color=(0.05, 0.05, 0.3), Ansi_12_Color=(0.06, 0.05, 0.3))
+        after = build.apply_fixes(colors, build.fix_colors(colors))
+        self.assertNotEqual(build.rgb(after["Ansi 4 Color"]), build.rgb(after["Ansi 12 Color"]))
+
+    def test_build_summary_and_changed_favorites(self):
+        rows, report = build.build_rows(PRESETS, self.repo)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            build.print_report(rows, report)
+            build.report_changed_favorites({"Murky": None}, {"Murky": "{}", "Dark One": None})
+            build.report_changed_favorites(None, {"Murky": "{}"})  # no old DB: nothing to compare
+        text = out.getvalue()
+        self.assertIn("colors adjusted for readability", text)
+        self.assertIn("changed for favorites: Murky", text)
+        self.assertEqual(text.count("changed for favorites"), 1)
+        self.assertIn("Restart srcp_set_random_color_profile.py", text)
+        self.assertEqual(build.favorite_fixes(os.path.join(self.tmp, "none.db")), None)
+        self.main["save_favorite"](self.db, "Murky", "Monaco", 13, 3)
+        self.assertIn("Foreground Color", build.favorite_fixes(self.db_path)["Murky"])
+
+    def test_build_stores_adjustments_and_the_gate_on_them(self):
+        row = self.db.execute(
+            "SELECT passes_gate, passes_gate_fixed, fix_count, fixes FROM schemes "
+            "WHERE name = 'Murky'"
+        ).fetchone()
+        self.assertEqual(row[:2], (0, 1))
+        self.assertEqual(row[2], len(json.loads(row[3])))
+        self.assertIn("Foreground Color", json.loads(row[3]))
+        self.assertEqual(
+            self.db.execute(
+                "SELECT fix_count, fixes FROM schemes WHERE name = 'Light One'"
+            ).fetchone(),
+            (0, None),
+        )
+
+    def test_the_setting_means_the_same_everywhere(self):
+        self.assertEqual(self.main["FIX_ON_SQL"], build.FIX_ON_SQL)
+        self.assertEqual(srcp_favorites.FIX_ON_SQL, build.FIX_ON_SQL)
+        self.assertEqual(self.main["HASH_KEYS"], build.HASH_KEYS)
+        self.assertEqual(self.main["COMPONENTS"], build.COMPONENTS)
+        on = [None, "1", "1.0", " 1 ", "off", "", "nan", "yes"]
+        for value in [*on, "0", "0.0", " 0 "]:
+            with self.subTest(value=value):
+                self.fixing(value)
+                expected = value not in ("0", "0.0", " 0 ")
+                self.assertEqual("Murky" in self.discovery("dark"), expected)
+                fixes, _ = self.main["look_fixes"](self.db, "Murky")
+                self.assertEqual(fixes is not None, expected)
+
+    def test_colors_hash_matches_the_build(self):
+        live = {k: build.rgb(UNREADABLE[k]) for k in build.HASH_KEYS}
+        self.assertEqual(self.main["colors_hash"](live), build.color_hash(UNREADABLE))
+
+    def fake_preset(self, colors):
+        values = [
+            types.SimpleNamespace(
+                key=k,
+                red=v["Red Component"] * 255,
+                green=v["Green Component"] * 255,
+                blue=v["Blue Component"] * 255,
+            )
+            for k, v in colors.items()
+        ]
+        return types.SimpleNamespace(values=values)
+
+    def test_a_tab_gets_the_adjusted_colors_unless_its_preset_changed(self):
+        fixes, built = self.main["look_fixes"](self.db, "Murky")
+        preset = self.fake_preset(UNREADABLE)
+        with contextlib.redirect_stdout(io.StringIO()):
+            n = self.main["adjust_preset"]("Murky", preset, fixes, built)
+        self.assertEqual(n, len(json.loads(fixes)))
+        fg = next(v for v in preset.values if v.key == "Foreground Color")
+        expected = json.loads(fixes)["Foreground Color"][:3]
+        self.assertEqual([round(c / 255, 4) for c in (fg.red, fg.green, fg.blue)], expected)
+        # Edited in iTerm2 since the build: the hash differs, so nothing is applied.
+        changed = self.fake_preset(with_colors(UNREADABLE, Ansi_1_Color=(0.5, 0.1, 0.1)))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(self.main["adjust_preset"]("Murky", changed, fixes, built), 0)
+        self.assertIn("changed since the DB was built", out.getvalue())
+        self.fixing("0")
+        self.assertEqual(self.main["look_fixes"](self.db, "Murky")[0], None)
+
+    def test_favorite_profiles_get_the_adjusted_colors_and_prefs_stay_untouched(self):
+        murky = {k: dict(v) for k, v in UNREADABLE.items()}
+        murky["Foreground Color"]["Color Space"] = "P3"
+        prefs = {"Custom Color Presets": {"Murky": murky}}
+        before = plistlib.dumps(prefs)
+        self.main["subprocess"] = types.SimpleNamespace(
+            run=lambda *a, **k: types.SimpleNamespace(stdout=plistlib.dumps(prefs))
+        )
+        # The build hashes components only, so the added Color Space doesn't change the hash.
+        self.main["save_favorite"](self.db, "Murky", "Monaco", 13, 3)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(self.main["sync_profiles"](self.db), 1)
+        with open(self.main["DYNAMIC_PATH"], "rb") as f:
+            fg = plistlib.load(f)["Profiles"][0]["Foreground Color"]
+        expected = json.loads(self.scheme_fixes("Murky"))["Foreground Color"][:3]
+        self.assertEqual([fg[c] for c in build.COMPONENTS], expected)
+        self.assertEqual(fg["Color Space"], "P3")  # kept
+        self.assertEqual(plistlib.dumps(prefs), before)  # nothing mutated
+        state = self.main["_profiles_state"]
+        state[0] = None
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.main["sync_if_changed"](self.db)
+            first = state[0]
+            self.db.execute("UPDATE schemes SET fixes = '{}' WHERE name = 'Murky'")
+            self.main["sync_if_changed"](self.db)
+        self.assertNotEqual(state[0], first)  # changed adjustments rewrite the profiles
+
+    def scheme_fixes(self, name):
+        return self.db.execute("SELECT fixes FROM schemes WHERE name = ?", (name,)).fetchone()[0]
+
+    def test_a_tab_with_an_adjusted_preset_says_so(self):
+        for name in ("Dark One", "Dark Two"):  # leave only Murky to pick
+            self.main["never_show"](self.db, name)
+        self.main["FONT_DIRS"] = []
+        self.main["sync_and_log"] = mock.AsyncMock()
+        preset = self.fake_preset(UNREADABLE)
+        self.main["get_preset"] = mock.AsyncMock(return_value=preset)
+        variables = {}
+
+        async def set_variable(name, value):
+            variables[name] = value
+
+        profile = mock.AsyncMock(normal_font="Monaco 13")
+        profile.name = "Default"
+        session = mock.AsyncMock(session_id="s1", async_set_variable=set_variable)
+        session.async_get_variable.side_effect = variables.get
+        session.async_get_profile.return_value = profile
+        app = mock.AsyncMock()
+        app.async_get_theme.return_value = ["dark"]
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            asyncio.run(
+                self.main["color_session"](None, app, self.main["Store"](self.db_path), session)
+            )
+        n = len(json.loads(self.scheme_fixes("Murky")))
+        line = next(x for x in out.getvalue().splitlines() if "Murky |" in x)  # random font
+        self.assertTrue(line.endswith(f" 13, {self.main['colors_adjusted'](n)}"), line)
+        self.assertEqual(variables["user.adjusted"], n)
+        profile.async_set_color_preset.assert_called_once_with(preset)
+        fg = next(v for v in preset.values if v.key == "Foreground Color")
+        self.assertNotEqual(round(fg.red / 255, 4), UNREADABLE["Foreground Color"]["Red Component"])
+
+    def test_a_favorite_profile_session_reports_its_adjustments(self):
+        self.main["save_favorite"](self.db, "Murky", "Monaco", 13, 3)
+        guid = self.main["favorite_guid"]("Murky", "Monaco")
+        fav = self.main["favorite_by_guid"](self.db, guid)
+        self.assertEqual(fav[4], len(json.loads(self.scheme_fixes("Murky"))))
+        # Its profile got none (the preset changed since the build): the session says none.
+        changed = with_colors(UNREADABLE, Ansi_1_Color=(0.5, 0.1, 0.1))
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.main["adjust_colors"]("Murky", changed, self.scheme_fixes("Murky"), "x")
+        self.assertEqual(self.main["_profile_adjusted"]["Murky"], 0)
+        self.fixing("0")
+        self.assertEqual(self.main["favorite_by_guid"](self.db, guid)[4], 0)
+
+    def test_the_float32_round_trip_keeps_the_hash(self):
+        # Values on a .4f boundary (Sandstone presets) format differently after iTerm2's 32-bit
+        # floats unless both sides round to 32 bits first.
+        colors = with_colors(UNREADABLE, Ansi_1_Color=(0.02745098039215686, 0.5, 0.5))
+        live = {
+            k: tuple(build.float32(c) * 255 / 255 for c in build.rgb(colors[k]))
+            for k in build.HASH_KEYS
+        }
+        self.assertEqual(self.main["colors_hash"](live), build.color_hash(colors))
+
+    def test_reports_work_on_a_db_from_before_adjustments(self):
+        self.main["save_favorite"](self.db, "Dark One", "Monaco", 13, 3)
+        for view in ("favorite_pool", "discovery", "effective"):
+            self.db.execute(f"DROP VIEW {view}")
+        self.db.execute("ALTER TABLE schemes DROP COLUMN fix_count")
+        self.db.execute("CREATE VIEW effective AS SELECT s.name, s.mode FROM schemes s")
+        rows = srcp_favorites.favorite_rows(self.db, None, 1)
+        self.assertEqual((rows[0][1], rows[0][-1]), ("Dark One", 0))
+        self.assertEqual(
+            self.main["favorite_by_guid"](
+                self.db, self.main["favorite_guid"]("Dark One", "Monaco")
+            )[4],
+            0,
+        )
+
+    def test_a_db_from_before_adjustments_still_works(self):
+        self.db.execute("ALTER TABLE schemes DROP COLUMN fixes")
+        self.main["save_favorite"](self.db, "Dark One", "Monaco", 13, 3)
+        self.main["subprocess"] = types.SimpleNamespace(
+            run=lambda *a, **k: types.SimpleNamespace(
+                stdout=plistlib.dumps({"Custom Color Presets": {"Dark One": DARK}})
+            )
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(self.main["look_fixes"](self.db, "Dark One"), (None, None))
+            self.assertEqual(self.main["sync_profiles"](self.db), 1)
+            self.main["_profiles_state"][0] = None
+            self.assertEqual(self.main["sync_if_changed"](self.db), None)  # file already current
+
+
 class NeverShowTest(DbTest):
     """Right-click Never show this profile, and Show again (srcp_never_show.py's DB side)."""
 
@@ -561,7 +879,16 @@ class NeverShowTest(DbTest):
         self.assertIn("Dark One", self.discovery("light"))
         self.assertIsNone(self.include("Dark One"))
 
-    def test_show_again_forces_in_an_unreadable_preset_but_not_a_twin(self):
+    def test_show_again_of_an_unreadable_preset_with_adjustments_on_leaves_no_override(self):
+        self.main["never_show"](self.db, "Murky")
+        self.assertEqual(self.show_again("Murky"), (True, True, False))
+        self.assertIsNone(self.include("Murky"))
+        self.assertIn("Murky", self.discovery("dark"))
+        self.fixing("0")  # off again: back as before, so it's out
+        self.assertNotIn("Murky", self.discovery("dark"))
+
+    def test_with_adjustments_off_show_again_forces_in_an_unreadable_preset_but_not_a_twin(self):
+        self.fixing("0")
         self.main["never_show"](self.db, "Murky")
         self.assertEqual(self.show_again("Murky"), (True, True, True))
         self.assertIn("Murky", self.discovery("dark"))
@@ -601,7 +928,8 @@ class NeverShowTest(DbTest):
             self.main["never_show"] = never_show
         self.main["FONT_DIRS"] = []  # no icon font
         self.main["sync_and_log"] = mock.AsyncMock()
-        self.main["get_preset"] = mock.AsyncMock(side_effect=lambda _c, name: name)
+        self.main["get_preset"] = mock.AsyncMock(side_effect=lambda _c, name: FakePreset(name))
+        self.fixing("0")  # Murky (unreadable) stays out of the re-roll
         variables = {"user.color_preset": preset, "user.font": "Monaco"}
 
         async def set_variable(name, value):
@@ -745,9 +1073,9 @@ class ReportTest(DbTest):
             srcp_favorites.show_history(self.db, 10)
             srcp_favorites.show_hidden(self.db)
         text = out.getvalue()
-        for expected in ("Dark One", "2026-10-21", "Yellow", "1 hidden."):
+        for expected in ("Dark One", "2026-10-21", "Yellow", "1 hidden.", "Adjusted", "1 color"):
             self.assertIn(expected, text)
-        rows = {r[1]: r[4:8] for r in self.db.execute(srcp_favorites.FAVORITES, (1, None, None))}
+        rows = {r[1]: r[4:8] for r in srcp_favorites.favorite_rows(self.db, None, 1)}
         self.assertEqual(rows["Dark One"][:2], (1, 1))  # launches, changed
         self.assertIsNone(rows["Dark One"][3])  # avg open leaves the changed look out
         self.assertEqual(rows["Dark Two"][:2], (0, 0))  # no launches: 0, not blank

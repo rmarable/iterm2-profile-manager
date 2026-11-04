@@ -26,7 +26,7 @@ SELECT f.stars, f.preset, COALESCE(fo.label, f.font) AS font, e.mode,
        count(l.id) AS launches, COALESCE(sum(l.end_reason = 'changed'), 0) AS changed,
        max(l.launched_at) AS last_used,
        CAST(avg(CASE WHEN l.end_reason IS NOT 'changed' THEN l.duration_s END) AS INTEGER)
-           AS avg_open, f.saved_at
+           AS avg_open, f.saved_at, {adjusted} AS adjusted
 FROM favorites f
 LEFT JOIN effective e ON e.name = f.preset
 LEFT JOIN fonts fo ON fo.name = f.font
@@ -35,6 +35,9 @@ WHERE f.stars >= ? AND (? IS NULL OR e.mode = ?)
 GROUP BY f.preset, f.font
 ORDER BY f.stars DESC, f.preset, f.font
 """
+
+# Colors the AutoLaunch script adjusts for this preset (0 if adjustments are off).
+ADJUSTED = "CASE WHEN {fix_on} THEN max(e.fix_count) ELSE 0 END"
 
 HISTORY = """
 SELECT r.at, r.action, r.previous_stars, r.stars, r.preset, COALESCE(fo.label, r.font, '')
@@ -49,15 +52,20 @@ FROM overrides o LEFT JOIN schemes s ON s.name = o.name
 WHERE o.include = 0 ORDER BY o.name
 """
 
+# Whether color adjustments are on (config fix_colors); as in .tools/srcp_build_scheme_db.py.
+FIX_ON_SQL = (
+    "(COALESCE(trim((SELECT value FROM config WHERE key = 'fix_colors')), '1') NOT IN ('0', '0.0'))"
+)
 # Undo Never show. A mode override survives; a preset that fails the readability gate is
-# forced in (include 1), since it was showing before, unless it's a byte-identical twin.
-# The AutoLaunch script has the same string as UNHIDE (it's installed without .tools/);
-# a test keeps the two equal.
+# forced in (include 1), since it was showing before, unless it's a byte-identical twin or
+# adjustments are on (then it's picked anyway). The AutoLaunch script has the same string as
+# UNHIDE (it's installed without .tools/); a test keeps the two equal.
 UNHIDE = (
-    "UPDATE overrides SET include = CASE WHEN "
+    "UPDATE overrides SET include = CASE WHEN "  # noqa: S608  (built from constants only)
     "(SELECT passes_gate FROM schemes WHERE name = :name) = 0 AND "
-    "(SELECT duplicate_of FROM schemes WHERE name = :name) IS NULL THEN 1 END "
-    "WHERE name = :name AND include = 0"
+    "(SELECT duplicate_of FROM schemes WHERE name = :name) IS NULL AND NOT "
+    + FIX_ON_SQL
+    + " THEN 1 END WHERE name = :name AND include = 0"
 )
 
 
@@ -95,8 +103,16 @@ def has_table(db, name):
     return db.execute("SELECT 1 FROM sqlite_master WHERE name = ?", (name,)).fetchone()
 
 
+def favorite_rows(db, mode, min_stars):
+    query = FAVORITES.format(adjusted=ADJUSTED.format(fix_on=FIX_ON_SQL))
+    try:
+        return db.execute(query, (min_stars, mode, mode)).fetchall()
+    except sqlite3.OperationalError:  # DB built before color adjustments
+        return db.execute(FAVORITES.format(adjusted="0"), (min_stars, mode, mode)).fetchall()
+
+
 def show_favorites(db, mode, min_stars, cli_hints=True):
-    rows = db.execute(FAVORITES, (min_stars, mode, mode)).fetchall()
+    rows = favorite_rows(db, mode, min_stars)
     if not rows:
         print("No favorites match." if mode or min_stars > 1 else "No favorites yet.")
         return
@@ -111,10 +127,22 @@ def show_favorites(db, mode, min_stars, cli_hints=True):
             "Last used",
             "Avg open",
             "Saved",
+            "Adjusted",
         ],
         [
-            (stars(st), p, f, m or "?", n, ch, local(last), duration(avg), local(saved, "%Y-%m-%d"))
-            for st, p, f, m, n, ch, last, avg, saved in rows
+            (
+                stars(st),
+                p,
+                f,
+                m or "?",
+                n,
+                ch,
+                local(last),
+                duration(avg),
+                local(saved, "%Y-%m-%d"),
+                {0: "", 1: "1 color"}.get(adj, f"{adj} colors"),
+            )
+            for st, p, f, m, n, ch, last, avg, saved, adj in rows
         ],
     )
     hidden = db.execute("SELECT count(*) FROM overrides WHERE include = 0").fetchone()[0]
@@ -175,7 +203,7 @@ def show_hidden(db, hint=SHOW_AGAIN_HINT):
 class ShownAgain(NamedTuple):
     shown: bool  # False: it wasn't hidden
     installed: bool  # has a schemes row, so it can be picked
-    forced: bool  # fails the readability gate, so it's back with include = 1
+    forced: bool  # fails the readability gate and adjustments are off: back with include = 1
 
 
 def shown_again_note(preset, result):
