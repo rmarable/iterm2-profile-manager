@@ -2,7 +2,7 @@
 
 What changed for someone using iTerm2 Profile Manager, newest first. Releases up to v0.7.1 are described on [GitHub releases](https://github.com/rmarable/iterm2-profile-manager/releases).
 
-## Unreleased
+## v0.11.0 (2026-11-05)
 
 - After updating, run `python3 .tools/srcp_build_scheme_db.py` once. The main script asks for it in the Console when the database is too old, and colors tabs again as soon as it's rebuilt.
 - Presets that use Display P3 colors are judged and adjusted as they actually look, so they're as readable as the rest.
