@@ -38,6 +38,7 @@ from typing import IO, Any, NamedTuple, TypeVar
 import iterm2
 from iterm2 import api_pb2
 from iterm2.capabilities import supports_context_menu_submenus_and_visibility
+from iterm2.color import ColorSpace
 
 # What this script shares with the build and the other tools; setup.sh installs them in the
 # Scripts folder's .tools/, next to AutoLaunch/ (a checkout that is the Scripts folder has them).
@@ -52,10 +53,13 @@ try:
         DB_PATH,
         FIX_ON_SQL,
         FONT_DIRS,
+        REBUILD,
         SEED_CONFIG,
         SEED_FONTS,
         UNHIDE,
         colors_hash,
+        is_busy,
+        schema_problem,
     )
 except ImportError as e:
     print(
@@ -65,7 +69,7 @@ except ImportError as e:
     )
     sys.exit(1)
 
-VERSION = "0.10.1"  # bump on every change, so the Console shows which code is running
+VERSION = "0.11.0"  # bump on every change, so the Console shows which code is running
 LOCK_PATH = os.path.join(DATA_DIR, ".lock")
 # How often the running script checks whether a snapshot is due. asyncio's clock stops while
 # the Mac sleeps, so check often (it's a few file stats) to keep it close to daily.
@@ -175,11 +179,29 @@ class Store:
                 return None
             # mode=rw: never create an empty DB.
             uri = Path(self.path).resolve().as_uri() + "?mode=rw"
-            self.db = sqlite3.connect(
+            db = sqlite3.connect(
                 uri, uri=True, timeout=5, isolation_level=None, check_same_thread=False
             )
-            self.inode = inode
             _warned.discard("no-db")
+            # Checked on each connect: an old DB isn't kept open, so the call after the
+            # rebuild this asks for (same file, same inode) connects again and passes.
+            try:
+                problem = schema_problem(db)
+            except sqlite3.DatabaseError as e:  # not a DB at all, or damaged (not just busy)
+                db.close()
+                if is_busy(e):
+                    raise
+                warn_once("bad-db", f"{self.path} can't be read ({e}); rebuild it: {REBUILD}")
+                return None
+            if problem:
+                db.close()
+                warn_once(
+                    "old-schema", f"{problem}. Sessions keep their profile's colors until then."
+                )
+                return None
+            _warned.discard("old-schema")
+            _warned.discard("bad-db")
+            self.db, self.inode = db, inode
         return self.db
 
     def _rollback(self) -> None:
@@ -243,11 +265,7 @@ def pick(db: sqlite3.Connection, mode: str, exclude: set[str]) -> Pick | tuple[(
         for r in db.execute("SELECT preset, font, stars FROM favorite_pool WHERE mode = ?", (mode,))
         if r[0] not in exclude
     ]
-    try:
-        rows = db.execute("SELECT name, colorful FROM discovery WHERE mode = ?", (mode,)).fetchall()
-    except sqlite3.OperationalError:  # DB built before colorful_weight: rebuild it to get it
-        warn_once("no-colorful", "discovery has no colorful column; rebuild the DB")
-        rows = [(n, 0) for (n,) in db.execute("SELECT name FROM discovery WHERE mode = ?", (mode,))]
+    rows = db.execute("SELECT name, colorful FROM discovery WHERE mode = ?", (mode,)).fetchall()
     disc = [(n, c) for n, c in rows if n not in exclude]
     # Ramp up by distinct presets, so saving one preset with several fonts doesn't speed it.
     target = cfg["favorite_target"]
@@ -279,15 +297,11 @@ def pick(db: sqlite3.Connection, mode: str, exclude: set[str]) -> Pick | tuple[(
 
 def look_fixes(db: sqlite3.Connection, preset: str) -> tuple[str | None, str | None]:
     """(adjustments as JSON or None, the build's color_hash) for preset."""
-    try:
-        row = db.execute(
-            "SELECT CASE WHEN " + FIX_ON_SQL + " THEN fixes END, color_hash "
-            "FROM schemes WHERE name = ?",
-            (preset,),
-        ).fetchone()
-    except sqlite3.OperationalError:  # DB built before 0.9.0
-        warn_once("no-fixes", "the DB has no color adjustments; rebuild it to get them")
-        return None, None
+    row = db.execute(
+        "SELECT CASE WHEN " + FIX_ON_SQL + " THEN fixes END, color_hash "
+        "FROM schemes WHERE name = ?",
+        (preset,),
+    ).fetchone()
     return (row[0], row[1]) if row else (None, None)
 
 
@@ -327,14 +341,16 @@ def usable_fixes(
     fixes_json: str | None,
     built_hash: str | None,
     live: dict[str, tuple[float, float, float]],
+    p3_keys: set[str],
 ) -> dict[str, tuple[float, float, float]]:
     """{key: (r, g, b)} to apply to preset, or {} (none, or its colors changed since the build).
 
-    live: the installed preset's own colors, before any adjustment.
+    live: the installed preset's own colors, before any adjustment; p3_keys: those whose
+    color space is Display P3 (the fixes are in each color's own space).
     """
     if not fixes_json:
         return {}
-    if colors_hash(live) != built_hash:
+    if colors_hash(live, p3_keys) != built_hash:
         warn_once(
             f"fixes-stale-{preset}",
             f"{preset} changed since the DB was built; its color adjustments are skipped "
@@ -355,7 +371,8 @@ def adjust_preset(
 ) -> int:
     """Apply the adjustments to preset's colors in place (each keeps its color space)."""
     live = {v.key: (v.red / 255, v.green / 255, v.blue / 255) for v in preset.values}
-    fixes = usable_fixes(name, fixes_json, built_hash, live)
+    p3 = {v.key for v in preset.values if getattr(v, "color_space", None) == ColorSpace.P3}
+    fixes = usable_fixes(name, fixes_json, built_hash, live, p3)
     for v in preset.values:
         if v.key in fixes:
             v.red, v.green, v.blue = (c * 255 for c in fixes[v.key])
@@ -372,7 +389,8 @@ def adjust_colors(
         for k, v in colors.items()
         if isinstance(v, dict) and all(c in v for c in COMPONENTS)
     }
-    fixes = usable_fixes(name, fixes_json, built_hash, live)  # pyright: ignore[reportArgumentType]  # 3-tuples by construction
+    p3 = {k for k, v in colors.items() if isinstance(v, dict) and v.get("Color Space") == "P3"}
+    fixes = usable_fixes(name, fixes_json, built_hash, live, p3)  # pyright: ignore[reportArgumentType]  # 3-tuples by construction
     adjusted = {
         k: {**colors[k], **dict(zip(COMPONENTS, rgb, strict=True))} for k, rgb in fixes.items()
     }
@@ -485,10 +503,7 @@ def preset_info(
 def log_rating(
     db: sqlite3.Connection, preset: str, font: str | None, action: str, stars: int | None
 ) -> None:
-    """Add a ratings row (history), if the DB has the table (schema version 3+)."""
-    if not db.execute("SELECT 1 FROM sqlite_master WHERE name = 'ratings'").fetchone():
-        warn_once("no-ratings", "no ratings table; rebuild the DB to keep rating history")
-        return
+    """Add a ratings row (history)."""
     previous = None
     if font is not None:
         row = db.execute(
@@ -562,16 +577,11 @@ def favorite_by_guid(
     db: sqlite3.Connection, guid: str
 ) -> tuple[str, str, int, str | None, int] | None:
     """(preset, font, stars, mode or None, colors adjusted) of the favorite with this GUID."""
-    query = (
-        "SELECT f.preset, f.font, f.stars, e.mode, {adjusted} "
+    rows = db.execute(
+        "SELECT f.preset, f.font, f.stars, e.mode, "
+        "CASE WHEN " + FIX_ON_SQL + " THEN e.fix_count ELSE 0 END "
         "FROM favorites f LEFT JOIN effective e ON e.name = f.preset"
-    )
-    try:
-        rows = db.execute(
-            query.format(adjusted="CASE WHEN " + FIX_ON_SQL + " THEN e.fix_count ELSE 0 END")
-        ).fetchall()
-    except sqlite3.OperationalError:  # DB built before 0.9.0
-        rows = db.execute(query.format(adjusted="0")).fetchall()
+    ).fetchall()
     for preset, font, stars, mode, adjusted in rows:
         if favorite_guid(preset, font) == guid:
             return preset, font, stars, mode, adjusted or 0
@@ -579,10 +589,7 @@ def favorite_by_guid(
 
 
 def font_label(db: sqlite3.Connection, font: str) -> str:
-    try:
-        row = db.execute("SELECT label FROM fonts WHERE name = ?", (font,)).fetchone()
-    except sqlite3.OperationalError:  # DB built before fonts.label existed
-        row = None
+    row = db.execute("SELECT label FROM fonts WHERE name = ?", (font,)).fetchone()
     return row[0] if row and row[0] else font.removesuffix("-Regular")
 
 
@@ -607,6 +614,8 @@ class FavoritesSnapshot(NamedTuple):
 
 
 _profiles_state: list[str | None] = [None]  # the FavoritesSnapshot.state last written from
+_profiles_failed: list[Any] = [None, 0.0]  # the state a write last failed for, and when
+SYNC_RETRY_S = 600  # how soon a failed profiles write is tried again with nothing changed
 _profile_adjusted: dict[str, int] = {}  # preset -> colors adjusted in its favorite profiles
 
 
@@ -616,27 +625,20 @@ def favorites_state(db: sqlite3.Connection, fallback: str | None) -> str:
 
     Cheap, so edits made in sqlite3 or by restoring an export show up without a restart.
     """
-    fonts = "name || ':' || enabled || ':' || ifnull(label, '')"
-    query = (
+    row = db.execute(
         "SELECT (SELECT group_concat(preset || ':' || font || ':' || stars || ':' || "
         "ifnull(size, ''), ';') FROM (SELECT * FROM favorites ORDER BY preset, font)), "
         "(SELECT group_concat(name, ';') FROM "
         "(SELECT name FROM overrides WHERE include = 0 ORDER BY name)), "
-        "(SELECT group_concat({}, ';') FROM (SELECT * FROM fonts ORDER BY name))"
-    )
-    try:
-        row = db.execute(query.format(fonts)).fetchone()
-    except sqlite3.OperationalError:  # DB built before fonts.label existed
-        row = db.execute(query.format("name || ':' || enabled")).fetchone()
-    try:
-        fixes = db.execute(
-            "SELECT " + FIX_ON_SQL + ", (SELECT group_concat(n || ':' || ifnull(fx, '') || ':' "  # noqa: S608  (constants only)
-            "|| ifnull(h, ''), ';') FROM (SELECT DISTINCT f.preset AS n, s.fixes AS fx, "
-            "s.color_hash AS h FROM favorites f LEFT JOIN schemes s ON s.name = f.preset "
-            "ORDER BY f.preset))"
-        ).fetchone()
-    except sqlite3.OperationalError:  # DB built before 0.9.0
-        fixes = ()
+        "(SELECT group_concat(name || ':' || enabled || ':' || ifnull(label, ''), ';') "
+        "FROM (SELECT * FROM fonts ORDER BY name))"
+    ).fetchone()
+    fixes = db.execute(
+        "SELECT " + FIX_ON_SQL + ", (SELECT group_concat(n || ':' || ifnull(fx, '') || ':' "  # noqa: S608  (constants only)
+        "|| ifnull(h, ''), ';') FROM (SELECT DISTINCT f.preset AS n, s.fixes AS fx, "
+        "s.color_hash AS h FROM favorites f LEFT JOIN schemes s ON s.name = f.preset "
+        "ORDER BY f.preset))"
+    ).fetchone()
     return "|".join(str(v) for v in (*row, *fixes, fallback))
 
 
@@ -650,21 +652,12 @@ def read_favorites(db: sqlite3.Connection) -> FavoritesSnapshot:
     fallback = nonascii_font(db)
     state = favorites_state(db, fallback)
     where = "WHERE f.preset NOT IN (SELECT name FROM overrides WHERE include = 0) "
-    rows: list[tuple[Any, ...]]
-    try:
-        rows = db.execute(
-            "SELECT f.preset, f.font, f.size, CASE WHEN " + FIX_ON_SQL + " THEN s.fixes END, "  # noqa: S608  (constants only)
-            "s.color_hash FROM favorites f LEFT JOIN schemes s ON s.name = f.preset "
-            + where
-            + "ORDER BY f.preset, f.font"
-        ).fetchall()
-    except sqlite3.OperationalError:  # DB built before 0.9.0: no adjustments
-        rows = [
-            (*r, None, None)
-            for r in db.execute(
-                "SELECT f.preset, f.font, f.size FROM favorites f " + where + "ORDER BY 1, 2"  # noqa: S608  (constants only)
-            )
-        ]
+    rows: list[tuple[Any, ...]] = db.execute(
+        "SELECT f.preset, f.font, f.size, CASE WHEN " + FIX_ON_SQL + " THEN s.fixes END, "  # noqa: S608  (constants only)
+        "s.color_hash FROM favorites f LEFT JOIN schemes s ON s.name = f.preset "
+        + where
+        + "ORDER BY f.preset, f.font"
+    ).fetchall()
     favorites = [
         FavoriteRow(preset, font, size, fixes_json, built_hash, font_label(db, font))
         for preset, font, size, fixes_json, built_hash in rows
@@ -869,6 +862,13 @@ async def keep_favorite_profile(
     return True
 
 
+# Coloring a session: at most one at a time per session, and never forever. The iterm2 module
+# sends a request before it listens for the reply, so a reply can in rare cases be lost and
+# its call never return; the timeout frees the session (and the next tab) instead.
+COLOR_TIMEOUT_S = 30
+_coloring: dict[str, asyncio.Task[None]] = {}
+
+
 async def color_session(
     connection: iterm2.Connection,
     app: iterm2.App,
@@ -882,9 +882,6 @@ async def color_session(
     # queued as new. Coloring again would change it and log a second launch.
     if current and not reroll:
         return
-    # Picks up favorites changed outside the dialog, without holding up this tab: rewriting
-    # the profiles reads all of iTerm2's settings (about 0.3 s, or up to 30 s if stuck).
-    in_background(sync_and_log(store), "favorite profiles")
     theme, profile = await asyncio.gather(app.async_get_theme(), session.async_get_profile())
     mode = "dark" if "dark" in theme else "light"
     if not reroll and await keep_favorite_profile(store, session, profile, mode):
@@ -956,20 +953,60 @@ def colors_adjusted(n: int) -> str:
     return "1 color adjusted" if n == 1 else f"{n} colors adjusted"
 
 
-_background: set[asyncio.Task[Any]] = set()  # kept so they aren't collected mid-run
+async def color_one_at_a_time(
+    connection: iterm2.Connection,
+    app: iterm2.App,
+    store: Store,
+    session: iterm2.Session,
+    reroll: bool = False,
+) -> None:
+    """color_session, unless this session is already being colored (a re-roll waits for that
+    first), given up after COLOR_TIMEOUT_S."""
+    sid = session.session_id
+    running = _coloring.get(sid)
+    if running and not running.done() and not reroll:
+        return  # startup and the new-session watcher both saw it
+    # A re-roll waits for whatever is coloring the session now, even another re-roll that
+    # started while it waited, so two never run at once.
+    while (running := _coloring.get(sid)) and not running.done():
+        with contextlib.suppress(Exception):  # its own caller logs how it went
+            await running
+    task = asyncio.ensure_future(
+        asyncio.wait_for(color_session(connection, app, store, session, reroll), COLOR_TIMEOUT_S)
+    )
+    _coloring[sid] = task
+    try:
+        await task
+    except TimeoutError:
+        log(
+            "warn",
+            f"coloring session {sid} took over {COLOR_TIMEOUT_S} s and was given up; if the tab "
+            "looks half-done, right-click > Change to another profile",
+        )
+    finally:
+        if _coloring.get(sid) is task:
+            del _coloring[sid]
 
 
-def in_background(coro: Coroutine[Any, Any, Any], what: str) -> None:
-    """Run coro without waiting for it; log if it fails."""
-    task = asyncio.create_task(coro)
-    _background.add(task)
+# How often the favorites' profiles are checked for changes made outside the dialogs (edits
+# in sqlite3, an export restored, a rebuild). Off the tab path: a rewrite reads all of
+# iTerm2's settings (about 0.3 s, or up to 30 s if stuck).
+SYNC_EVERY_S = 30
 
-    def done(t: asyncio.Task[Any]) -> None:
-        _background.discard(t)
-        if not t.cancelled() and t.exception():
-            log("warn", f"{what} failed: {t.exception()!r}")
 
-    task.add_done_callback(done)
+async def sync_periodically(
+    store: Store,
+    every_s: float = SYNC_EVERY_S,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> None:
+    while True:
+        await sleep(every_s)
+        try:
+            await sync_and_log(store)  # logs the failures it expects
+        except Exception as e:  # anything else must not stop the script, or log every 30 s
+            warn_once("sync-check", f"favorite profiles check failed: {e!r}")
+            continue
+        _warned.discard("sync-check")  # so a later, different failure is reported too
 
 
 async def sync_and_log(store: Store) -> int | None:
@@ -978,12 +1015,18 @@ async def sync_and_log(store: Store) -> int | None:
         snap = await store.call(read_favorites)
         if snap is None or snap.state == _profiles_state[0]:
             return None
+        failed_state, failed_at = _profiles_failed
+        if snap.state == failed_state and time.monotonic() - failed_at < SYNC_RETRY_S:
+            return None  # the same write failed a moment ago: don't hammer defaults or the log
         try:
             count = await asyncio.to_thread(write_favorite_profiles, snap)
         except Exception as e:  # e.g. defaults export failed: profiles are optional, coloring isn't
-            log("warn", f"favorite profiles not updated: {e!r}")
+            if snap.state != failed_state:
+                log("warn", f"favorite profiles not updated (tried again every 10 minutes): {e!r}")
+            _profiles_failed[:] = [snap.state, time.monotonic()]
             return None
         _profiles_state[0] = snap.state  # only once written, so a failed write is retried
+        _profiles_failed[:] = [None, 0.0]
     if count is not None:
         log("info", f"favorite profiles: {count} in {DYNAMIC_PATH}")
     return count
@@ -1173,7 +1216,7 @@ async def change_from_menu(
     if not session:
         log("warn", f"change: session {session_id} not found")
         return
-    await color_session(connection, app, store, session, reroll=True)
+    await color_one_at_a_time(connection, app, store, session, reroll=True)
 
 
 NEVER_TITLE = "Never show this profile"
@@ -1208,7 +1251,7 @@ async def reroll_after_hide(
     window, _ = app.get_window_and_tab_for_session(session)
     window_id = window.window_id if window else None
     try:
-        await color_session(connection, app, store, session, reroll=True)
+        await color_one_at_a_time(connection, app, store, session, reroll=True)
         new = await session.async_get_variable("user.color_preset")
     except iterm2.RPCException as e:  # closed while the question was up: it's hidden anyway
         log("info", f"never show: {preset} hidden; its tab closed before the new look ({e})")
@@ -1350,6 +1393,7 @@ async def main(connection: iterm2.Connection) -> None:
             watch_new(connection, app, store, new_sessions),
             watch_ended(store, ended_sessions),
             snapshot_periodically(store),
+            sync_periodically(store),
             exit_on_disconnect(connection),
         )
 
@@ -1371,7 +1415,7 @@ async def startup(
     # Restored windows keep theirs: iTerm2 saves user.* variables with them.
     for session in open_sessions:
         try:
-            await color_session(connection, app, store, session)
+            await color_one_at_a_time(connection, app, store, session)
         except Exception as e:  # one session must not stop the rest, or startup
             log("warn", f"coloring open session failed: {e!r}")
 
@@ -1389,7 +1433,7 @@ async def watch_new(
             log("warn", f"new session {session_id} not found; left as is")
             continue
         try:
-            await color_session(connection, app, store, session)
+            await color_one_at_a_time(connection, app, store, session)
         except Exception as e:  # never stop watching over one session
             log("warn", f"coloring session failed: {e!r}")
 

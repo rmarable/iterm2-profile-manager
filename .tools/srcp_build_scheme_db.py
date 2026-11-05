@@ -35,6 +35,9 @@ from srcp_schema import (  # shared with the main script and srcp_favorites.py
     SEED_CONFIG,
     SEED_FONTS,
     colors_hash,
+    p3_to_srgb,
+    schema_problem,
+    srgb_to_p3,
 )
 from srcp_schema import (
     DB_PATH as DEFAULT_DB,
@@ -72,6 +75,9 @@ FIX_MAX_STEPS = 200  # enough to cross the whole 0-1 lightness range
 DISTINCT_STEP = 2 * FIX_STEP  # lightness per move when separating look-alike accents
 DISTINCT_MAX_STEPS = 40  # times the 6 accents: the moves all of them share, in all
 GAMUT_EPS = 1e-6
+# A color this close below its contrast target counts as reaching it: a P3 color stored to
+# 6 decimals can show a hair under the sRGB value it was moved to.
+CONTRAST_EPS = 1e-4
 GAMUT_FLOOR_MARGIN = 0.001  # last-resort chroma floor above CHROMA_MIN: still counts as colored
 
 # Old-rotation presets just under the gate, included on the first build.
@@ -96,8 +102,26 @@ SEED_FONT_LABELS = {
 # gate; a color hash to find twins; the repo's yaml variants), and whether a font is installed.
 
 
+def is_p3(c):
+    return c.get("Color Space") == "P3"
+
+
 def rgb(c):
-    return tuple(c[k] for k in COMPONENTS)
+    """A color as sRGB components 0-1, for the color math: Display P3 colors are converted,
+    and one outside sRGB's gamut is clipped to its edge (judged as the nearest sRGB color)."""
+    raw = tuple(c[k] for k in COMPONENTS)
+    if not is_p3(c):
+        return raw
+    return tuple(min(1.0, max(0.0, v)) for v in p3_to_srgb(raw))
+
+
+def stored(c, srgb_rgb):
+    """The components to store for c moved to srgb_rgb: back in c's own color space."""
+    if not is_p3(c):
+        return srgb_rgb
+    # 6 decimals, not 4: a P3 value's rounding moves the sRGB color it shows as, too. The
+    # clamp only catches float noise just outside 0-1 (sRGB colors are all inside P3).
+    return tuple(round(min(1.0, max(0.0, v)), 6) for v in srgb_to_p3(srgb_rgb))
 
 
 def has_colors(colors):
@@ -306,7 +330,7 @@ def fix_colors(colors):
     bg = rgb(colors["Background Color"])
     palette = {k: rgb(colors[k]) for k in FIX_TARGETS}
     for key, target in FIX_TARGETS.items():
-        if contrast_ratio(palette[key], bg) < target:
+        if contrast_ratio(palette[key], bg) < target - CONTRAST_EPS:
             moved = adjust_one(palette[key], bg, target, key != "Foreground Color")
             if moved is not None:
                 palette[key] = moved
@@ -327,7 +351,13 @@ def fix_colors(colors):
     for k, v in palette.items():
         before = rgb(colors[k])
         if v != before:
-            out[k] = (*v, round(contrast_ratio(before, bg), 2), round(contrast_ratio(v, bg), 2))
+            keep = stored(colors[k], v)
+            shown = rgb({**colors[k], **dict(zip(COMPONENTS, keep))})  # as it will look
+            out[k] = (
+                *keep,
+                round(contrast_ratio(before, bg), 2),
+                round(contrast_ratio(shown, bg), 2),
+            )
     return out
 
 
@@ -346,8 +376,9 @@ def apply_fixes(colors, fixes):
 
 def color_hash(colors):
     """srcp_schema.colors_hash of a prefs preset dict: its raw components, as stored."""
-    # The stored components, not rgb(): that may convert them for the color math.
-    return colors_hash({k: tuple(colors[k][c] for c in COMPONENTS) for k in HASH_KEYS})
+    # The stored components, not rgb(): that converts P3 ones for the color math.
+    raw = {k: tuple(colors[k][c] for c in COMPONENTS) for k in HASH_KEYS}
+    return colors_hash(raw, {k for k in HASH_KEYS if is_p3(colors[k])})
 
 
 def yaml_variants(repo):
@@ -445,6 +476,12 @@ MIGRATIONS = [
     """
     CREATE INDEX launches_open ON launches (launched_at)
         WHERE ended_at IS NULL AND end_reason IS NULL;
+    """,
+    # 7: no table changes. Display P3 colors are now converted for the color math and marked
+    # in color_hash, so schemes rows from before are stale; the scripts refuse older DBs
+    # (srcp_schema.MIN_SCHEMA), so this rebuild happens.
+    """
+    -- nothing to change
     """,
 ]
 
@@ -673,19 +710,20 @@ def print_report(rows, report):
 
 
 def favorite_fixes(path):
-    """{preset: fixes JSON} for the favorites in the DB at path, or None if it can't tell."""
+    """{preset: fixes JSON} for the favorites in the DB at path, or None if it can't tell
+    (no DB, or one older than the scripts read, whose fixes may not exist or mean the same)."""
     if not os.path.exists(path):
         return None
     db = sqlite3.connect(path)
     try:
+        if schema_problem(db):
+            return None
         return dict(
             db.execute(
                 "SELECT DISTINCT f.preset, s.fixes FROM favorites f "
                 "LEFT JOIN schemes s ON s.name = f.preset"
             )
         )
-    except sqlite3.OperationalError:  # older DB: no fixes column (or no favorites table)
-        return {}
     finally:
         db.close()
 
@@ -694,7 +732,7 @@ def report_changed_favorites(before, after):
     changed = sorted(p for p in after if before is not None and before.get(p) != after[p])
     if changed:
         print(f"color adjustments changed for favorites: {', '.join(changed)}")
-    print("New tabs get these adjustments; favorites' profiles update when the next tab opens.")
+    print("New tabs get these adjustments; favorites' profiles update within 30 seconds.")
 
 
 def warn_included_duplicates(path):

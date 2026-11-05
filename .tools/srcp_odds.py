@@ -22,6 +22,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # works under python3 -I too
 from srcp_build_scheme_db import SEED_CONFIG
 from srcp_schema import DB_PATH as DEFAULT_DB
+from srcp_schema import OldSchema, check_schema, is_busy
 
 NUMERIC = ("favorite_share", "favorite_target", "recent_window", "colorful_weight")
 BAR = 30
@@ -44,10 +45,7 @@ def odds(db, mode):
         "SELECT preset, font, stars FROM favorite_pool WHERE mode = ? ORDER BY preset, font",
         (mode,),
     ).fetchall()
-    try:
-        disc = db.execute("SELECT name, colorful FROM discovery WHERE mode = ?", (mode,)).fetchall()
-    except sqlite3.OperationalError:  # DB built before colorful_weight
-        disc = [(n, 0) for (n,) in db.execute("SELECT name FROM discovery WHERE mode = ?", (mode,))]
+    disc = db.execute("SELECT name, colorful FROM discovery WHERE mode = ?", (mode,)).fetchall()
 
     n_presets = len({f[0] for f in favs})
     target = cfg["favorite_target"]
@@ -79,10 +77,7 @@ def odds(db, mode):
     plain = len(pool) - colorful
 
     enabled = [n for (n,) in db.execute("SELECT name FROM fonts WHERE enabled = 1 ORDER BY name")]
-    try:
-        labels = dict(db.execute("SELECT name, label FROM fonts WHERE label IS NOT NULL"))
-    except sqlite3.OperationalError:  # DB built before fonts.label existed
-        labels = {}
+    labels = dict(db.execute("SELECT name, label FROM fonts WHERE label IS NOT NULL"))
     disabled = {n for (n,) in db.execute("SELECT name FROM fonts WHERE enabled = 0")}
     star_total = sum(f[2] for f in favs) or 1
     favorites = []
@@ -200,12 +195,15 @@ def main():
     # mode=rw (it only reads): mode=ro can fail on a WAL DB that nothing else has open.
     db = sqlite3.connect(Path(args.db).resolve().as_uri() + "?mode=rw", uri=True)
     try:
+        check_schema(db)
         modes = [args.mode] if args.mode else ["light", "dark"]
         results = [odds(db, m) for m in modes]
-    except sqlite3.OperationalError as e:  # e.g. a restored snapshot from an older schema
-        sys.exit(
-            f"The DB can't show this ({e}). Rebuild it: python3 .tools/srcp_build_scheme_db.py"
-        )
+    except OldSchema as e:
+        sys.exit(f"The DB is too old: {e}.")
+    except sqlite3.OperationalError as e:
+        if is_busy(e):
+            sys.exit(f"The DB is busy ({e}). Try again in a moment.")
+        raise
     finally:
         db.close()
     if args.json:

@@ -13,11 +13,12 @@ There is no warranty, no support commitment, and no guarantee it works on your M
 | iTerm2 settings (`com.googlecode.iterm2`): a key binding | `setup.sh` | Yes, in `~/.local/share/iterm2-profile-manager/prefs-backups/` (newest 10 kept) | `./uninstall.sh` |
 | iTerm2 settings: color presets | `setup.sh` | Yes, as above | `./uninstall.sh --presets` (presets you edited are kept) |
 | iTerm2's Scripts folder and Dynamic Profiles | `setup.sh`, the main script | No (regenerated) | `./uninstall.sh` (if this repo is the Scripts folder, its files stay and the main script is renamed `.py.disabled`) |
-| `~/Library/Fonts`: copies of fonts already on your Mac | `setup.sh` | No | `./uninstall.sh --fonts` (only copies still identical to Terminal's) |
-| Homebrew: MesloLGS Nerd Font | `setup.sh`, if Homebrew is installed | No | `./uninstall.sh --fonts` |
+| `~/Library/Fonts`: copies of fonts already on your Mac | `setup.sh` | No | `./uninstall.sh --fonts` (only ones `setup.sh` installed, still identical to Terminal's) |
+| Homebrew: MesloLGS Nerd Font | `setup.sh`, if Homebrew is installed | No | `./uninstall.sh --fonts` (if `setup.sh` installed it) |
 | `~/src/iTerm2-Color-Schemes` (or `$SRC_DIR`) | `setup.sh` | No | `./uninstall.sh --repo` (kept if it has changes, commits or stashes of yours) |
-| `~/.local/share/iterm2-color-schemes/` (database) | the scripts | Yes, rolling snapshots | `./uninstall.sh --data` (exports your ratings first) |
-| `~/.claude/settings.json`, every iTerm2 profile's triggers | `.tools/srcp_enable_claude_integration.py`, only if you run it | Yes | By hand: [docs/REFERENCE.md](docs/REFERENCE.md#claude-code-integration-optional) |
+| `~/.local/share/iterm2-profile-manager/installed.txt` (a list of what it installed) | `setup.sh` | No | `./uninstall.sh --fonts` |
+| `~/.local/share/iterm2-color-schemes/` (database) | the scripts | Yes, rolling snapshots | `./uninstall.sh --data` (exports your ratings and keeps a copy of the database first) |
+| `~/.claude/settings.json`, every iTerm2 profile's triggers | `.tools/srcp_enable_claude_integration.py`, only if you run it | Yes | `.tools/srcp_enable_claude_integration.py --remove` ([docs/REFERENCE.md](docs/REFERENCE.md#claude-code-integration-optional)) |
 
 `./uninstall.sh --all` runs every option above; prefs backups are always kept. Keep your own backup of anything you care about.
 

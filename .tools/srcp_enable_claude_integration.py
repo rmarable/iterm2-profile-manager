@@ -11,6 +11,11 @@ Does not touch iTerm2's AI chat/API settings (provider, model, API URL, API key)
 
 Idempotent: anything already present is left alone. Steps 3-4 write iTerm2's
 prefs, so run from Terminal.app with iTerm2 quit (--dryrun works any time).
+
+--remove undoes it: the link (only if it points at this iTerm2's cc-status: a link left from an
+iTerm2 since moved is kept), each hook group that is exactly one cc-status hook, the two
+triggers where they're exactly ours, and the two flags.
+iTerm2's own setup installs the same items, so those go too; anything else stays.
 """
 
 from __future__ import annotations
@@ -89,42 +94,25 @@ def link_cc_status(dry):
     if dry:
         return
     os.makedirs(os.path.dirname(CC_STATUS_LINK), exist_ok=True)
-    if os.path.islink(CC_STATUS_LINK):
-        os.remove(CC_STATUS_LINK)
-    elif os.path.lexists(CC_STATUS_LINK):  # a real file: keep it rather than delete it
+    if os.path.lexists(CC_STATUS_LINK):  # a file, or a link to elsewhere: keep it
         backup = f"{CC_STATUS_LINK}.backup-{stamp()}"
         os.rename(CC_STATUS_LINK, backup)
         print(f"  (moved the existing file to {backup})")
     os.symlink(CC_STATUS_SRC, CC_STATUS_LINK)
 
 
-def add_hooks(dry):
-    settings = {}
-    if os.path.exists(CLAUDE_SETTINGS):
-        with open(CLAUDE_SETTINGS, encoding="utf-8") as f:
-            try:
-                settings = json.load(f)
-            except json.JSONDecodeError as e:
-                sys.exit(f"{CLAUDE_SETTINGS} isn't valid JSON ({e}); fix it and run this again.")
-    hooks = settings.setdefault("hooks", {})
+def read_settings():
+    if not os.path.exists(CLAUDE_SETTINGS):
+        return {}
+    with open(CLAUDE_SETTINGS, encoding="utf-8") as f:
+        try:
+            return json.load(f)
+        except json.JSONDecodeError as e:
+            sys.exit(f"{CLAUDE_SETTINGS} isn't valid JSON ({e}); fix it and run this again.")
 
-    added = []
-    for event in HOOK_EVENTS:
-        groups = hooks.setdefault(event, [])
-        if any(h.get("command") == CC_STATUS_LINK for g in groups for h in g.get("hooks", [])):
-            continue
-        hook: dict[str, object] = {"type": "command", "command": CC_STATUS_LINK}
-        if event in ASYNC_EVENTS:
-            hook["async"] = True
-        groups.append({"hooks": [hook]})
-        added.append(event)
 
-    if not added:
-        print(f"  = {CLAUDE_SETTINGS} already has all {len(HOOK_EVENTS)} hooks")
-        return
-    print(f"  + {CLAUDE_SETTINGS}: hooks for {', '.join(added)}")
-    if dry:
-        return
+def write_settings(settings):
+    """Back up ~/.claude/settings.json, then replace it with settings in one rename."""
     if os.path.exists(CLAUDE_SETTINGS):
         shutil.copy2(CLAUDE_SETTINGS, f"{CLAUDE_SETTINGS}.backup-{stamp()}")
     # Write a temp file and rename it over the real one (through a symlink, e.g. dotfiles),
@@ -147,6 +135,29 @@ def add_hooks(dry):
         with contextlib.suppress(FileNotFoundError):
             os.remove(tmp)
         raise
+
+
+def add_hooks(dry):
+    settings = read_settings()
+    hooks = settings.setdefault("hooks", {})
+
+    added = []
+    for event in HOOK_EVENTS:
+        groups = hooks.setdefault(event, [])
+        if any(h.get("command") == CC_STATUS_LINK for g in groups for h in g.get("hooks", [])):
+            continue
+        hook: dict[str, object] = {"type": "command", "command": CC_STATUS_LINK}
+        if event in ASYNC_EVENTS:
+            hook["async"] = True
+        groups.append({"hooks": [hook]})
+        added.append(event)
+
+    if not added:
+        print(f"  = {CLAUDE_SETTINGS} already has all {len(HOOK_EVENTS)} hooks")
+        return
+    print(f"  + {CLAUDE_SETTINGS}: hooks for {', '.join(added)}")
+    if not dry:
+        write_settings(settings)
 
 
 def has_trigger(existing, trig):
@@ -188,6 +199,91 @@ def update_prefs(dry):
     print(f"  Backup of previous iTerm2 prefs: {backup}")
 
 
+def is_our_hook_group(group):
+    """A group exactly as add_hooks writes it: one cc-status hook and nothing else (no matcher,
+    timeout or other key of yours)."""
+    if not isinstance(group, dict) or set(group) != {"hooks"}:
+        return False
+    hooks = group["hooks"]
+    return (
+        isinstance(hooks, list)
+        and len(hooks) == 1
+        and isinstance(hooks[0], dict)
+        and set(hooks[0]) <= {"type", "command", "async"}
+        and hooks[0].get("type") == "command"
+        and hooks[0].get("command") == CC_STATUS_LINK
+    )
+
+
+def unlink_cc_status(dry):
+    if not os.path.islink(CC_STATUS_LINK):
+        print(
+            f"  = {CC_STATUS_LINK}: no link"
+            + (" (a file there: left alone)" if os.path.lexists(CC_STATUS_LINK) else "")
+        )
+        return
+    if os.path.realpath(CC_STATUS_LINK) != os.path.realpath(CC_STATUS_SRC):
+        print(f"  = {CC_STATUS_LINK} points elsewhere ({os.readlink(CC_STATUS_LINK)}); left alone")
+        return
+    print(f"  - link {CC_STATUS_LINK}")
+    if not dry:
+        os.remove(CC_STATUS_LINK)
+
+
+def remove_hooks(dry):
+    settings = read_settings()
+    hooks = settings.get("hooks")
+    if not isinstance(hooks, dict):
+        print(f"  = {CLAUDE_SETTINGS}: no hooks")
+        return
+    removed = []
+    for event in list(hooks):
+        groups = hooks[event]
+        if not isinstance(groups, list):
+            continue
+        kept = [g for g in groups if not is_our_hook_group(g)]
+        if len(kept) != len(groups):
+            removed.append(event)
+            if kept:
+                hooks[event] = kept
+            else:
+                del hooks[event]  # it held only ours
+    if not removed:
+        print(f"  = {CLAUDE_SETTINGS}: no cc-status hooks")
+        return
+    if not hooks:
+        del settings["hooks"]
+    print(f"  - {CLAUDE_SETTINGS}: cc-status hooks for {', '.join(removed)}")
+    if not dry:
+        write_settings(settings)
+
+
+def remove_prefs(dry):
+    if not dry and iterm_running():  # again: see update_prefs
+        sys.exit(QUIT_FIRST)
+    prefs = load_prefs()
+    triggers_changed = False
+    for profile in prefs.get("New Bookmarks", []):
+        triggers = profile.get("Triggers")
+        if not isinstance(triggers, list):
+            continue
+        kept = [t for t in triggers if t not in TRIGGERS]  # exactly ours only
+        if len(kept) != len(triggers):
+            gone = len(triggers) - len(kept)
+            print(f"  - profile {profile.get('Name')!r}: {gone} Claude Code trigger(s)")
+            profile["Triggers"] = kept
+            triggers_changed = True
+    keys = ["New Bookmarks"] if triggers_changed else []
+    delete = [k for k in FLAGS if k in prefs]
+    for key in delete:
+        print(f"  - iTerm2 pref {key}")
+    if not (keys or delete):
+        print("  = no Claude Code triggers or flags in iTerm2's settings")
+        return
+    if not dry:
+        print(f"  Backup of previous iTerm2 prefs: {save_prefs(prefs, keys, delete)}")
+
+
 def main():
     ap = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
     ap.add_argument(
@@ -197,9 +293,12 @@ def main():
         action="store_true",
         help="report what would change without writing anything",
     )
+    ap.add_argument(
+        "--remove", action="store_true", help="undo it: remove the link, hooks, triggers, flags"
+    )
     args = ap.parse_args()
 
-    if not os.path.exists(CC_STATUS_SRC):
+    if not args.remove and not os.path.exists(CC_STATUS_SRC):
         sys.exit(
             f"{CC_STATUS_SRC} not found. This needs iTerm2 3.7 or later "
             "(set ITERM_APP if iTerm2 isn't in /Applications or ~/Applications)."
@@ -212,9 +311,14 @@ def main():
             sys.exit(CUSTOM_FOLDER.format(folder))
         print(f"  ! {CUSTOM_FOLDER.format(folder)}")
 
-    link_cc_status(args.dry_run)
-    add_hooks(args.dry_run)
-    update_prefs(args.dry_run)
+    if args.remove:
+        unlink_cc_status(args.dry_run)
+        remove_hooks(args.dry_run)
+        remove_prefs(args.dry_run)
+    else:
+        link_cc_status(args.dry_run)
+        add_hooks(args.dry_run)
+        update_prefs(args.dry_run)
     if args.dry_run:
         print("  (dry run: nothing written)")
 

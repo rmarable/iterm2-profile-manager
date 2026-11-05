@@ -480,6 +480,64 @@ class MigrationTest(DbTest):
                 self.assertNotIn("Yellow", discovery)
 
 
+class OldSchemaTest(DbTest):
+    """A DB older than srcp_schema.MIN_SCHEMA: one message to rebuild, then it just works."""
+
+    def make_old(self):
+        """This DB as an older build left it (its last migration not applied yet)."""
+        self.db.execute("DROP INDEX launches_open")  # migration 6's
+        self.db.execute("PRAGMA user_version = 5")
+
+    def test_the_main_script_asks_once_for_a_rebuild_then_works_without_a_restart(self):
+        self.make_old()
+        store = self.main["Store"](self.db_path)
+        look_fixes = self.main["look_fixes"]
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertIsNone(asyncio.run(store.call(look_fixes, "Murky")))
+            self.assertIsNone(asyncio.run(store.call(look_fixes, "Murky")))
+        self.assertEqual(out.getvalue().count("rebuild it: python3 .tools/srcp_build"), 1)
+        self.build()  # what the message says to do: same file, same inode, same open Store
+        with contextlib.redirect_stdout(io.StringIO()):
+            fixes, _built_hash = asyncio.run(store.call(look_fixes, "Murky"))
+        self.assertIsNotNone(fixes)
+        self.assertNotIn("old-schema", self.main["_warned"])
+
+    def test_a_file_that_isnt_a_db_is_reported_once(self):
+        path = os.path.join(self.tmp, "not-a-db.db")
+        with open(path, "wb") as f:
+            f.write(b"this is not SQLite" * 100)
+        store = self.main["Store"](path)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            for _ in range(3):
+                self.assertIsNone(asyncio.run(store.call(self.main["look_fixes"], "Murky")))
+        self.assertEqual(out.getvalue().count("can't be read"), 1)
+
+    def test_the_build_doesnt_compare_an_old_dbs_fixes(self):
+        self.main["save_favorite"](self.db, "Murky", "Monaco", 13, 3)
+        self.assertIn("Murky", build.favorite_fixes(self.db_path))
+        self.make_old()
+        self.assertIsNone(build.favorite_fixes(self.db_path))  # can't tell: no "changed" list
+
+    def test_the_tools_refuse_an_old_db_with_one_line(self):
+        self.make_old()
+        with self.assertRaises(srcp_schema.OldSchema):
+            srcp_favorites.connect(self.db_path)
+        for tool in ("srcp_favorites.py", "srcp_odds.py"):
+            with self.subTest(tool=tool):
+                path = os.path.join(ROOT, ".tools", tool)
+                result = subprocess.run(
+                    [sys.executable, "-I", path, "--db", self.db_path],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("The DB is too old", result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+
+
 class MainScriptTest(DbTest):
     def test_pick_respects_mode_and_exclude(self):
         self.fixing("0")  # Murky (unreadable) stays out
@@ -552,13 +610,6 @@ class MainScriptTest(DbTest):
         self.assertEqual(self.variables["user.color_preset"], "Dark Two")
         rows = self.db.execute("SELECT preset, end_reason FROM launches ORDER BY id")
         self.assertEqual(rows.fetchall(), [("Dark One", "changed"), ("Dark Two", None)])
-
-    def test_profiles_sync_on_a_db_without_font_labels(self):
-        self.export_prefs({})
-        self.main["_profiles_state"][0] = None
-        self.db.execute("ALTER TABLE fonts DROP COLUMN label")  # as in a schema-1 DB
-        with contextlib.redirect_stdout(io.StringIO()):
-            self.assertIsNotNone(self.sync_now())
 
     def test_font_label_edits_trigger_a_profiles_rewrite(self):
         self.export_prefs({"Custom Color Presets": {"Dark One": DARK}})
@@ -781,6 +832,18 @@ class AsyncHelpersTest(DbTest):
         got = asyncio.run(release_then_acquire())
         self.assertIsNotNone(got)
         got.close()
+
+    def test_a_locked_db_is_reported_as_locked_not_as_old(self):
+        store = self.main["Store"](self.db_path)
+
+        def locked(db):
+            raise sqlite3.OperationalError("database is locked")
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertIsNone(asyncio.run(store.call(locked)))
+        self.assertIn("DB locked: database is locked", out.getvalue())
+        self.assertNotIn("rebuild", out.getvalue())
 
     def test_a_failed_rollback_keeps_the_error_and_reconnects(self):
         store = self.main["Store"](self.db_path)
@@ -1048,6 +1111,69 @@ class ColorFixTest(DbTest):
                     drift = math.degrees(math.atan2(b1, a1) - math.atan2(b2, a2))
                     self.assertLess(abs((drift + 180) % 360 - 180), 1.0, key)
 
+    @staticmethod
+    def as_p3(colors):
+        """The same numbers, tagged Display P3 (as many iTerm2 presets are)."""
+        return {k: {**v, "Color Space": "P3"} for k, v in colors.items()}
+
+    def test_the_p3_conversion_is_the_css_color_4_one(self):
+        m = srcp_schema.P3_TO_SRGB
+        for row in m:
+            self.assertAlmostEqual(sum(row), 1.0, places=12)  # white stays white
+        # From the spec's fractions (P3 -> XYZ -> sRGB), as published linear P3 -> sRGB tables give.
+        self.assertAlmostEqual(m[0][0], 1.2249401762805596, places=12)
+        self.assertAlmostEqual(m[2][2], 1.0982736001409663, places=12)
+        for rgb in ((0.3, 0.6, 0.2), (1, 1, 1), (0.05, 0.0, 0.9)):  # the inverse undoes it
+            back = srcp_schema.p3_to_srgb(srcp_schema.srgb_to_p3(rgb))
+            for v, w in zip(back, rgb, strict=True):
+                self.assertAlmostEqual(v, w, places=12)
+        red = srcp_schema.p3_to_srgb((1, 0, 0))  # wider than sRGB: outside its gamut
+        self.assertEqual([round(v, 4) for v in red], [1.0931, -0.2267, -0.1501])
+
+    def test_p3_colors_are_judged_as_they_look(self):
+        red, bg = DARK["Ansi 1 Color"], DARK["Background Color"]
+        wide = {**red, "Color Space": "P3"}  # the same numbers in P3: a more vivid red
+        self.assertNotEqual(build.rgb(wide), build.rgb(red))
+        p3 = build.contrast_ratio(build.rgb(wide), build.rgb(bg))
+        self.assertNotAlmostEqual(p3, build.contrast_ratio(build.rgb(red), build.rgb(bg)), 2)
+        grey = {**DARK["Foreground Color"], "Color Space": "P3"}  # greys look the same in both
+        self.assertEqual([round(v, 9) for v in build.rgb(grey)], [0.9, 0.9, 0.9])
+
+    def test_fixed_p3_colors_stay_p3_meet_their_targets_and_stay_fixed(self):
+        p3 = self.as_p3(UNREADABLE)
+        fixes = build.fix_colors(p3)
+        self.assertIn("Foreground Color", fixes)
+        after = build.apply_fixes(p3, fixes)
+        bg = build.rgb(after["Background Color"])
+        for key in fixes:
+            with self.subTest(key=key):
+                self.assertEqual(after[key]["Color Space"], "P3")
+                shown = build.contrast_ratio(build.rgb(after[key]), bg)  # as iTerm2 shows it
+                self.assertGreaterEqual(shown, build.FIX_TARGETS[key] - build.CONTRAST_EPS)
+                self.assertAlmostEqual(fixes[key][4], shown, places=2)  # "after" is the truth
+        self.assertEqual(build.fix_colors(after), {})  # a fixed point, P3 rounding and all
+
+    def test_a_moved_color_is_stored_in_its_own_color_space(self):
+        target = (0.2, 0.4, 0.9)  # where the sRGB math moved a color to
+        p3 = {**color(0.1, 0.1, 0.5), "Color Space": "P3"}
+        kept = build.stored(p3, target)
+        expected = srcp_schema.srgb_to_p3(target)  # P3 numbers that show as the target
+        self.assertEqual(kept, tuple(round(v, 6) for v in expected))
+        self.assertNotEqual([round(v, 3) for v in kept], [round(v, 3) for v in target])
+        self.assertEqual(build.stored(color(0.1, 0.1, 0.5), target), target)  # sRGB: as is
+
+    def test_p3_hashes_agree_between_the_build_and_the_main_script(self):
+        p3 = self.as_p3(UNREADABLE)
+        live = {k: build.rgb({**v, "Color Space": None}) for k, v in p3.items()}  # raw values
+        keys = set(p3)
+        self.assertEqual(self.main["colors_hash"](live, keys), build.color_hash(p3))
+        self.assertNotEqual(self.main["colors_hash"](live), build.color_hash(p3))
+        # A P3 preset with the same numbers as an sRGB one isn't its twin.
+        with contextlib.redirect_stdout(io.StringIO()):
+            rows, _ = build.build_rows({"Plain": UNREADABLE, "Wide": p3}, self.repo)
+        duplicate_of = {r[0]: r[10] for r in rows}  # schemes.duplicate_of
+        self.assertEqual(duplicate_of, {"Plain": None, "Wide": None})
+
     def test_fixing_twice_changes_nothing(self):
         for name, colors in self.CASES.items():
             with self.subTest(name):
@@ -1167,7 +1293,11 @@ class ColorFixTest(DbTest):
         prefs = {"Custom Color Presets": {"Murky": murky}}
         before = plistlib.dumps(prefs)
         self.export_prefs(prefs)
-        # The build hashes components only, so the added Color Space doesn't change the hash.
+        # The hash marks P3 colors (same numbers, different look), so build from this version.
+        self.assertNotEqual(build.color_hash(murky), build.color_hash(UNREADABLE))
+        with contextlib.redirect_stdout(io.StringIO()):
+            rows, _ = build.build_rows({**PRESETS, "Murky": murky}, self.repo)
+            build.write_db(self.db_path, rows)
         self.main["save_favorite"](self.db, "Murky", "Monaco", 13, 3)
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(self.write_profiles(), 1)
@@ -1228,31 +1358,6 @@ class ColorFixTest(DbTest):
         }
         self.assertEqual(self.main["colors_hash"](live), build.color_hash(colors))
 
-    def test_reports_work_on_a_db_from_before_adjustments(self):
-        self.main["save_favorite"](self.db, "Dark One", "Monaco", 13, 3)
-        for view in ("favorite_pool", "discovery", "effective"):
-            self.db.execute(f"DROP VIEW {view}")
-        self.db.execute("ALTER TABLE schemes DROP COLUMN fix_count")
-        self.db.execute("CREATE VIEW effective AS SELECT s.name, s.mode FROM schemes s")
-        rows = srcp_favorites.favorite_rows(self.db, None, 1)
-        self.assertEqual((rows[0][1], rows[0][-1]), ("Dark One", 0))
-        self.assertEqual(
-            self.main["favorite_by_guid"](
-                self.db, self.main["favorite_guid"]("Dark One", "Monaco")
-            )[4],
-            0,
-        )
-
-    def test_a_db_from_before_adjustments_still_works(self):
-        self.db.execute("ALTER TABLE schemes DROP COLUMN fixes")
-        self.main["save_favorite"](self.db, "Dark One", "Monaco", 13, 3)
-        self.export_prefs({"Custom Color Presets": {"Dark One": DARK}})
-        with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(self.main["look_fixes"](self.db, "Dark One"), (None, None))
-            self.assertEqual(self.write_profiles(), 1)
-            self.main["_profiles_state"][0] = None
-            self.assertEqual(self.sync_now(), None)  # file already current
-
 
 class TabTest(DbTest):
     """The main script's per-tab paths, with a fake iTerm2 session, app and dialogs."""
@@ -1264,20 +1369,114 @@ class TabTest(DbTest):
         self.assertEqual(self.variable_rpcs, [6])
         self.assertEqual(self.variables["user.mode"], "dark")
 
-    def test_a_new_tab_does_not_wait_for_the_profiles_refresh(self):
+    def test_a_new_tab_leaves_the_profiles_refresh_to_its_own_loop(self):
         self.fixing("0")
         self.tab({})
-        started = []
-
-        async def stuck_sync(store):  # e.g. defaults export hanging
-            started.append(store)
-            await asyncio.sleep(3600)
-
-        self.main["sync_and_log"] = stuck_sync
-        color = self.main["color_session"](None, self.app, self.store, self.session)
-        self.run_quietly(asyncio.wait_for(color, 5))  # TimeoutError if the tab waited
-        self.assertEqual(started, [self.store])
+        self.main["sync_and_log"] = mock.AsyncMock()
+        self.run_quietly(self.main["color_session"](None, self.app, self.store, self.session))
+        self.main["sync_and_log"].assert_not_called()  # sync_periodically does it, off the tab
         self.assertEqual(self.variables["user.mode"], "dark")
+
+    def test_the_periodic_sync_picks_up_an_edit_without_a_tab(self):
+        self.export_prefs({"Custom Color Presets": {"Dark One": DARK}})
+        self.main["save_favorite"](self.db, "Dark One", "Monaco", 13, 3)  # as if in sqlite3
+        ticks = iter([None])
+
+        async def sleep(_seconds):
+            if next(ticks, "stop") == "stop":
+                raise Stop
+
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(Stop):
+            asyncio.run(self.main["sync_periodically"](self.main["Store"](self.db_path), 0, sleep))
+        with open(self.main["DYNAMIC_PATH"], "rb") as f:
+            names = [p["Name"] for p in plistlib.load(f)["Profiles"]]
+        self.assertEqual(names, ["Dark One - Monaco"])
+
+    def test_a_session_is_colored_by_one_call_at_a_time(self):
+        self.tab({})
+        calls = []
+        release = None
+
+        async def slow(connection, app, store, session, reroll=False):
+            calls.append(reroll)
+            await release.wait()
+
+        self.main["color_session"] = slow
+        color_once = self.main["color_one_at_a_time"]
+
+        async def scenario():
+            nonlocal release
+            release = asyncio.Event()
+            first = asyncio.ensure_future(color_once(None, self.app, self.store, self.session))
+            await asyncio.sleep(0)
+            await color_once(None, self.app, self.store, self.session)  # seen twice: skipped
+            again = asyncio.ensure_future(
+                color_once(None, self.app, self.store, self.session, reroll=True)
+            )
+            await asyncio.sleep(0)
+            self.assertEqual(calls, [False])  # the re-roll waits for the first look
+            release.set()
+            await asyncio.gather(first, again)
+
+        self.run_quietly(scenario())
+        self.assertEqual(calls, [False, True])
+        self.assertEqual(self.main["_coloring"], {})
+
+    def test_a_coloring_that_never_returns_is_given_up(self):
+        self.tab({})
+        color_once = self.main["color_one_at_a_time"]
+
+        async def hung(connection, app, store, session, reroll=False):
+            await asyncio.sleep(3600)  # a lost iTerm2 reply
+
+        self.main["color_session"] = hung
+        self.main["COLOR_TIMEOUT_S"] = 0.05
+        out = self.run_quietly(color_once(None, self.app, self.store, self.session))
+        self.assertIn("took over 0.05 s", out)
+        self.assertIn("Change to another profile", out)  # how to fix a half-done tab
+        self.assertEqual(self.main["_coloring"], {})  # freed for the next try
+
+    def test_a_failing_profiles_write_is_retried_rarely_and_logged_once(self):
+        self.export_prefs({"Custom Color Presets": {"Dark One": DARK}})
+        self.main["save_favorite"](self.db, "Dark One", "Monaco", 13, 3)
+        blocker = os.path.join(self.tmp, "a-file")
+        open(blocker, "w").close()
+        self.main["DYNAMIC_PATH"] = os.path.join(blocker, "profiles.plist")  # can't be written
+        writes = []
+        real = self.main["write_favorite_profiles"]
+        self.main["write_favorite_profiles"] = lambda snap: writes.append(1) or real(snap)
+        store = self.main["Store"](self.db_path)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            for _ in range(3):  # three 30 s ticks, nothing changed
+                asyncio.run(self.main["sync_and_log"](store))
+        self.assertEqual(len(writes), 1)
+        self.assertEqual(out.getvalue().count("favorite profiles not updated"), 1)
+        self.main["_profiles_failed"][1] -= self.main["SYNC_RETRY_S"]  # ten minutes later
+        with contextlib.redirect_stdout(out):
+            asyncio.run(self.main["sync_and_log"](store))
+        self.assertEqual(len(writes), 2)  # tried again
+        self.assertEqual(out.getvalue().count("favorite profiles not updated"), 1)  # quietly
+
+    def test_the_periodic_sync_survives_an_unexpected_error(self):
+        calls = []
+
+        async def broken(store):
+            calls.append(store)
+            raise ValueError("a corrupt row")
+
+        self.main["sync_and_log"] = broken
+        ticks = iter([None, None])
+
+        async def sleep(_seconds):
+            if next(ticks, "stop") == "stop":
+                raise Stop
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(Stop):
+            asyncio.run(self.main["sync_periodically"](None, 0, sleep))
+        self.assertEqual(len(calls), 2)  # the loop went on
+        self.assertEqual(out.getvalue().count("favorite profiles check failed"), 1)
 
     def test_the_sync_lock_works_in_each_event_loop(self):
         store = self.main["Store"](self.db_path)

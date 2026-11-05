@@ -1,4 +1,6 @@
-"""What the scheme DB's writers and readers must agree on, kept in one place.
+"""What the scheme DB's writers and readers must agree on, kept in one place: the DB's path,
+the hash and the fix_colors rule, seed values, the oldest schema the readers accept
+(MIN_SCHEMA), and the Display P3 to sRGB conversion the color math uses.
 
 Imported by the AutoLaunch script (under iTerm2's Python 3.12) and by the build,
 srcp_favorites.py, srcp_odds.py and srcp_export_curation.py in .tools/ (under
@@ -66,17 +68,111 @@ def float32(v):
     return struct.unpack("f", struct.pack("f", v))[0]
 
 
-def colors_hash(rgb_by_key):
+def colors_hash(rgb_by_key, p3_keys=()):
     """color_hash from {key: (r, g, b)} with raw components 0-1, or None if a key is missing.
 
     Raw as stored, never converted, so the build (prefs dicts) and the main script (API
-    colors) always agree.
+    colors) always agree. p3_keys: the keys whose color space is Display P3, which the
+    hash marks, since the same numbers look different there.
     """
     try:
-        parts = [",".join(f"{float32(v):.4f}" for v in rgb_by_key[k]) for k in HASH_KEYS]
+        parts = [
+            ",".join(f"{float32(v):.4f}" for v in rgb_by_key[k]) + (":p3" if k in p3_keys else "")
+            for k in HASH_KEYS
+        ]
     except KeyError:
         return None
     return hashlib.sha1("|".join(parts).encode(), usedforsecurity=False).hexdigest()
+
+
+# The oldest DB schema (PRAGMA user_version) the scripts read. Two changes to the shape of
+# `schemes` and the views (discovery.colorful in 0.6.0, schemes.fixes in 0.9.0) shipped without
+# a MIGRATIONS step, so the version alone can't tell a 0.6 DB from a 0.9 one below 6; every
+# DB at 6 or later was built by code that has all of them. Any later change to that shape
+# adds a MIGRATIONS step and raises this, so readers never need to probe for columns.
+MIN_SCHEMA = 7
+REBUILD = "python3 .tools/srcp_build_scheme_db.py"
+
+
+class OldSchema(Exception):
+    """The DB was built by an older version; rebuilding it (the message says how) fixes it."""
+
+
+def schema_problem(db):
+    """Why db is too old for these scripts, or None if it's fine."""
+    version = db.execute("PRAGMA user_version").fetchone()[0]
+    if version >= MIN_SCHEMA:
+        return None
+    return (
+        f"the scheme DB is schema {version}, older than this version reads ({MIN_SCHEMA}); "
+        f"rebuild it: {REBUILD} (safe while iTerm2 runs)"
+    )
+
+
+def check_schema(db):
+    """Raise OldSchema if db is too old for these scripts."""
+    problem = schema_problem(db)
+    if problem:
+        raise OldSchema(problem)
+
+
+# Display P3 colors, converted to sRGB so they're judged as they look: linear P3 -> XYZ (D65)
+# -> linear sRGB, with the exact fractions and the sign-keeping sRGB transfer functions of CSS
+# Color 4's sample code (drafts.csswg.org/css-color-4/conversions.js, checked 2026-11-05).
+P3_TO_XYZ = (
+    (608311 / 1250200, 189793 / 714400, 198249 / 1000160),
+    (35783 / 156275, 247089 / 357200, 198249 / 2500400),
+    (0 / 1, 32229 / 714400, 5220557 / 5000800),
+)
+XYZ_TO_SRGB = (
+    (12831 / 3959, -329 / 214, -1974 / 3959),
+    (-851781 / 878810, 1648619 / 878810, 36519 / 878810),
+    (705 / 12673, -2585 / 12673, 705 / 667),
+)
+
+
+def _times(m, v):
+    return tuple(sum(m[i][j] * v[j] for j in range(3)) for i in range(3))
+
+
+def _product(a, b):
+    return tuple(
+        tuple(sum(a[i][k] * b[k][j] for k in range(3)) for j in range(3)) for i in range(3)
+    )
+
+
+def _inverse(m):
+    (a, b, c), (d, e, f), (g, h, i) = m
+    det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g)
+    return (
+        ((e * i - f * h) / det, (c * h - b * i) / det, (b * f - c * e) / det),
+        ((f * g - d * i) / det, (a * i - c * g) / det, (c * d - a * f) / det),
+        ((d * h - e * g) / det, (b * g - a * h) / det, (a * e - b * d) / det),
+    )
+
+
+P3_TO_SRGB = _product(XYZ_TO_SRGB, P3_TO_XYZ)  # linear to linear; every row sums to 1
+SRGB_TO_P3 = _inverse(P3_TO_SRGB)
+
+
+def _decode(v):  # sRGB (and P3) transfer function, gamma-encoded -> linear; keeps the sign
+    a = abs(v)
+    return v / 12.92 if a <= 0.04045 else (1 if v >= 0 else -1) * ((a + 0.055) / 1.055) ** 2.4
+
+
+def _encode(v):  # linear -> gamma-encoded; keeps the sign (out-of-gamut values are negative)
+    a = abs(v)
+    return 12.92 * v if a <= 0.0031308 else (1 if v >= 0 else -1) * (1.055 * a ** (1 / 2.4) - 0.055)
+
+
+def p3_to_srgb(rgb):
+    """A Display P3 color as sRGB, components 0-1 when in sRGB's gamut, else beyond."""
+    return tuple(_encode(v) for v in _times(P3_TO_SRGB, [_decode(v) for v in rgb]))
+
+
+def srgb_to_p3(rgb):
+    """An sRGB color as Display P3 (always inside P3's gamut, which holds all of sRGB)."""
+    return tuple(_encode(v) for v in _times(SRGB_TO_P3, [_decode(v) for v in rgb]))
 
 
 def is_busy(error):

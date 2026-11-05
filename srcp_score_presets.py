@@ -6,8 +6,19 @@ scheme DB (.tools/srcp_build_scheme_db.py). Run from iTerm2's Scripts menu.
 """
 
 import colorsys
+import os
+import sys
 
 import iterm2
+from iterm2.color import ColorSpace
+
+# .tools/srcp_schema.py converts Display P3 colors to sRGB, so they're scored as they look;
+# without it (a partial install) they're scored as if sRGB.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".tools"))
+try:
+    from srcp_schema import p3_to_srgb
+except ImportError:
+    p3_to_srgb = None
 
 ANSI_KEYS = [f"Ansi {i} Color" for i in range(16)]
 BG_KEY = "Background Color"
@@ -43,7 +54,11 @@ async def score_preset(connection, name):
 
     colors = {}
     for v in preset.values:
-        colors[v.key] = (v.red, v.green, v.blue)
+        rgb = (v.red, v.green, v.blue)
+        if v.color_space == ColorSpace.P3 and p3_to_srgb:
+            srgb = p3_to_srgb(tuple(c / 255 for c in rgb))
+            rgb = tuple(255 * min(1.0, max(0.0, c)) for c in srgb)  # clipped, as the build does
+        colors[v.key] = rgb
 
     bg = colors.get(BG_KEY)
     fg = colors.get(FG_KEY)
@@ -70,6 +85,8 @@ async def score_preset(connection, name):
 
 
 async def main(connection):
+    if p3_to_srgb is None:
+        print("[warn] .tools/srcp_schema.py not found: Display P3 presets are scored as sRGB")
     names = await iterm2.ColorPreset.async_get_list(connection)
     print(f"[info] scoring {len(names)} installed presets...\n")
 

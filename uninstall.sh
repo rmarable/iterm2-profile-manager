@@ -6,12 +6,13 @@
 #   3. remove the favorites' Dynamic Profiles file (Profiles > Favorites)
 #   4. remove the Ctrl-Opt-Cmd-S save_profile() key binding (iTerm2 prefs, backed up)
 # Only when asked:
-#   --data     export your curation to ~/srcp-curation-<time>.sql, then delete the
-#              scheme DB, its backups and launch history (~/.local/share/iterm2-color-schemes)
+#   --data     export your curation to ~/srcp-curation-<time>.sql (and keep a copy of the
+#              whole DB beside it, .db), then delete the scheme DB, its snapshots and launch
+#              history (~/.local/share/iterm2-color-schemes); other files there are kept
 #   --presets  remove color presets matching the schemes repo's .itermcolors files
 #              (current or earlier versions; ones you edited are kept)
-#   --fonts    remove Terminal.app fonts identical to Terminal's copies, and the
-#              MesloLGS Nerd Font Homebrew cask
+#   --fonts    remove the Terminal.app fonts and the MesloLGS Nerd Font Homebrew cask
+#              that setup.sh installed (its record says which; fonts you had stay)
 #   --repo     delete the iTerm2-Color-Schemes clone in $SRC_DIR (default ~/src), unless
 #              it holds changes, commits or stashes of yours
 #   --all      all of the above
@@ -31,7 +32,7 @@ for arg in "$@"; do
 	--repo) REPO=true ;;
 	--all) DATA=true PRESETS=true FONTS=true REPO=true ;;
 	-h | --help)
-		sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'
+		sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
 		exit 0
 		;;
 	*)
@@ -85,6 +86,17 @@ repo_keep_reason() {
 		echo "linked worktrees"
 	fi
 }
+
+# Snapshots the scripts made (.tools/srcp_db_backup.py names them so): time, -n, .partial.
+SNAPSHOT_RE='^schemes-([0-9]{8}T[0-9]{6}Z)(-([0-9]+))?\.db(\.partial)?$'
+# A real file (not a link) directly in backups/, named as the scripts name snapshots.
+is_our_snapshot() {
+	[[ "$(dirname "$1")" == "$DATA_DIR/backups" && -f "$1" && ! -L "$1" && "$(basename "$1")" =~ $SNAPSHOT_RE ]]
+}
+# The DB and the files SQLite and the main script keep next to it.
+DB_FILES=(schemes.db schemes.db-wal schemes.db-shm schemes.db-journal .lock)
+# Where setup.sh lists what it installed (the same path is in setup.sh).
+MANIFEST="$HOME/.local/share/iterm2-profile-manager/installed.txt"
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
 	echo "This is for iTerm2 on macOS only." >&2
@@ -159,52 +171,120 @@ if $DATA; then
 	export_file="$HOME/srcp-curation-$(date +%Y%m%d-%H%M%S).sql"
 	# Newest by the UTC time in the name (as .tools/srcp_db_backup.py prunes), not mtime; a
 	# name dated in the future (wrong clock, copied from another Mac) doesn't count.
-	newest_backup="" newest_key="" now_utc="$(date -u +%Y%m%dT%H%M%SZ)"
+	newest_backup="" newest_key="" now_utc="$(date -u +%Y%m%dT%H%M%SZ)" snapshots=0
 	for f in "$DATA_DIR"/backups/schemes-*.db; do
-		[[ "$(basename "$f")" =~ ^schemes-([0-9]{8}T[0-9]{6}Z)(-([0-9]+))?\.db$ ]] || continue
+		[[ "$(basename "$f")" =~ $SNAPSHOT_RE ]] || continue
+		[[ -z "${BASH_REMATCH[4]}" ]] || continue # half-written: nothing to keep, fine to delete
+		snapshots=$((snapshots + 1))
 		[[ "${BASH_REMATCH[1]}" > "$now_utc" ]] && continue
 		key="${BASH_REMATCH[1]}-$(printf '%09d' "$((10#${BASH_REMATCH[3]:-0}))")"
 		if [[ -z "$newest_key" || "$key" > "$newest_key" ]]; then
 			newest_backup="$f" newest_key="$key"
 		fi
 	done
+	# A copy of the whole DB next to the export, so nothing is lost if the export isn't enough.
+	keep_file="${export_file%.sql}.db" kept=false
 	if [[ -e "$DATA_DIR/schemes.db" ]]; then
+		# VACUUM INTO: a consistent copy, -wal changes included, in rollback-journal mode (no
+		# -wal/-shm left beside it). A ' in the path is written '' in SQL.
+		q="'"
+		run sqlite3 "$DATA_DIR/schemes.db" "VACUUM INTO '${keep_file//$q/$q$q}';"
 		run python3 "$HERE/.tools/srcp_export_curation.py" -o "$export_file"
+		kept=true
 	elif [[ -n "$newest_backup" ]]; then
-		echo "  (no schemes.db: exporting from the newest snapshot instead)"
+		echo "  (no schemes.db: keeping and exporting the newest snapshot instead)"
+		run cp "$newest_backup" "$keep_file"
 		run python3 "$HERE/.tools/srcp_export_curation.py" --db "$newest_backup" -o "$export_file"
+		kept=true
 	fi
-	if [[ -d "$DATA_DIR" ]]; then
-		run rm -rf "$DATA_DIR"
+	if ! $kept && ((snapshots > 0)); then
+		echo "  ! no schemes.db, and no snapshot to keep (all dated in the future?): left alone"
+	elif [[ -d "$DATA_DIR" ]]; then
+		# Then (set -e: only if those worked) delete what the scripts made, not the folder.
+		for f in "${DB_FILES[@]}"; do
+			if [[ -e "$DATA_DIR/$f" ]]; then run rm -f "$DATA_DIR/$f"; fi
+		done
+		for f in "$DATA_DIR"/backups/schemes-*; do
+			if is_our_snapshot "$f"; then run rm -f "$f"; fi
+		done
+		if ! $DRYRUN; then
+			rmdir "$DATA_DIR/backups" 2>/dev/null || true # only if now empty
+			rmdir "$DATA_DIR" 2>/dev/null || true
+		fi
+		# Anything else (a manual-*.db snapshot, a folder or link, files of your own) is
+		# left, and listed.
+		while IFS= read -r f; do
+			if is_our_snapshot "$f"; then continue; fi
+			if [[ "$(dirname "$f")" == "$DATA_DIR" && " ${DB_FILES[*]} " == *" $(basename "$f") "* ]]; then
+				continue
+			fi
+			echo "  = left in place: $f"
+		done < <(find "$DATA_DIR" -mindepth 1 \( -type f -o -type l \) 2>/dev/null | sort)
 	else
 		echo "  = none"
 	fi
 fi
 
 if $FONTS; then
-	echo "==> Terminal.app fonts in $FONT_DIR (only identical copies)"
+	# Only what setup.sh's record lists. No record means an install from before 0.11.0, when
+	# it kept none, so nothing can be told apart from fonts of yours: all are left alone.
+	installed() { [[ -f "$MANIFEST" ]] && grep -qxF "$1" "$MANIFEST"; }
+	still_listed=() # what the record lists that's still there afterwards
+	echo "==> Terminal.app fonts in $FONT_DIR (only ones setup.sh installed, still identical)"
+	if [[ ! -f "$MANIFEST" ]]; then
+		echo "  (no record of what setup.sh installed, from before 0.11.0: all left alone;"
+		echo "   remove fonts by hand in Font Book, and brew uninstall --cask font-meslo-lg-nerd-font)"
+	fi
 	# Not grep -q: with pipefail, an early exit can turn defaults' SIGPIPE into "no match".
 	if defaults read com.googlecode.iterm2 "New Bookmarks" 2>/dev/null | grep SFMono >/dev/null; then
 		echo "  ! an iTerm2 profile still uses SF Mono; change its font after this"
+	fi
+	if [[ ! -d "$TERMINAL_FONTS" ]] && [[ -f "$MANIFEST" ]]; then
+		# Can't check they're still Terminal's copies: keep them, and their lines.
+		echo "  (skipped: Terminal.app fonts not found)"
+		while IFS= read -r line; do
+			if [[ "$line" == "font "* ]]; then still_listed+=("$line"); fi
+		done <"$MANIFEST"
 	fi
 	if [[ -d "$TERMINAL_FONTS" ]]; then
 		for src in "$TERMINAL_FONTS"/*; do
 			[[ -e "$src" ]] || continue # empty folder: the glob stays literal
 			name="$(basename "$src")"
-			if [[ -e "$FONT_DIR/$name" ]] && cmp -s "$src" "$FONT_DIR/$name"; then
+			[[ -e "$FONT_DIR/$name" ]] || continue
+			if ! installed "font $name"; then
+				# setup.sh records what it installs since 0.11.0; one from before isn't listed.
+				echo "  = $name: not in setup.sh's record; left alone (remove it in Font Book if setup.sh put it there before 0.11.0)"
+			elif cmp -s "$src" "$FONT_DIR/$name"; then
 				run rm -f "$FONT_DIR/$name"
+			else
+				echo "  = $name: changed since setup.sh installed it; left alone"
+				still_listed+=("font $name")
 			fi
 		done
 	fi
 	echo "==> MesloLGS Nerd Font (Homebrew)"
-	if command -v brew >/dev/null && brew list --cask font-meslo-lg-nerd-font >/dev/null 2>&1; then
+	cask=font-meslo-lg-nerd-font
+	if ! installed "cask $cask"; then
+		echo "  = not installed by setup.sh; left alone"
+	elif command -v brew >/dev/null && brew list --cask "$cask" >/dev/null 2>&1; then
 		# Not grep -q: with pipefail, an early exit can turn defaults' SIGPIPE into "no match".
 		if defaults read com.googlecode.iterm2 "New Bookmarks" 2>/dev/null | grep MesloLGS >/dev/null; then
 			echo "  ! an iTerm2 profile still uses MesloLGS; change its font after this"
 		fi
-		run brew uninstall --cask font-meslo-lg-nerd-font || echo "  (brew failed; continuing)"
+		if ! run brew uninstall --cask "$cask"; then
+			echo "  (brew failed; continuing)"
+			still_listed+=("cask $cask")
+		fi
 	else
 		echo "  = not installed with Homebrew"
+	fi
+	# The record keeps what's still there, so a later --fonts can finish the job.
+	if [[ -f "$MANIFEST" ]]; then
+		if ((${#still_listed[@]})); then
+			$DRYRUN || printf '%s\n' "${still_listed[@]}" >"$MANIFEST"
+		else
+			run rm -f "$MANIFEST"
+		fi
 	fi
 fi
 
@@ -229,5 +309,6 @@ cat <<'EOF'
 
 Done. Relaunch iTerm2. Sessions it colored keep their colors until closed.
 Not touched: this checkout, prefs backups (~/.local/share/iterm2-profile-manager/prefs-backups),
-the Claude Code integration, and your shell config.
+the Claude Code integration (.tools/srcp_enable_claude_integration.py --remove undoes it),
+and your shell config.
 EOF

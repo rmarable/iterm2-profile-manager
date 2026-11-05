@@ -47,9 +47,9 @@ def render(db: sqlite3.Connection, view: str) -> str:
                 report.show_hidden(db, "Show one again: Scripts > srcp_never_show.py")
         except SystemExit as e:  # the report exits with a message when there's no data
             print(e)
-        except sqlite3.OperationalError as e:  # e.g. a restored snapshot from an older schema
-            print(f"The DB can't show this view ({e}).")
-            print("Rebuild it: python3 .tools/srcp_build_scheme_db.py")
+        except sqlite3.OperationalError as e:
+            busy = " It's busy; try again in a moment." if report.is_busy(e) else ""
+            print(f"The DB can't show this view ({e}).{busy}")
     return out.getvalue().rstrip()
 
 
@@ -58,7 +58,10 @@ def view_text(view: str) -> str:
 
     if not os.path.exists(report.DEFAULT_DB):
         return f"No database at {report.DEFAULT_DB}.\nBuild it with .tools/srcp_build_scheme_db.py."
-    db = report.connect(report.DEFAULT_DB)  # it only reads
+    try:
+        db = report.connect(report.DEFAULT_DB)  # it only reads
+    except report.OldSchema as e:
+        return f"The database is too old: {e}."
     try:
         return render(db, view)
     finally:

@@ -4,6 +4,14 @@ What changed for someone using iTerm2 Profile Manager, newest first. Releases up
 
 ## Unreleased
 
+- After updating, run `python3 .tools/srcp_build_scheme_db.py` once. The main script asks for it in the Console when the database is too old, and colors tabs again as soon as it's rebuilt.
+- Presets that use Display P3 colors are judged and adjusted as they actually look, so they're as readable as the rest.
+- **Profiles → Favorites** picks up changes within 30 seconds, without waiting for a new tab.
+- A tab that iTerm2 stops answering for is given up on after 30 seconds instead of holding up the next ones.
+- `.tools/srcp_enable_claude_integration.py --remove` undoes the optional Claude Code integration, leaving your own hooks and triggers alone.
+- Enabling the Claude Code integration no longer deletes a `cc-status` link of yours; it moves it aside.
+- `./uninstall.sh --fonts` removes only the fonts and Homebrew package that `setup.sh` installed (it keeps a list from now on).
+- `./uninstall.sh --data` keeps a copy of the whole database next to the ratings export, and leaves other files in that folder alone.
 - The rating dialog's note about adjusted colors is shorter: "1 color adjusted."
 - The right-click item "Remove from favorites" is now called "Remove profile from favorites".
 - **Never show** in the rating dialog now gives the tab a new look, as the right-click item does, and asks first if the preset is a favorite.

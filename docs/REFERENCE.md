@@ -103,9 +103,9 @@ Monochrome presets (one hue, or near-grey) need only the Text check. `overrides.
 - A bright color (ANSI 9-14) that would end up identical to its normal one gets a little more contrast, so the two stay apart.
 - If ANSI 1-6 still have fewer than 5 distinct colors, a color from the closest pair moves 0.01 in lightness away from the other, preferring a move that also raises its contrast (at most 40 moves per accent, shared among them: 240 in all; never below its target). If that doesn't reach 5, those moves are dropped. They can lower an already readable color's contrast a little.
 - Not adjusted: the background, ANSI 0, 7 and 15, cursor, bold, selection, and the separate `(Light)`/`(Dark)` colors a few presets carry for iTerm2's "separate colors for light and dark mode".
-- The math treats every color's components as sRGB, as the readability checks do; an adjusted color keeps its own color space (many presets use Calibrated or P3).
+- Display P3 colors (a few dozen of the repo's presets use some) are converted to sRGB for the readability checks and the adjustments, so they're judged as they look; one outside sRGB's gamut is judged at sRGB's edge. Calibrated and untagged colors are treated as sRGB. An adjusted color keeps its own color space: a P3 one is stored back in P3 (6 decimals). `color_hash` marks P3 colors, since the same numbers look different there.
 - Adjustments are tied to the preset's colors at build time (`schemes.color_hash`, over 32-bit-rounded components, as iTerm2's API sends them). If a preset changes in iTerm2 after a build, its adjustments are skipped, with a Console warning, until the next rebuild.
-- A rebuild needs no restart: it rewrites the database in place, the main script reads each new tab's adjustments as it opens, and favorites' profiles update when the next tab opens.
+- A rebuild needs no restart: it rewrites the database in place, the main script reads each new tab's adjustments as it opens, and favorites' profiles update within 30 seconds (the main script checks for changes that often).
 - `fix_colors = 0` turns all of this off: original colors, and only presets that pass the readability checks. Failing presets you showed again or rated while it was on then drop out too.
 
 A few installed presets are byte-identical copies under an older name (`base16 icy` = `base16-icy`), and the repo has a few identical twins of its own (`Zenbones` = `Zenbones Light`). Discovery uses only one name for each: the repo's, and the first in sort order.
@@ -221,7 +221,7 @@ It:
 - Adds two triggers per iTerm2 profile that track a running `claude` job
 - Sets the two iTerm2 flags that record this
 
-It doesn't touch iTerm2's AI chat settings or API key. `uninstall.sh` doesn't undo it: remove the `cc-status` hooks from `~/.claude/settings.json` (or restore its backup) and turn the integration off in iTerm2.
+It doesn't touch iTerm2's AI chat settings or API key. `uninstall.sh` doesn't undo it; `--remove` does (`--remove --dryrun` lists what it would take out): the `cc-status` link if it points at iTerm2's, each hook group in `~/.claude/settings.json` that is exactly one `cc-status` hook, the two triggers where they match exactly, and the two flags. iTerm2's own setup installs identical items, so those go too; your own hooks, triggers and a link pointing elsewhere stay. `settings.json` and the prefs are backed up first. Enabling moves a `cc-status` file or link of yours aside (`.backup-<time>`) rather than replacing it.
 
 ## Install options
 
@@ -271,6 +271,8 @@ Double-clicking an `.itermcolors` file also imports it, with one dialog per file
 | `~/.local/share/iterm2-profile-manager/prefs-backups/com.googlecode.iterm2-<timestamp>.plist` | iTerm2 settings backups, newest 10 kept. Restore one with iTerm2 quit: `defaults import com.googlecode.iterm2 <file>`. Versions before 0.6.7 wrote them to `~/Library/Preferences/com.googlecode.iterm2.backup-*.plist`; those can be deleted. |
 | `$SRC_DIR/iTerm2-Color-Schemes` (default `~/src`) | Schemes repo clone. |
 | `~/Library/Fonts` | Copied Terminal.app fonts. |
+| `~/.local/share/iterm2-profile-manager/installed.txt` | What `setup.sh` installed: `font <file>` and `cask <name>` lines, so `uninstall.sh --fonts` removes only those. An install from before 0.11.0 has none, and keeps its fonts on uninstall. |
+| `~/srcp-curation-<time>.sql`, `~/srcp-curation-<time>.db` | Written by `uninstall.sh --data`: the ratings export, and a copy of the whole database. |
 
 ### Repo files
 
@@ -295,6 +297,8 @@ Double-clicking an `.itermcolors` file also imports it, with one dialog per file
 | `lint.sh`, `pyproject.toml`, `AutoLaunch/ruff.toml` | Lint and type checks. |
 
 ## Database
+
+`PRAGMA user_version` is the schema version (`MIGRATIONS` in the build). The scripts read only a database at `srcp_schema.MIN_SCHEMA` (7) or later; an older one gets one Console line asking for a rebuild, and works as soon as it's rebuilt, without a restart. Every change to the shape of `schemes` or the views adds a migration, even an empty one (7 marks the P3 color math), so that check is all a reader needs.
 
 | Table or view | Contents |
 |---|---|

@@ -51,6 +51,18 @@ run() {
 	if ! $DRYRUN; then "$@"; fi
 }
 
+# What setup.sh installed (not what was there already), so uninstall.sh --fonts removes only
+# that: one line per font file ("font NAME") and for the Homebrew package ("cask NAME"). It
+# always exists after a setup.sh run, even empty: none means an install from before 0.11.0.
+# (The same path is in uninstall.sh.)
+MANIFEST="$HOME/.local/share/iterm2-profile-manager/installed.txt"
+record() {
+	$DRYRUN && return
+	mkdir -p "$(dirname "$MANIFEST")"
+	if [[ -n "$1" ]] && ! grep -qxF "$1" "$MANIFEST" 2>/dev/null; then echo "$1" >>"$MANIFEST"; fi
+	touch "$MANIFEST"
+}
+
 if [[ "$(uname -s)" != "Darwin" ]]; then
 	echo "This is for iTerm2 on macOS only." >&2
 	exit 1
@@ -73,6 +85,7 @@ if [[ "$(defaults read com.googlecode.iterm2 LoadPrefsFromCustomFolder 2>/dev/nu
 fi
 
 echo "==> Installing Terminal.app fonts"
+record "" # the record exists from now on, even if this run installs nothing
 # Apple-licensed fonts from this Mac's own macOS install; never commit them.
 if [[ -d "$TERMINAL_FONTS" ]]; then
 	run mkdir -p "$FONT_DIR"
@@ -81,11 +94,13 @@ if [[ -d "$TERMINAL_FONTS" ]]; then
 		name="$(basename "$src")"
 		if [[ ! -e "$FONT_DIR/$name" ]]; then
 			run install -m 644 "$src" "$FONT_DIR/$name"
+			record "font $name"
 		elif cmp -s "$src" "$FONT_DIR/$name"; then
 			echo "  already installed: $name"
 		else
 			echo "  updated: $name"
 			run install -m 644 "$src" "$FONT_DIR/$name"
+			record "font $name" # Terminal's copy now, put there by setup.sh
 		fi
 	done
 else
@@ -96,7 +111,11 @@ echo "==> MesloLGS Nerd Font"
 if [[ -e "$FONT_DIR/MesloLGSNerdFontMono-Regular.ttf" ]]; then
 	echo "  already installed"
 elif command -v brew >/dev/null; then
-	run brew install --cask font-meslo-lg-nerd-font || echo "  (brew failed; continuing without it)"
+	if run brew install --cask font-meslo-lg-nerd-font; then
+		record "cask font-meslo-lg-nerd-font"
+	else
+		echo "  (brew failed; continuing without it)"
+	fi
 else
 	echo "  (skipped: no Homebrew; install MesloLGS Nerd Font by hand, or it stays out of the font pool)"
 fi

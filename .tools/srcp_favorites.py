@@ -21,7 +21,7 @@ from typing import NamedTuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # works under python3 -I too
 from srcp_schema import DB_PATH as DEFAULT_DB
-from srcp_schema import FIX_ON_SQL, UNHIDE, is_busy
+from srcp_schema import FIX_ON_SQL, UNHIDE, OldSchema, check_schema, is_busy
 
 FAVORITES = """
 SELECT f.stars, f.preset, COALESCE(fo.label, f.font) AS font, e.mode,
@@ -88,16 +88,9 @@ def table(headers, rows):
         print("  ".join(v.ljust(w) for v, w in zip(line, widths)).rstrip())
 
 
-def has_table(db, name):
-    return db.execute("SELECT 1 FROM sqlite_master WHERE name = ?", (name,)).fetchone()
-
-
 def favorite_rows(db, mode, min_stars):
     query = FAVORITES.format(adjusted=ADJUSTED.format(fix_on=FIX_ON_SQL))
-    try:
-        return db.execute(query, (min_stars, mode, mode)).fetchall()
-    except sqlite3.OperationalError:  # DB built before color adjustments
-        return db.execute(FAVORITES.format(adjusted="0"), (min_stars, mode, mode)).fetchall()
+    return db.execute(query, (min_stars, mode, mode)).fetchall()
 
 
 def show_favorites(db, mode, min_stars, cli_hints=True):
@@ -141,8 +134,6 @@ def show_favorites(db, mode, min_stars, cli_hints=True):
 
 
 def show_history(db, limit):
-    if not has_table(db, "ratings"):
-        sys.exit("No rating history in this DB yet: rebuild it (.tools/srcp_build_scheme_db.py).")
     rows = db.execute(HISTORY, (limit,)).fetchall()
     if not rows:
         print("No rating changes recorded yet.")
@@ -168,13 +159,7 @@ SHOW_AGAIN_HINT = "Show one again: python3 .tools/srcp_favorites.py --show-again
 
 def hidden_rows(db):
     """(name, mode, hidden at) of each Never show preset."""
-    query = HIDDEN
-    if not has_table(db, "ratings"):  # DB from before rating history: no "hidden" times
-        query = HIDDEN.replace(
-            "(SELECT max(at) FROM ratings r WHERE r.preset = o.name AND r.action = 'never_show')",
-            "NULL",
-        )
-    return db.execute(query).fetchall()
+    return db.execute(HIDDEN).fetchall()
 
 
 def show_hidden(db, hint=SHOW_AGAIN_HINT):
@@ -227,11 +212,20 @@ def show_again(db, preset):
 
 
 def connect(path, timeout=5.0):
-    """Read-write connection in autocommit mode; mode=rw never creates an empty DB."""
+    """Read-write connection in autocommit mode; mode=rw never creates an empty DB.
+
+    Raises OldSchema (message: how to rebuild) for a DB older than these scripts read.
+    """
     # mode=rw even to read: mode=ro can fail on a WAL DB that nothing else has open.
-    return sqlite3.connect(
+    db = sqlite3.connect(
         Path(path).resolve().as_uri() + "?mode=rw", uri=True, timeout=timeout, isolation_level=None
     )
+    try:
+        check_schema(db)
+    except BaseException:
+        db.close()
+        raise
+    return db
 
 
 def main():
@@ -248,7 +242,10 @@ def main():
 
     if not os.path.exists(args.db):
         sys.exit(f"No database at {args.db}. Build it with .tools/srcp_build_scheme_db.py.")
-    db = connect(args.db)
+    try:
+        db = connect(args.db)
+    except OldSchema as e:
+        sys.exit(f"The DB is too old: {e}.")
     try:
         if args.show_again is not None:
             result = show_again(db, args.show_again)
@@ -262,12 +259,10 @@ def main():
             show_hidden(db)
         else:
             show_favorites(db, args.mode, args.min_stars)
-    except sqlite3.OperationalError as e:  # e.g. a restored snapshot from an older schema
+    except sqlite3.OperationalError as e:
         if is_busy(e):
             sys.exit(f"The DB is busy ({e}). Try again in a moment.")
-        sys.exit(
-            f"The DB can't show this ({e}). Rebuild it: python3 .tools/srcp_build_scheme_db.py"
-        )
+        raise
     finally:
         db.close()
 

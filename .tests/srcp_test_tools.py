@@ -6,6 +6,7 @@ Runs under iTerm2's Python, like srcp_test_db.py, against temp folders only.
 
 import contextlib
 import io
+import json
 import os
 import plistlib
 import re
@@ -23,6 +24,7 @@ from unittest import mock
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, ".tools"))  # before importing the tools
 
+import srcp_enable_claude_integration  # noqa: E402
 import srcp_iterm_prefs  # noqa: E402
 import srcp_preset_history  # noqa: E402
 import srcp_uninstall_prefs  # noqa: E402
@@ -217,6 +219,106 @@ class HelperTest(unittest.TestCase):
                 self.assertFalse(set(keys) & set(delete))
 
 
+class ClaudeIntegrationRemoveTest(unittest.TestCase):
+    """srcp_enable_claude_integration.py --remove takes out exactly what it installs."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="srcp-claude-")
+        self.addCleanup(shutil.rmtree, self.tmp)
+        tool = srcp_enable_claude_integration
+        self.src = os.path.join(self.tmp, "iTerm.app", "cc-status")
+        os.makedirs(os.path.dirname(self.src))
+        open(self.src, "w").close()
+        self.link = os.path.join(self.tmp, "config", "cc-status")
+        self.settings = os.path.join(self.tmp, "claude", "settings.json")
+        for name, value in (
+            ("CC_STATUS_SRC", self.src),
+            ("CC_STATUS_LINK", self.link),
+            ("CLAUDE_SETTINGS", self.settings),
+        ):
+            patch = mock.patch.object(tool, name, value)
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def run_tool(self, *args, prefs=None):
+        """main() with prefs faked; returns the (prefs, keys, delete) it saved."""
+        tool = srcp_enable_claude_integration
+        saved = []
+
+        def save(prefs, keys, delete=()):
+            saved.append((prefs, keys, list(delete)))
+            return "backup"
+
+        with (
+            mock.patch.object(tool, "iterm_running", return_value=False),
+            mock.patch.object(tool, "load_prefs", return_value=prefs if prefs is not None else {}),
+            mock.patch.object(tool, "save_prefs", save),
+            mock.patch.object(sys, "argv", ["srcp_enable_claude_integration.py", *args]),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            tool.main()
+        return saved
+
+    def test_enable_then_remove_leaves_only_what_was_yours(self):
+        tool = srcp_enable_claude_integration
+        mine = {"type": "command", "command": "/usr/local/bin/my-hook"}
+        mixed = {"hooks": [mine, {"type": "command", "command": self.link}]}  # not only ours
+        tuned = {"matcher": "Bash", "hooks": [{"type": "command", "command": self.link}]}
+        timed = {"hooks": [{"type": "command", "command": self.link, "timeout": 5}]}
+        os.makedirs(os.path.dirname(self.settings))
+        with open(self.settings, "w") as f:
+            hooks = {
+                "Stop": [{"hooks": [mine]}],
+                "PreToolUse": [mixed],
+                "PostToolUse": [tuned],
+                "SessionEnd": [timed],
+            }
+            json.dump({"hooks": hooks, "x": 1}, f)
+        my_trigger = {"action": "MyTrigger", "regex": "error"}
+        prefs = {"New Bookmarks": [{"Name": "Default", "Triggers": [my_trigger]}]}
+        saved = self.run_tool(prefs=prefs)  # enable
+        self.assertEqual(os.readlink(self.link), self.src)
+        enabled = saved[0][0]
+        self.assertEqual(len(enabled["New Bookmarks"][0]["Triggers"]), 3)
+
+        saved = self.run_tool("--remove", prefs=enabled)
+        self.assertFalse(os.path.lexists(self.link))
+        with open(self.settings) as f:
+            left = json.load(f)
+        self.assertEqual(left["x"], 1)
+        self.assertEqual(left["hooks"]["Stop"], [{"hooks": [mine]}])  # yours stays
+        self.assertEqual(left["hooks"]["PreToolUse"], [mixed])  # a group with yours in it too
+        self.assertEqual(left["hooks"]["PostToolUse"], [tuned])  # yours: it has a matcher
+        self.assertEqual(left["hooks"]["SessionEnd"], [timed])  # yours: it has a timeout
+        self.assertEqual(set(left["hooks"]), {"Stop", "PreToolUse", "PostToolUse", "SessionEnd"})
+        prefs_after, keys, delete = saved[0]
+        self.assertEqual(prefs_after["New Bookmarks"][0]["Triggers"], [my_trigger])
+        self.assertEqual((keys, sorted(delete)), (["New Bookmarks"], sorted(tool.FLAGS)))
+        backups = [n for n in os.listdir(os.path.dirname(self.settings)) if ".backup-" in n]
+        self.assertTrue(backups)  # settings.json was backed up before each write
+
+    def test_remove_with_only_the_flags_set_writes_no_profiles(self):
+        prefs = {
+            "New Bookmarks": [{"Name": "Default", "Triggers": []}],
+            **dict.fromkeys(srcp_enable_claude_integration.FLAGS, True),
+        }
+        ((_, keys, delete),) = self.run_tool("--remove", prefs=prefs)
+        self.assertEqual(keys, [])  # no trigger was removed, so New Bookmarks isn't rewritten
+        self.assertEqual(sorted(delete), sorted(srcp_enable_claude_integration.FLAGS))
+
+    def test_a_link_of_yours_is_kept_by_enable_and_by_remove(self):
+        os.makedirs(os.path.dirname(self.link))
+        os.symlink("/usr/local/bin/elsewhere", self.link)
+        self.run_tool("--remove")
+        self.assertEqual(os.readlink(self.link), "/usr/local/bin/elsewhere")  # not ours: stays
+        self.run_tool()
+        self.assertEqual(os.readlink(self.link), self.src)
+        folder = os.path.dirname(self.link)
+        kept = [n for n in os.listdir(folder) if ".backup-" in n]
+        self.assertEqual(len(kept), 1)  # yours, moved aside rather than deleted
+        self.assertEqual(os.readlink(os.path.join(folder, kept[0])), "/usr/local/bin/elsewhere")
+
+
 class ShellDryRunTest(unittest.TestCase):
     """setup.sh and uninstall.sh --dryrun change nothing.
 
@@ -406,6 +508,76 @@ class ShellDryRunTest(unittest.TestCase):
         for step in ("iterm2-profile-manager.plist", "srcp_ratings.py", "srcp-curation-"):
             self.assertIn(step, out)  # each would be removed (or exported), had this been real
         self.assertIn("$ rm -rf", out)  # the clean, pushed clone would go
+
+    def fonts_out(self, manifest):
+        """uninstall.sh --dryrun --fonts with this install record (None: none, an old install)."""
+        path = os.path.join(self.home, ".local", "share", "iterm2-profile-manager", "installed.txt")
+        if manifest is not None:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as f:
+                f.write("".join(f"{line}\n" for line in manifest))
+        self.set_prefs()
+        return self.run_script("uninstall.sh", "--dryrun", "--fonts")
+
+    def test_uninstall_fonts_removes_only_what_setup_installed(self):
+        fonts = os.path.join(self.home, "Library", "Fonts")
+        if not os.listdir(fonts):
+            self.skipTest("no Terminal.app fonts on this Mac")
+        name = os.listdir(fonts)[0]  # a copy identical to Terminal's
+        self.assertIn(f"$ rm -f {fonts}/{name}", self.fonts_out([f"font {name}"]))
+        out = self.fonts_out(["font some-other.otf"])  # setup didn't install this one
+        self.assertIn(f"{name}: not in setup.sh's record; left alone", out)
+        self.assertNotIn(f"rm -f {fonts}/{name}", out)
+        self.assertIn("not installed by setup.sh; left alone", out)  # nor the Homebrew font
+
+    def test_uninstall_fonts_without_a_record_leaves_everything(self):
+        fonts = os.path.join(self.home, "Library", "Fonts")
+        if not os.listdir(fonts):
+            self.skipTest("no Terminal.app fonts on this Mac")
+        out = self.fonts_out(None)  # an install from before setup.sh kept a record
+        self.assertIn("no record of what setup.sh installed", out)
+        self.assertNotIn(f"$ rm -f {fonts}/", out)
+        self.assertNotIn("$ brew uninstall", out)
+
+    def test_uninstall_fonts_keeps_the_record_of_what_it_left(self):
+        fonts = os.path.join(self.home, "Library", "Fonts")
+        if not os.listdir(fonts):
+            self.skipTest("no Terminal.app fonts on this Mac")
+        name = os.listdir(fonts)[0]
+        with open(os.path.join(fonts, name), "ab") as f:
+            f.write(b"edited")  # changed since setup.sh copied it
+        out = self.fonts_out([f"font {name}"])
+        self.assertIn(f"{name}: changed since setup.sh installed it; left alone", out)
+        self.assertNotIn("installed.txt", out)  # the record isn't deleted: it still lists it
+
+    def test_uninstall_data_keeps_a_copy_and_files_of_yours(self):
+        data = os.path.join(self.home, ".local", "share", "iterm2-color-schemes")
+        mine = [
+            os.path.join(data, "backups", "manual-before-upgrade.db"),
+            os.path.join(data, "notes.txt"),
+        ]
+        for path in mine:
+            open(path, "w").close()
+        self.set_prefs()
+        out = self.run_script("uninstall.sh", "--dryrun", "--data")
+        self.assertRegex(out, r"srcp-curation-\d{8}-\d{6}\.db")  # the copy beside the export
+        self.assertIn(f"$ rm -f {data}/backups/schemes-20260101T000000Z.db", out)
+        self.assertNotIn("rm -rf", out)
+        for path in mine:
+            self.assertIn(f"left in place: {path}", out)
+
+    def test_uninstall_data_with_nothing_to_keep_deletes_nothing(self):
+        data = os.path.join(self.home, ".local", "share", "iterm2-color-schemes")
+        os.remove(os.path.join(data, "schemes.db"))
+        backups = os.path.join(data, "backups")
+        os.rename(
+            os.path.join(backups, "schemes-20260101T000000Z.db"),
+            os.path.join(backups, "schemes-29990101T000000Z.db"),  # dated in the future
+        )
+        self.set_prefs()
+        out = self.run_script("uninstall.sh", "--dryrun", "--data")
+        self.assertIn("no snapshot to keep", out)
+        self.assertNotIn("$ rm -f", out.split("==> Scheme DB")[1])
 
     def test_dry_runs_when_the_checkout_is_the_scripts_folder(self):
         support = os.path.join(self.home, "Library", "Application Support", "iTerm2")
