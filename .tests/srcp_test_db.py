@@ -531,7 +531,8 @@ class MigrationTest(DbTest):
 
 
 class OldSchemaTest(DbTest):
-    """A DB older than srcp_schema.MIN_SCHEMA: one message to rebuild, then it just works."""
+    """Store._connect's checks: an older or newer schema, a damaged file, a busy DB. Each gets
+    one message saying what to do, then it just works once that's done."""
 
     def make_old(self):
         """This DB as the build before the newest step left it (only the version is behind:
@@ -565,6 +566,35 @@ class OldSchemaTest(DbTest):
             fixes, _built_hash = asyncio.run(store.call(look_fixes, "Murky"))
         self.assertIsNotNone(fixes)
         self.assertNotIn("old-schema", self.main["_warned"])
+
+    def test_a_db_locked_at_connect_is_busy_not_damaged_and_reconnects_next_call(self):
+        real = sqlite3.connect
+
+        def quick(*args, **kwargs):  # the script's 5 s busy wait, made short
+            return real(*args, **{**kwargs, "timeout": 0.1})
+
+        patch = mock.patch.object(sqlite3, "connect", quick)
+        patch.start()
+        self.addCleanup(patch.stop)
+        holder = real(self.db_path, isolation_level=None)
+        self.addCleanup(holder.close)
+        # Another process holding the file: in WAL mode, locking_mode EXCLUSIVE plus one read
+        # locks others out, and only closing lets go.
+        holder.execute("PRAGMA locking_mode = EXCLUSIVE")
+        holder.execute("SELECT count(*) FROM schemes")
+        store = self.main["Store"](self.db_path)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertIsNone(asyncio.run(store.call(self.main["look_fixes"], "Murky")))
+        self.assertIn("DB look_fixes: database is locked", out.getvalue())
+        self.assertNotIn("is damaged", out.getvalue())  # busy is not damage
+        self.assertNotIn("bad-db", self.main["_warned"])
+        holder.close()
+        again = io.StringIO()
+        with contextlib.redirect_stdout(again):
+            got = asyncio.run(store.call(self.main["look_fixes"], "Murky"))
+        expected = self.main["look_fixes"](self.db, "Murky")  # what a working call returns
+        self.assertEqual(got, expected, again.getvalue())
 
     def test_a_file_that_isnt_a_db_is_reported_once(self):
         path = os.path.join(self.tmp, "not-a-db.db")
