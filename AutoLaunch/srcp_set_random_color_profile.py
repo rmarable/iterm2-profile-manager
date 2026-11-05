@@ -53,7 +53,6 @@ try:
         DB_PATH,
         FIX_ON_SQL,
         FONT_DIRS,
-        REBUILD,
         SEED_CONFIG,
         SEED_FONTS,
         UNHIDE,
@@ -72,7 +71,7 @@ except ImportError as e:
     )
     sys.exit(1)
 
-VERSION = "0.12.1"  # bump on every change, so the Console shows which code is running
+VERSION = "0.12.2"  # bump on every change, so the Console shows which code is running
 LOCK_PATH = os.path.join(DATA_DIR, ".lock")
 # How often the running script checks whether a snapshot is due. asyncio's clock stops while
 # the Mac sleeps, so check often (it's a few file stats) to keep it close to daily.
@@ -194,7 +193,11 @@ class Store:
                 db.close()
                 if is_busy(e):
                     raise
-                warn_once("bad-db", f"{self.path} can't be read ({e}); rebuild it: {REBUILD}")
+                warn_once(
+                    "bad-db",
+                    f"{self.path} is damaged ({e}); restore a snapshot: docs/REFERENCE.md, "
+                    "Restore (the build refuses it too)",
+                )
                 return None
             if problem:
                 db.close()

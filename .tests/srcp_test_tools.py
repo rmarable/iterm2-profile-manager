@@ -518,7 +518,8 @@ class ShellDryRunTest(unittest.TestCase):
             plistlib.dump({"Profiles": []}, f)
         data = os.path.join(self.home, ".local", "share", "iterm2-color-schemes")
         os.makedirs(os.path.join(data, "backups"))
-        sqlite3.connect(os.path.join(data, "schemes.db")).close()
+        with contextlib.closing(sqlite3.connect(os.path.join(data, "schemes.db"))) as db:
+            db.execute("CREATE TABLE t (x)")  # not empty: the build refuses a 0-byte DB
         sqlite3.connect(os.path.join(data, "backups", "schemes-20260101T000000Z.db")).close()
         os.makedirs(os.path.join(self.home, "Library", "Fonts"))
         terminal = sorted(os.listdir(TERMINAL_FONTS)) if os.path.isdir(TERMINAL_FONTS) else []

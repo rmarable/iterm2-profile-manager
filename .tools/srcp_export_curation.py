@@ -75,6 +75,8 @@ def export(db, out):
     out.write("-- Restore: sqlite3 ~/.local/share/iterm2-color-schemes/schemes.db < this-file\n")
     # sqlite3 runs dot-commands from its input: stop at the first error instead of half-applying.
     out.write(".bail on\n")
+    # sqlite3's busy timeout is 0: a save or snapshot writing meanwhile would fail the restore.
+    out.write(".timeout 5000\n")
     out.write(
         f"-- A 'CHECK constraint failed' here means the DB is older than schema {version}:\n"
         "-- rebuild it first (python3 .tools/srcp_build_scheme_db.py), then restore again. If the\n"

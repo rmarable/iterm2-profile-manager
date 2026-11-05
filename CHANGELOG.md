@@ -4,7 +4,9 @@ What changed for someone using iTerm2 Profile Manager, newest first. Releases up
 
 ## Unreleased
 
-- After updating, run `python3 .tools/srcp_build_scheme_db.py` once (the database is now schema 8), then restart the main script from the Scripts menu or relaunch iTerm2. Until it's restarted, a main script from before the update would treat about 180 presets as changed and leave them unadjusted.
+- The database build refuses a damaged database, with a sentence on how to restore a snapshot, instead of stopping with an error after copying the damage into `backups/`, where it could push a good snapshot out.
+- Restoring a curation export (`sqlite3 schemes.db < srcp-curation-….sql`) waits up to 5 seconds for the main script to finish a write, instead of failing with "database is locked".
+- After updating, run `./setup.sh` (with iTerm2 quit, from Terminal.app) or just `python3 .tools/srcp_build_scheme_db.py` once (the database is now schema 8), then restart the main script from the Scripts menu or relaunch iTerm2. Until it's restarted, a main script from before the update would treat about 180 presets as changed and leave them unadjusted.
 - From this version on, a main script still running from before an update says to restart it, instead of reading a database built by newer code.
 - Presets whose colors have no color space, or "Calibrated" (about 180 of the repo's), are judged and adjusted as iTerm2 actually draws them, in Apple's Generic RGB, instead of as sRGB. Most of them are dark themes that need fewer adjustments now; a few, like Violet Light and Grass, are now adjusted more or judged harder to read.
 - The Scripts menu's **srcp_score_presets.py** scores those presets as they look too. It now needs `.tools/srcp_schema.py` (`setup.sh` installs it) and says so instead of scoring without it.

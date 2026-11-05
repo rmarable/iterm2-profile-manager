@@ -231,7 +231,14 @@ def connect(path, timeout=5.0):
 def main():
     ap = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
     ap.add_argument("--mode", choices=["light", "dark"], help="only favorites of this mode")
-    ap.add_argument("--min-stars", type=int, default=1, choices=range(1, 6), metavar="N")
+    ap.add_argument(
+        "--min-stars",
+        type=int,
+        default=1,
+        choices=range(1, 6),
+        metavar="N",
+        help="only favorites rated at least N stars (1-5; default 1)",
+    )
     ap.add_argument(
         "--history", type=int, nargs="?", const=30, metavar="N", help="last N rating changes"
     )

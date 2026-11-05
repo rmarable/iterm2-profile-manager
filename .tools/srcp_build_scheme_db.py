@@ -39,6 +39,7 @@ from srcp_schema import (  # shared with the main script and srcp_favorites.py
     encode_srgb,
     from_srgb,
     in_gamut,
+    is_busy,
     linear,
     relative_luminance,
     schema_problem,
@@ -740,6 +741,41 @@ def warn_included_duplicates(path):
         db.close()
 
 
+def check_existing_db(path):
+    """Exit, changing nothing, if the DB at path is damaged or newer than this script."""
+    version, check = 0, "ok"
+    if os.path.getsize(path) == 0:  # SQLite would take it as a new, empty DB: data gone
+        check = "the file is empty"
+    db = sqlite3.connect(path)
+    try:
+        if check != "ok":
+            raise sqlite3.DatabaseError(check)
+        version = db.execute("PRAGMA user_version").fetchone()[0]
+        # Before the snapshot: a copy of a damaged DB would push a good snapshot out.
+        check = db.execute("PRAGMA quick_check").fetchone()[0]
+    except sqlite3.DatabaseError as e:
+        if is_busy(e):
+            raise
+        check = str(e)
+    finally:
+        db.close()
+    if check != "ok":
+        detail = " ".join(check.split())[:160]  # quick_check's report can run many lines
+        sys.exit(
+            f"{path} is damaged ({detail}), so it was left as is, with no snapshot. Quit "
+            "iTerm2, move it and any -wal/-shm files beside it out of the way, copy the "
+            "newest snapshot from backups/ in its place (docs/REFERENCE.md, Restore) and "
+            "run this again; if it refuses that one too, try the next older snapshot. With "
+            "no snapshot, move it away and run this for a fresh "
+            "database, then restore an export (srcp-curation-*.sql) if you have one."
+        )
+    if version > len(MIGRATIONS):  # a rebuild here would recreate schemes in an older shape
+        sys.exit(
+            f"{path} is schema {version}, newer than this script ({len(MIGRATIONS)}). "
+            "Update this checkout (git pull) and run it again."
+        )
+
+
 def main():
     ap = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
     ap.add_argument(
@@ -765,16 +801,7 @@ def main():
         )
 
     if os.path.exists(args.db):
-        db = sqlite3.connect(args.db)
-        try:
-            version = db.execute("PRAGMA user_version").fetchone()[0]
-        finally:
-            db.close()
-        if version > len(MIGRATIONS):  # a rebuild here would recreate schemes in an older shape
-            sys.exit(
-                f"{args.db} is schema {version}, newer than this script ({len(MIGRATIONS)}). "
-                "Update this checkout (git pull) and run it again."
-            )
+        check_existing_db(args.db)
 
     # The DB checks above come first: they need no prefs and fail fast.
     presets = load_prefs().get(KEY, {})

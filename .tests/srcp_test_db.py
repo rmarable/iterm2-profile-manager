@@ -25,6 +25,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import types
 import unittest
@@ -363,6 +364,42 @@ class BuildTest(DbTest):
         self.assertEqual(fonts["Monaco"], (1, 0))
 
 
+class DamagedDbTest(DbTest):
+    def build_cli(self, path):
+        return subprocess.run(
+            [sys.executable, "-I", BUILD, "--db", path],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+        )
+
+    def test_a_damaged_db_is_left_alone_with_no_snapshot(self):
+        junk = os.path.join(self.tmp, "junk", "schemes.db")
+        os.makedirs(os.path.dirname(junk))
+        with open(junk, "wb") as f:
+            f.write(b"not a database " * 300)
+        broken = os.path.join(self.tmp, "broken", "schemes.db")
+        os.makedirs(os.path.dirname(broken))
+        self.db.close()
+        with open(self.db_path, "rb") as f:
+            data = bytearray(f.read())
+        data[4096:8192] = b"\xff" * 4096  # a page of a real DB overwritten
+        with open(broken, "wb") as f:
+            f.write(data)
+        empty = os.path.join(self.tmp, "empty", "schemes.db")
+        os.makedirs(os.path.dirname(empty))
+        open(empty, "w").close()  # SQLite would open it as a new DB: the data's gone
+        for path in (junk, broken, empty):
+            with self.subTest(path=path):
+                result = self.build_cli(path)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("is damaged", result.stderr)
+                self.assertIn("Restore", result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+                self.assertFalse(os.path.exists(os.path.join(os.path.dirname(path), "backups")))
+
+
 class RepoModeTest(DbTest):
     def test_the_repos_yaml_variant_decides_the_mode(self):
         self.assertEqual(self.scheme("Dark One")[0], "dark")  # by luminance
@@ -538,7 +575,8 @@ class OldSchemaTest(DbTest):
         with contextlib.redirect_stdout(out):
             for _ in range(3):
                 self.assertIsNone(asyncio.run(store.call(self.main["look_fixes"], "Murky")))
-        self.assertEqual(out.getvalue().count("can't be read"), 1)
+        self.assertEqual(out.getvalue().count("is damaged"), 1)
+        self.assertIn("restore a snapshot", out.getvalue())
 
     def test_the_build_doesnt_compare_an_old_dbs_fixes(self):
         self.main["save_favorite"](self.db, "Murky", "Monaco", 13, 3)
@@ -1127,6 +1165,22 @@ class ExportTest(DbTest):
         self.assertEqual(db.execute("SELECT stars FROM favorites").fetchall(), [(4,)])
         enabled = db.execute("SELECT enabled FROM fonts WHERE name = 'Other-Regular'")
         self.assertEqual(enabled.fetchone(), (0,))
+
+    def test_a_restore_waits_for_a_busy_db_instead_of_failing(self):
+        sql = self.export()
+        self.assertLess(sql.index(".bail on"), sql.index(".timeout 5000"))
+        self.assertLess(sql.index(".timeout 5000"), sql.index("BEGIN;"))
+        target = os.path.join(self.tmp, "target", "schemes.db")
+        with contextlib.redirect_stdout(io.StringIO()):
+            rows, _ = build.build_rows(PRESETS, self.repo)
+            build.write_db(target, rows)
+        busy = sqlite3.connect(target, isolation_level=None, check_same_thread=False)
+        self.addCleanup(busy.close)
+        busy.execute("BEGIN IMMEDIATE")  # a save or snapshot writing right now
+        writer = threading.Timer(0.3, lambda: busy.execute("COMMIT"))
+        writer.start()
+        self.addCleanup(writer.join)  # before busy.close (cleanups run last-added first)
+        self.restore(sql, target)  # waits for the writer, then goes through
 
     def test_a_name_with_a_quote_restores(self):
         self.main["save_favorite"](self.db, "O'Hara", "Monaco", 13, 5)

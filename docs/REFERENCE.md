@@ -255,7 +255,7 @@ cp .tools/srcp_favorites.py .tools/srcp_popup.py .tools/srcp_popup.js \
    ~/Library/Application\ Support/iTerm2/Scripts/.tools/                  # the main script needs the last three
 ```
 
-Every tool that writes takes `--dryrun`. Manual key binding: Settings → Keys → Key Bindings → **+**, shortcut ⌃⌥⌘S, action **Invoke Script Function**, function `save_profile()`.
+Every tool that changes iTerm2's settings takes `--dryrun`, and so does the build; `srcp_favorites.py --show-again` writes the database at once (otherwise `srcp_favorites.py`, `srcp_odds.py` and `srcp_export_curation.py` only read it). Manual key binding: Settings → Keys → Key Bindings → **+**, shortcut ⌃⌥⌘S, action **Invoke Script Function**, function `save_profile()`.
 
 Double-clicking an `.itermcolors` file also imports it, with one dialog per file.
 
@@ -302,7 +302,7 @@ Double-clicking an `.itermcolors` file also imports it, with one dialog per file
 
 | Table or view | Contents |
 |---|---|
-| `schemes` | One row per installed preset: `mode`, `mode_source`, `fg_contrast`, `accent_contrast`, `distinct_accents`, `monochrome`, `passes_gate`, `duplicate_of`, `bg_chroma`, `fixes` (JSON `{key: [r, g, b, contrast before, contrast after]}`, or NULL), `fix_count`, `passes_gate_fixed` (the checks on the adjusted colors). Rebuilt by `srcp_build_scheme_db.py`. |
+| `schemes` | One row per installed preset: `mode`, `mode_source`, `fg_contrast`, `accent_contrast`, `distinct_accents`, `monochrome`, `passes_gate`, `in_repo` (1: the schemes repo has this preset), `color_hash` (of its colors as built: a tab or profile gets `fixes` only while the installed preset still matches), `duplicate_of`, `bg_chroma`, `fixes` (JSON `{key: [r, g, b, contrast before, contrast after]}`, or NULL), `fix_count`, `passes_gate_fixed` (the checks on the adjusted colors). Rebuilt by `srcp_build_scheme_db.py`. |
 | `overrides` | `name`, `mode` (force light/dark), `include` (1 = always pick, 0 = never). Seeded with 6 near-miss presets forced in. |
 | `config` | Settings (see [Configuration](#configuration)). |
 | `fonts` | `name` (PostScript name), `enabled`, `label`, `missing` (1: disabled only because its file wasn't found; a rebuild enables it once it is). |
@@ -325,6 +325,15 @@ select name, fg_contrast, accent_contrast, distinct_accents from schemes where p
 select name, fix_count from schemes where fix_count > 0 order by fix_count desc limit 20;  -- most adjusted
 select s.name, j.key, j.value from schemes s, json_each(s.fixes) j where s.name = 'Coffee Theme';
 select * from favorites where preset not in (select name from schemes);  -- favorites whose preset is gone
+```
+
+### Trimming launches
+
+`launches` grows by one row per tab (a few hundred bytes with its indexes) and is never trimmed, and each of the 14 snapshots carries a copy. To drop old history, run the line below (`launched_at` is UTC, as `datetime('now')` is). Its `.timeout` lets a save or snapshot in progress finish first: `VACUUM` fails on a write in flight. Nothing else needs changing: the launch stats just start later.
+
+```sh
+sqlite3 -cmd ".timeout 5000" ~/.local/share/iterm2-color-schemes/schemes.db \
+  "DELETE FROM launches WHERE launched_at < datetime('now', '-365 days'); VACUUM;"
 ```
 
 ## Development
