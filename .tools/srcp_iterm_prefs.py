@@ -31,6 +31,20 @@ def custom_folder(prefs):
     return None
 
 
+def live_custom_folder():
+    """custom_folder() of the prefs as they are now, read key by key: a full export is ~7 MB."""
+
+    def read(key):
+        out = subprocess.run(
+            ["defaults", "read", DOMAIN, key], capture_output=True, text=True, check=False
+        )
+        return out.stdout.strip() if out.returncode == 0 else None  # 1: the key isn't set
+
+    if read("LoadPrefsFromCustomFolder") not in ("1", "YES", "true"):
+        return None
+    return read("PrefsCustomFolder") or "unknown location"
+
+
 def iterm_app():
     """iTerm.app's path: $ITERM_APP, else the first of APP_DIRS that exists."""
     return os.environ.get("ITERM_APP") or next(
@@ -50,14 +64,32 @@ def load_prefs():
     )
 
 
-def save_prefs(prefs, delete=()):
-    """Back up the current prefs, write `prefs`, and return the backup path.
+def save_prefs(prefs, keys, delete=()):
+    """Back up the current prefs, write prefs[k] for each top-level key in `keys`, delete the
+    top-level keys in `delete`, and return the backup path.
 
-    `defaults import` merges top-level keys and never removes one, so a key dropped from
-    `prefs` stays; name the top-level keys to remove in `delete`.
+    Only the named keys are written, so a change iTerm2 or anything else made to another key
+    since `prefs` was loaded survives. `defaults import` merges top-level keys: one it isn't
+    given stays as it is, and one it is given is replaced whole (checked on a scratch domain,
+    2026-11-05). A change made to a named key since loading is still lost; callers keep the
+    gap short and check iterm_running() first, and this checks it again just before writing.
     """
+    keys, delete = list(keys), list(delete)
+    unknown = [k for k in keys if k not in prefs]
+    both = set(keys) & set(delete)
+    if unknown or both:
+        problems = [f"not in prefs: {unknown}"] if unknown else []
+        problems += [f"in both keys and delete: {sorted(both)}"] if both else []
+        raise ValueError("save_prefs: keys " + "; ".join(problems))
+    # The prefs the caller loaded, then (after iTerm2 may have been opened and the setting
+    # turned on since) the live ones. Every writer comes through here; setup.sh and
+    # uninstall.sh check up front too.
     folder = custom_folder(prefs)
-    if folder:  # every writer comes through here; setup.sh and uninstall.sh check earlier too
+    if not folder:
+        if iterm_running():  # iTerm2 rewrites its prefs when it quits
+            raise SystemExit(QUIT_FIRST)
+        folder = live_custom_folder()
+    if folder:
         raise SystemExit(CUSTOM_FOLDER.format(folder))
     os.makedirs(BACKUP_DIR, exist_ok=True)
     stem = os.path.join(BACKUP_DIR, f"{DOMAIN}-{time.strftime('%Y%m%d-%H%M%S')}")
@@ -65,11 +97,12 @@ def save_prefs(prefs, delete=()):
     while os.path.exists(backup):  # two writers in one setup.sh run can share a second
         backup, n = f"{stem}-{n}.plist", n + 1
     subprocess.run(["defaults", "export", DOMAIN, backup], check=True)
-    subprocess.run(
-        ["defaults", "import", DOMAIN, "-"],
-        input=plistlib.dumps(prefs, fmt=plistlib.FMT_BINARY),
-        check=True,
-    )
+    if keys:
+        subprocess.run(
+            ["defaults", "import", DOMAIN, "-"],
+            input=plistlib.dumps({k: prefs[k] for k in keys}, fmt=plistlib.FMT_BINARY),
+            check=True,
+        )
     for key in delete:
         subprocess.run(["defaults", "delete", DOMAIN, key], check=True)
     old = sorted(glob.glob(os.path.join(BACKUP_DIR, f"{DOMAIN}-*.plist")), key=os.path.getmtime)

@@ -72,7 +72,7 @@ def main():
         return
     keymap[BINDING_KEY] = BINDING
     prefs[KEY_MAP] = keymap
-    print(f"  Backup of previous iTerm2 prefs: {save_prefs(prefs)}")
+    print(f"  Backup of previous iTerm2 prefs: {save_prefs(prefs, [KEY_MAP])}")
 
 
 if __name__ == "__main__":

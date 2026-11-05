@@ -106,14 +106,15 @@ def main():
         sys.exit(QUIT_FIRST)
     prefs = load_prefs()
     delete = remove_key_binding(prefs)
-    changed = delete is not None
-    if args.presets:
-        changed = remove_presets(prefs, args.presets) or changed
-    if args.dry_run or not changed:
+    # None: no binding, so GlobalKeyMap is untouched; []: it changed; [KEY_MAP]: delete it.
+    keys = [KEY_MAP] if delete == [] else []
+    if args.presets and remove_presets(prefs, args.presets):
+        keys.append(PRESETS)
+    if args.dry_run or not (keys or delete):
         if args.dry_run:
             print("  (dry run: nothing written)")
         return
-    print(f"  Backup of previous iTerm2 prefs: {save_prefs(prefs, delete or ())}")
+    print(f"  Backup of previous iTerm2 prefs: {save_prefs(prefs, keys, delete or ())}")
 
 
 if __name__ == "__main__":

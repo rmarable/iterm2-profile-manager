@@ -125,7 +125,7 @@ Quit iTerm2, then from Terminal.app in the repo:
 | Database, snapshots, launch history (ratings exported to `~/srcp-curation-<time>.sql` first) | `--data` |
 | Presets matching the repo's files, current or earlier versions (edited ones are kept) | `--presets` |
 | Copied Terminal.app fonts; MesloLGS Homebrew package | `--fonts` |
-| iTerm2-Color-Schemes clone | `--repo` |
+| iTerm2-Color-Schemes clone (kept if it has changes, commits or stashes of yours) | `--repo` |
 
 Kept: this repo, iTerm2 settings backups, shell config, and the Claude Code integration. Open sessions keep their colors until closed. Re-run `setup.sh` to reinstall.
 

@@ -2,6 +2,12 @@
 
 What changed for someone using iTerm2 Profile Manager, newest first. Releases up to v0.7.1 are described on [GitHub releases](https://github.com/rmarable/iterm2-profile-manager/releases).
 
+## Unreleased
+
+- Setup, uninstall and the other tools that change iTerm2's settings now write only the settings they change, and stop if iTerm2 was opened while they ran.
+- The database is backed up once a day even when iTerm2 stays open for days; before, the backup was taken only when iTerm2 started.
+- `./uninstall.sh --repo` keeps the iTerm2-Color-Schemes clone if it has changes, commits or stashes of yours.
+
 ## v0.9.0 (2026-11-04)
 
 - Colors that are hard to see against their background are adjusted a little in each new tab and in favorites' profiles, so most presets are readable: text, the main colors and their bright versions, and bright black (comments, shell suggestions). The presets themselves aren't edited, only what a tab shows. `config fix_colors = 0` turns it off.

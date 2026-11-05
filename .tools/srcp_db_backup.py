@@ -16,12 +16,24 @@ from pathlib import Path
 KEEP = 14
 
 
+def remove_stale_partials(folder, older_than_s=3600):
+    """Delete half-written copies a killed run left. Only old ones: the main script may be
+    writing its own snapshot right now."""
+    for path in glob.glob(os.path.join(folder, "schemes-*.db.partial")):
+        try:
+            if time.time() - os.path.getmtime(path) > older_than_s:
+                os.remove(path)
+        except FileNotFoundError:
+            pass
+
+
 def snapshot(db_path, keep=KEEP):
     """Copy db_path to backups/schemes-<UTC>.db; return the copy's path, or None if no DB."""
     if not os.path.exists(db_path):
         return None
     folder = os.path.join(os.path.dirname(db_path), "backups")
     os.makedirs(folder, exist_ok=True)
+    remove_stale_partials(folder)
     stem = os.path.join(folder, "schemes-" + time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()))
     dest, n = stem + ".db", 1
     while os.path.exists(dest):

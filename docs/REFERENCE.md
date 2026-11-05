@@ -151,7 +151,7 @@ insert into overrides (name, mode) values ('Some Scheme', 'dark')
 Snapshots of the database go to `backups/` beside it:
 
 - Before every rebuild
-- At main-script start, if the newest snapshot is over a day old
+- While the main script runs (at start, then every 15 minutes of awake time), if the newest snapshot is over a day old
 
 The newest 14 are kept; `manual-*.db` snapshots are never pruned. Preset data can be rebuilt from iTerm2's settings; snapshots protect favorites, ratings, hidden presets, launches and settings.
 
@@ -227,7 +227,7 @@ It doesn't touch iTerm2's AI chat settings or API key. `uninstall.sh` doesn't un
 
 ### Custom schemes folder
 
-`SRC_DIR=~/code ./setup.sh` clones the schemes repo into `~/code` instead of `~/src`. Set `SRC_DIR` again for later rebuilds and for `uninstall.sh --repo`; the database build reads the repo's light/dark labels from there.
+`SRC_DIR=~/code ./setup.sh` clones the schemes repo into `~/code` instead of `~/src`. Set `SRC_DIR` again for later rebuilds and for `uninstall.sh --repo`; the database build reads the repo's light/dark labels from there. `--repo` leaves the clone alone if `git status --porcelain --untracked-files=normal` shows anything, `git rev-list --all --not --remotes` finds commits (branches, `HEAD`, tags, stashes) no remote has, it has linked worktrees, or git fails.
 
 ### Clone into the Scripts folder
 
@@ -274,7 +274,7 @@ Double-clicking an `.itermcolors` file also imports it, with one dialog per file
 
 | Path | Purpose |
 |---|---|
-| `AutoLaunch/srcp_set_random_color_profile.py` | Main script. Starts with iTerm2; picks each session's look, logs launches, provides the rating dialog and right-click menu items, writes favorite profiles, takes daily snapshots. |
+| `AutoLaunch/srcp_set_random_color_profile.py` | Main script. Starts with iTerm2; picks each session's look, logs launches, provides the rating dialog and right-click menu items, writes favorite profiles, takes daily snapshots (checked every 15 minutes). |
 | `srcp_ratings.py` | Scripts menu: ratings window. |
 | `srcp_never_show.py` | Scripts menu: list Never show presets, show one again. |
 | `srcp_score_presets.py` | Scripts menu: ranks presets by saturation (report only). |
@@ -324,8 +324,9 @@ select * from favorites where preset not in (select name from schemes);  -- favo
 ## Development
 
 ```sh
-./lint.sh         # ruff format --check, ruff check, pyright, shellcheck
-./lint.sh --fix   # apply formatting and safe fixes first
+./lint.sh               # ruff format --check, ruff check, pyright, shellcheck, tests
+./lint.sh --fix         # apply formatting and safe fixes first
+./lint.sh --allow-skip  # pass even if pyright and the tests were skipped (no iTerm2 Python)
 ```
 
 Needs [uv](https://docs.astral.sh/uv/) and shellcheck (`brew install shellcheck`). Config: `pyproject.toml`, `AutoLaunch/ruff.toml` (Black style, 100 columns). Targets: `.tools/` Python 3.9 (`/usr/bin/python3`), everything else 3.12; pyright checks the main script against the real `iterm2` module.

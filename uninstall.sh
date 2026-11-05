@@ -12,7 +12,8 @@
 #              (current or earlier versions; ones you edited are kept)
 #   --fonts    remove Terminal.app fonts identical to Terminal's copies, and the
 #              MesloLGS Nerd Font Homebrew cask
-#   --repo     delete the iTerm2-Color-Schemes clone in $SRC_DIR (default ~/src)
+#   --repo     delete the iTerm2-Color-Schemes clone in $SRC_DIR (default ~/src), unless
+#              it holds changes, commits or stashes of yours
 #   --all      all of the above
 #
 # Run from Terminal.app with iTerm2 quit (it refuses otherwise):
@@ -30,7 +31,7 @@ for arg in "$@"; do
 	--repo) REPO=true ;;
 	--all) DATA=true PRESETS=true FONTS=true REPO=true ;;
 	-h | --help)
-		sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+		sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'
 		exit 0
 		;;
 	*)
@@ -60,6 +61,29 @@ fi
 run() {
 	echo "  \$ $*"
 	if ! $DRYRUN; then "$@"; fi
+}
+
+# Why a clone holds work of yours (empty if it holds none): uncommitted or untracked files
+# (even if git config hides untracked ones), commits no remote has (on a branch, HEAD, a tag
+# or a stash), or linked worktrees. A git error keeps the clone too. Read-only, so a dry run
+# reports it as well.
+repo_keep_reason() {
+	local dir="$1" out
+	# Keep git status from refreshing .git/index, so this stays strictly read-only.
+	local -x GIT_OPTIONAL_LOCKS=0
+	if ! out="$(git -C "$dir" status --porcelain --untracked-files=normal 2>/dev/null)"; then
+		echo "a state git couldn't check"
+	elif [[ -n "$out" ]]; then
+		echo "uncommitted or untracked changes"
+	elif ! out="$(git -C "$dir" rev-list --count --all --not --remotes 2>/dev/null)"; then
+		echo "a state git couldn't check"
+	elif ((out > 0)); then
+		echo "commits not on any remote (or stashes)"
+	elif ! out="$(git -C "$dir" worktree list --porcelain 2>/dev/null)"; then
+		echo "a state git couldn't check"
+	elif (($(grep -c '^worktree ' <<<"$out") > 1)); then
+		echo "linked worktrees"
+	fi
 }
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
@@ -179,7 +203,12 @@ fi
 if $REPO; then
 	echo "==> Schemes repo: $REPO_DIR"
 	if [[ -d "$REPO_DIR/.git" ]] && [[ "$(git -C "$REPO_DIR" remote get-url origin 2>/dev/null)" == "$REPO_URL" ]]; then
-		run rm -rf "$REPO_DIR"
+		keep="$(repo_keep_reason "$REPO_DIR")"
+		if [[ -n "$keep" ]]; then
+			echo "  ! $REPO_DIR has $keep; left alone"
+		else
+			run rm -rf "$REPO_DIR"
+		fi
 	elif [[ -d "$REPO_DIR" ]]; then
 		echo "  ! $REPO_DIR isn't a clone of $REPO_URL; left alone"
 	else

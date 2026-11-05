@@ -7,8 +7,10 @@ touches the real database or iTerm2's settings. lint.sh runs it with
 The dot keeps this folder out of iTerm2's Scripts menu, like .tools/.
 """
 
+import ast
 import asyncio
 import contextlib
+import glob
 import io
 import json
 import math
@@ -19,6 +21,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 import types
 import unittest
 from typing import ClassVar
@@ -39,16 +42,47 @@ import srcp_uninstall_prefs  # noqa: E402
 MAIN = os.path.join(ROOT, "AutoLaunch", "srcp_set_random_color_profile.py")
 
 
-def load_main(data_dir):
-    """The main script's functions, minus run_forever, with its paths under data_dir."""
+BUILD = os.path.join(ROOT, ".tools", "srcp_build_scheme_db.py")
+RUN_FOREVER = "iterm2.run_forever(main)"
+
+
+def module_literal(path, name):
+    """The value of a top-level `name = <literal>` in the file at path."""
+    with open(path) as f:
+        tree = ast.parse(f.read())
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and [getattr(t, "id", None) for t in node.targets] == [
+            name
+        ]:
+            return ast.literal_eval(node.value)
+    raise AssertionError(f"no {name} = ... in {path}")
+
+
+# The main script's own paths; load_main points every one of them into the temp folder.
+MAIN_PATHS = ("DATA_DIR", "DB_PATH", "LOCK_PATH", "DYNAMIC_PATH", "FONT_DIRS")
+
+
+def load_main(data_dir, font_dir):
+    """The main script's functions, minus run_forever, with its paths under data_dir.
+
+    HOME points into the temp folder while the source runs, so a path the script expands at
+    import time can't reach the real one even before the overrides below.
+    """
     with open(MAIN) as f:
-        source = f.read().replace("iterm2.run_forever(main)", "")
+        source = f.read()
+    # If the line were reworded, exec would start the script for real.
+    if source.count(RUN_FOREVER) != 1:
+        raise AssertionError(f"{MAIN} should contain {RUN_FOREVER!r} exactly once")
+    source = source.replace(RUN_FOREVER, "")
     ns = {"__name__": "srcp_main", "__file__": MAIN}
-    exec(compile(source, MAIN, "exec"), ns)  # noqa: S102  (our own script, read from the repo)
+    home = os.path.join(data_dir, "home")
+    with mock.patch.dict(os.environ, {"HOME": home}):
+        exec(compile(source, MAIN, "exec"), ns)  # noqa: S102  (our own script, read from the repo)
     ns["DATA_DIR"] = data_dir
     ns["DB_PATH"] = os.path.join(data_dir, "schemes.db")
     ns["LOCK_PATH"] = os.path.join(data_dir, ".lock")
     ns["DYNAMIC_PATH"] = os.path.join(data_dir, "dynamic.plist")
+    ns["FONT_DIRS"] = [font_dir]
     return ns
 
 
@@ -86,6 +120,57 @@ PRESETS = {
 REPO_NAMES = ["Dark One", "Dark Two", "Dark Two Copy", "Light One", "Yellow", "Murky"]
 
 
+def fake_defaults(test, live=None, running=False):
+    """Swap srcp_iterm_prefs' subprocess for a recorder; return the list of (argv, input).
+
+    `live` is the prefs as they are now (what `defaults export DOMAIN -` and `defaults read
+    DOMAIN key` see); `running` is whether ps shows iTerm2. Prefs backups go to a temp
+    folder. Nothing reaches the real defaults or ps; test.addCleanup restores both.
+    """
+    calls = []
+    live = {} if live is None else live
+
+    def run(argv, **kwargs):
+        calls.append((argv, kwargs.get("input")))
+        if argv[0] == "ps":
+            out = "/Applications/iTerm.app/Contents/MacOS/iTerm2\n" if running else "zsh\n"
+            return types.SimpleNamespace(stdout=out, returncode=0)
+        if argv[:2] == ["defaults", "read"]:
+            if argv[3] not in live:
+                return types.SimpleNamespace(stdout="", returncode=1)
+            value = live[argv[3]]
+            text = str(int(value)) if isinstance(value, bool) else str(value)
+            return types.SimpleNamespace(stdout=text + "\n", returncode=0)
+        if argv[:2] == ["defaults", "export"] and argv[3] == "-":
+            return types.SimpleNamespace(stdout=plistlib.dumps(live), returncode=0)
+        if argv[:2] == ["defaults", "export"]:  # the backup
+            with open(argv[3], "wb") as f:
+                plistlib.dump(live, f)
+        return types.SimpleNamespace(stdout="", returncode=0)
+
+    real_sub, real_dir = srcp_iterm_prefs.subprocess, srcp_iterm_prefs.BACKUP_DIR
+    srcp_iterm_prefs.subprocess = types.SimpleNamespace(run=run)
+    tmp = tempfile.mkdtemp(prefix="srcp-prefs-")
+    srcp_iterm_prefs.BACKUP_DIR = os.path.join(tmp, "prefs-backups")
+    test.addCleanup(setattr, srcp_iterm_prefs, "subprocess", real_sub)
+    test.addCleanup(setattr, srcp_iterm_prefs, "BACKUP_DIR", real_dir)
+    test.addCleanup(shutil.rmtree, tmp)
+    return calls
+
+
+def defaults_writes(calls):
+    """The calls from fake_defaults that change prefs: (verb, rest of argv, input)."""
+    return [
+        (argv[1], argv[3:], data)
+        for argv, data in calls
+        if argv[0] == "defaults" and argv[1] not in ("export", "read")
+    ]
+
+
+class Stop(Exception):
+    """Ends a forever-loop under test."""
+
+
 class FakePreset(str):
     """What get_preset returns in the tests: the preset's name, with no colors to adjust."""
 
@@ -103,8 +188,17 @@ class DbTest(unittest.TestCase):
                 plistlib.dump(PRESETS[name], f)
         self.data = os.path.join(self.tmp, "data")
         self.db_path = os.path.join(self.data, "schemes.db")
+        # Every seeded font "installed" in a temp folder, so results don't depend on this Mac.
+        # Not tmp/fonts: install_fonts and some tests rebuild that one.
+        self.sysfonts = os.path.join(self.tmp, "sysfonts")
+        os.makedirs(self.sysfonts)
+        for files in build.SEED_FONTS.values():
+            open(os.path.join(self.sysfonts, files[0]), "w").close()
+        patch = mock.patch.object(build, "FONT_DIRS", [self.sysfonts])
+        patch.start()
+        self.addCleanup(patch.stop)
         self.build()
-        self.main = load_main(self.data)
+        self.main = load_main(self.data, self.sysfonts)
         self.db = sqlite3.connect(self.db_path, isolation_level=None)
         self.addCleanup(self.db.close)
 
@@ -171,9 +265,32 @@ class BuildTest(DbTest):
         self.assertEqual(seeded, {k: float(v) for k, v in self.main["DEFAULT_CONFIG"].items()})
         self.assertEqual(build.SEED_CONFIG["nonascii_font"], self.main["DEFAULT_NONASCII_FONT"])
         self.assertEqual(self.main["BACKUP_KEEP"], srcp_db_backup.KEEP)
-        self.assertEqual(self.main["FONT_DIRS"], build.FONT_DIRS)
+        # Both are patched to temp folders here, so compare the values written in the files.
+        self.assertEqual(module_literal(MAIN, "FONT_DIRS"), module_literal(BUILD, "FONT_DIRS"))
         nonascii = self.main["DEFAULT_NONASCII_FONT"]
         self.assertEqual(self.main["NONASCII_FONT_FILES"], build.SEED_FONTS[nonascii])
+
+    def test_load_main_paths_stay_in_the_temp_folder(self):
+        for name in MAIN_PATHS:
+            value = self.main[name]
+            for path in value if isinstance(value, list) else [value]:
+                self.assertTrue(path.startswith(self.tmp), f"{name} = {path!r}")
+        # Every other path the script holds too, so a new one under ~ can't reach the real
+        # home: HOME pointed into the temp folder while its source ran.
+        home = os.path.expanduser("~")
+        for name, value in self.main.items():
+            if name.startswith("__"):  # __file__ is the real checkout, on purpose
+                continue
+            for item in value if isinstance(value, (list, tuple)) else [value]:
+                if isinstance(item, str):
+                    self.assertFalse(item.startswith(home + os.sep), f"{name} = {item!r}")
+
+    def test_load_main_refuses_a_reworded_run_forever_line(self):
+        with open(MAIN) as f:
+            reworded = f.read().replace(RUN_FOREVER, "iterm2.run_forever(main, retry=True)")
+        fake_open = mock.mock_open(read_data=reworded)
+        with mock.patch("builtins.open", fake_open), self.assertRaises(AssertionError):
+            load_main(self.data, self.sysfonts)
 
     def fonts(self):
         return {
@@ -397,6 +514,84 @@ class MainScriptTest(DbTest):
         guid = self.main["favorite_guid"]("Dark One", "Monaco")
         self.assertEqual(guid, self.main["favorite_guid"]("Dark One", "Monaco"))
         self.assertNotEqual(guid, self.main["favorite_guid"]("Dark One", "Menlo-Regular"))
+
+
+class SnapshotTest(DbTest):
+    def snapshots(self):
+        return sorted(glob.glob(os.path.join(self.data, "backups", "schemes-*.db")))
+
+    def run_ticks(self, store, before_each):
+        """Run snapshot_periodically for len(before_each) ticks, calling before_each[i]() first."""
+        ticks = iter(before_each)
+
+        async def sleep(_seconds):
+            step = next(ticks, None)
+            if step is None:
+                raise Stop
+            step()
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(Stop):
+            asyncio.run(self.main["snapshot_periodically"](store, 0, sleep))
+        return out.getvalue()
+
+    def backdate(self):
+        """Make every snapshot 25 hours old, by name and by mtime (either may be read)."""
+        day_ago = time.time() - 25 * 3600
+        stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(day_ago))
+        for i, path in enumerate(self.snapshots()):
+            old = os.path.join(os.path.dirname(path), f"schemes-{stamp}-{i + 100}.db")
+            os.rename(path, old)
+            os.utime(old, (day_ago, day_ago))
+
+    def test_snapshots_keep_coming_while_iterm2_stays_open(self):
+        store = self.main["Store"](self.db_path)
+        before = len(self.snapshots())
+        nothing = lambda: None  # noqa: E731
+        self.run_ticks(store, [self.backdate, nothing, self.backdate])
+        # Tick 1: due (none, or a day old); tick 2: one is fresh, so none; tick 3: due again.
+        self.assertEqual(len(self.snapshots()), before + 2)
+
+    def test_only_old_partial_copies_are_cleaned_up(self):
+        copies = {
+            "main": self.main["remove_stale_partials"],
+            "db_backup": srcp_db_backup.remove_stale_partials,
+        }
+        for name, remove in copies.items():  # each in its own folder, so each is tested
+            with self.subTest(copy=name):
+                folder = os.path.join(self.tmp, f"partials-{name}")
+                os.makedirs(folder)
+                old, fresh = (os.path.join(folder, f"schemes-{n}.db.partial") for n in "ab")
+                for path in (old, fresh):
+                    open(path, "w").close()
+                two_hours_ago = time.time() - 7200
+                os.utime(old, (two_hours_ago, two_hours_ago))
+                remove(folder)
+                self.assertEqual(os.listdir(folder), [os.path.basename(fresh)])  # in progress?
+
+    def test_a_failed_check_does_not_stop_later_ones(self):
+        calls = []
+
+        class FlakyStore:
+            async def call(self, fn, *args):
+                calls.append(fn.__name__)
+                if len(calls) == 1:
+                    raise RuntimeError("boom")
+
+        self.run_ticks(FlakyStore(), [lambda: None, lambda: None])
+        self.assertEqual(calls, ["daily_snapshot", "daily_snapshot"])
+
+    def test_a_failing_check_warns_once_until_one_succeeds(self):
+        results = iter(["fail", "fail", "ok", "fail"])
+
+        class Store:
+            async def call(self, fn, *args):
+                if next(results) == "fail":
+                    raise RuntimeError("boom")
+
+        out = self.run_ticks(Store(), [lambda: None] * 4)
+        # Two failures in a row: one line; a success re-arms it, so the next failure shows.
+        self.assertEqual(out.count("snapshot check failed"), 2)
 
 
 class PickOddsTest(DbTest):
@@ -1151,7 +1346,80 @@ class HelperTest(unittest.TestCase):
         srcp_iterm_prefs.subprocess = types.SimpleNamespace(run=no_defaults)
         self.addCleanup(setattr, srcp_iterm_prefs, "subprocess", real)
         with self.assertRaises(SystemExit):
-            srcp_iterm_prefs.save_prefs(prefs)
+            srcp_iterm_prefs.save_prefs(prefs, [])
+
+    def test_save_prefs_writes_only_the_named_keys(self):
+        calls = fake_defaults(self, live={"Other": 1})
+        prefs = {"Custom Color Presets": {"A": DARK}, "Other": 2, "GlobalKeyMap": {}}
+        srcp_iterm_prefs.save_prefs(prefs, ["Custom Color Presets"], delete=["GlobalKeyMap"])
+        writes = defaults_writes(calls)
+        self.assertEqual([w[0] for w in writes], ["import", "delete"])  # deletes come after
+        self.assertEqual(plistlib.loads(writes[0][2]), {"Custom Color Presets": {"A": DARK}})
+        self.assertEqual(writes[1][1], ["GlobalKeyMap"])
+
+    def test_save_prefs_refuses_if_iterm2_started_since_loading(self):
+        calls = fake_defaults(self, running=True)
+        with self.assertRaises(SystemExit) as cm:
+            srcp_iterm_prefs.save_prefs({"K": 1}, ["K"])
+        self.assertEqual(str(cm.exception), srcp_iterm_prefs.QUIT_FIRST)
+        self.assertEqual(defaults_writes(calls), [])
+
+    def test_save_prefs_rechecks_the_custom_folder_on_the_live_prefs(self):
+        live = {"LoadPrefsFromCustomFolder": True, "PrefsCustomFolder": "/elsewhere"}
+        calls = fake_defaults(self, live=live)
+        with self.assertRaises(SystemExit) as cm:
+            srcp_iterm_prefs.save_prefs({"K": 1}, ["K"])  # loaded before the folder was set
+        self.assertIn("/elsewhere", str(cm.exception))
+        self.assertEqual(defaults_writes(calls), [])
+        # Read key by key, not by exporting all of the prefs.
+        self.assertFalse([a for a, _ in calls if a[:2] == ["defaults", "export"] and a[3] == "-"])
+
+    def test_save_prefs_rejects_unknown_or_overlapping_keys(self):
+        calls = fake_defaults(self)
+        with self.assertRaisesRegex(ValueError, r"not in prefs: \['Missing'\]$"):
+            srcp_iterm_prefs.save_prefs({"K": 1}, ["Missing"])
+        with self.assertRaisesRegex(ValueError, r"in both keys and delete: \['K'\]$"):
+            srcp_iterm_prefs.save_prefs({"K": 1}, ["K"], delete=["K"])
+        self.assertEqual(calls, [])
+
+    def test_save_prefs_with_only_deletes_imports_nothing(self):
+        calls = fake_defaults(self)
+        srcp_iterm_prefs.save_prefs({"GlobalKeyMap": {}}, [], delete=["GlobalKeyMap"])
+        self.assertEqual([w[0] for w in defaults_writes(calls)], ["delete"])
+
+    def test_uninstall_prefs_names_the_keys_it_changed(self):
+        keymap, presets = "GlobalKeyMap", "Custom Color Presets"
+        cases = [  # (remove_key_binding's result, presets removed) -> (keys, delete) or None
+            (None, False, None),  # no binding and no presets: nothing written
+            ([], False, ([keymap], [])),
+            ([keymap], False, ([], [keymap])),
+            (None, True, ([presets], [])),
+            ([], True, ([keymap, presets], [])),
+            ([keymap], True, ([presets], [keymap])),
+        ]
+        for binding, removed, expected in cases:
+            with self.subTest(binding=binding, presets=removed):
+                prefs = {keymap: {"0x73": {}}, presets: {"A": DARK}}
+                with (
+                    mock.patch.object(srcp_uninstall_prefs, "iterm_running", return_value=False),
+                    mock.patch.object(srcp_uninstall_prefs, "load_prefs", return_value=prefs),
+                    mock.patch.object(
+                        srcp_uninstall_prefs, "remove_key_binding", return_value=binding
+                    ),
+                    mock.patch.object(srcp_uninstall_prefs, "remove_presets", return_value=removed),
+                    mock.patch.object(srcp_uninstall_prefs, "save_prefs") as save,
+                    mock.patch.object(sys, "argv", ["srcp_uninstall_prefs.py", "--presets", "x"]),
+                    contextlib.redirect_stdout(io.StringIO()),
+                ):
+                    srcp_uninstall_prefs.main()
+                if expected is None:
+                    save.assert_not_called()
+                    continue
+                keys, delete = save.call_args.args[1], list(save.call_args.args[2])
+                self.assertEqual((keys, delete), expected)
+                # What save_prefs itself requires: every named key is there, none in both.
+                self.assertLessEqual(set(keys), set(prefs))
+                self.assertFalse(set(keys) & set(delete))
 
 
 if __name__ == "__main__":

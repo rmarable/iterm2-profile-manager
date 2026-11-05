@@ -6,7 +6,8 @@ Picks from the scheme DB built by .tools/srcp_build_scheme_db.py: sometimes
 mode, weighted by stars; otherwise a preset from the discovery view not among the last
 recent_window picks, with colored-background presets weighted by colorful_weight.
 Colors the build found hard to see get its adjustments applied (config fix_colors = 0 turns
-that off). Records every launch and when it ended, and snapshots the DB once a day.
+that off). Records every launch and when it ended, and snapshots the DB once a day (checked every 15
+minutes while it runs).
 "Save/update this profile" (right-click) or the save_profile() key binding stars the
 current look; "Remove from favorites" (right-click; hidden on non-favorites only where
 iTerm2 supports API protocol 1.23+) un-stars it; "Change to another profile" (right-click)
@@ -34,19 +35,22 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Callable, Coroutine
+from collections.abc import Awaitable, Callable, Coroutine
 from pathlib import Path
 from typing import IO, Any, TypeVar
 
 import iterm2
 from iterm2.capabilities import supports_context_menu_submenus_and_visibility
 
-VERSION = "0.9.0"  # bump on every change, so the Console shows which code is running
+VERSION = "0.9.1"  # bump on every change, so the Console shows which code is running
 DATA_DIR = os.path.expanduser("~/.local/share/iterm2-color-schemes")
 DB_PATH = os.path.join(DATA_DIR, "schemes.db")
 LOCK_PATH = os.path.join(DATA_DIR, ".lock")
 BACKUP_KEEP = 14
 BACKUP_EVERY_S = 24 * 3600
+# How often the running script checks whether a snapshot is due. asyncio's clock stops while
+# the Mac sleeps, so check often (it's a few file stats) to keep it close to daily.
+SNAPSHOT_CHECK_S = 15 * 60
 DEFAULT_SIZE = 13
 DEFAULT_CONFIG = {
     "favorite_share": 0.5,
@@ -673,6 +677,15 @@ def never_show(db: sqlite3.Connection, preset: str) -> bool:
     return True
 
 
+def remove_stale_partials(folder: str, older_than_s: float = 3600) -> None:
+    """Same as .tools/srcp_db_backup.remove_stale_partials(): delete copies a killed run left.
+    Only old ones: the build may be writing its own snapshot right now."""
+    for path in glob.glob(os.path.join(folder, "schemes-*.db.partial")):
+        with contextlib.suppress(FileNotFoundError):
+            if time.time() - os.path.getmtime(path) > older_than_s:
+                os.remove(path)
+
+
 def daily_snapshot(db: sqlite3.Connection) -> str | None:
     """Same as .tools/srcp_db_backup.snapshot(), when the newest snapshot is a day old."""
     folder = os.path.join(DATA_DIR, "backups")
@@ -680,6 +693,7 @@ def daily_snapshot(db: sqlite3.Connection) -> str | None:
     if existing and time.time() - max(existing) < BACKUP_EVERY_S:
         return None
     os.makedirs(folder, exist_ok=True)
+    remove_stale_partials(folder)
     stem = os.path.join(folder, "schemes-" + time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()))
     dest, n = stem + ".db", 1
     while os.path.exists(dest):
@@ -699,6 +713,24 @@ def daily_snapshot(db: sqlite3.Connection) -> str | None:
     for old in snapshots[:-BACKUP_KEEP]:
         os.remove(old)
     return dest
+
+
+async def snapshot_periodically(
+    store: Store,
+    every_s: float = SNAPSHOT_CHECK_S,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> None:
+    """Take the daily snapshot while iTerm2 stays open for days; startup takes the first."""
+    while True:
+        await sleep(every_s)
+        try:
+            backup = await store.call(daily_snapshot)
+        except Exception as e:  # a bad check must not stop later ones, or log every time
+            warn_once("snapshot-check", f"DB snapshot check failed: {e!r}")
+            continue
+        _warned.discard("snapshot-check")
+        if backup:
+            log("info", f"DB snapshot: {backup}")
 
 
 # The iTerm2 side: coloring sessions, the dialogs and the right-click menu items.
@@ -1159,6 +1191,7 @@ async def main(connection: iterm2.Connection) -> None:
         await asyncio.gather(
             watch_new(connection, app, store, new_sessions),
             watch_ended(store, ended_sessions),
+            snapshot_periodically(store),
             exit_on_disconnect(connection),
         )
 

@@ -158,28 +158,33 @@ def has_trigger(existing, trig):
 
 
 def update_prefs(dry):
+    # Again here, after the link and hooks: iTerm2 opened since main()'s check would make
+    # save_prefs refuse midway. Re-running this after quitting iTerm2 finishes the job.
+    if not dry and iterm_running():
+        sys.exit(QUIT_FIRST)
     prefs = load_prefs()
 
-    changed = False
+    changed = []  # the top-level keys this changes, for save_prefs
     for profile in prefs.get("New Bookmarks", []):
         triggers = profile.setdefault("Triggers", [])
         missing = [t for t in TRIGGERS if not has_trigger(triggers, t)]
         if missing:
             print(f"  + profile {profile.get('Name')!r}: {len(missing)} Claude Code trigger(s)")
             triggers.extend(dict(t) for t in missing)
-            changed = True
+            if "New Bookmarks" not in changed:
+                changed.append("New Bookmarks")
     for key, value in FLAGS.items():
         if prefs.get(key) != value:
             print(f"  + iTerm2 pref {key} = {value}")
             prefs[key] = value
-            changed = True
+            changed.append(key)
 
     if not changed:
         print("  = iTerm2 profiles and flags already set")
         return
     if dry:
         return
-    backup = save_prefs(prefs)
+    backup = save_prefs(prefs, changed)
     print(f"  Backup of previous iTerm2 prefs: {backup}")
 
 

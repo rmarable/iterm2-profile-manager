@@ -87,7 +87,7 @@ def main():
             print("(dry run: nothing written)")
         return
 
-    backup = save_prefs(prefs)
+    backup = save_prefs(prefs, [KEY])
     print(f"Done. Backup of previous prefs: {backup}")
 
 
