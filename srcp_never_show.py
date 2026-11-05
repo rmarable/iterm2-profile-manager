@@ -73,7 +73,7 @@ async def main(connection: iterm2.Connection) -> None:
                 finally:
                     db.close()
             except report.OldSchema as e:
-                text = f"The database is too old: {e}."
+                text = f"The database doesn't fit this version: {e}."
             except Exception as e:  # show it in the window: the Console is easy to miss
                 text = f"Couldn't read the database: {e!r}"
         if names:

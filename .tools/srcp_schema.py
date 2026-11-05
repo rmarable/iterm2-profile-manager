@@ -1,6 +1,7 @@
 """What the scheme DB's writers and readers must agree on, kept in one place: the DB's path,
 the hash and the fix_colors rule, seed values, the oldest schema the readers accept
-(MIN_SCHEMA), and the Display P3 to sRGB conversion the color math uses.
+(MIN_SCHEMA), the color space conversions to sRGB the color math uses (Display P3,
+Generic RGB), and WCAG contrast.
 
 Imported by the AutoLaunch script (under iTerm2's Python 3.12) and by the build,
 srcp_favorites.py, srcp_odds.py and srcp_export_curation.py in .tools/ (under
@@ -68,19 +69,27 @@ def float32(v):
     return struct.unpack("f", struct.pack("f", v))[0]
 
 
-def colors_hash(rgb_by_key, p3_keys=()):
+HASH_TAGS = {"srgb": "", "p3": ":p3", "generic": ":cal"}
+
+
+def colors_hash(rgb_by_key, spaces=None):
     """color_hash from {key: (r, g, b)} with raw components 0-1, or None if a key is missing.
 
     Raw as stored, never converted, so the build (prefs dicts) and the main script (API
-    colors) always agree. p3_keys: the keys whose color space is Display P3, which the
-    hash marks, since the same numbers look different there.
+    colors) always agree. spaces: {key: "srgb" | "p3" | "generic"} (space_of; missing:
+    sRGB); the hash marks the others, since the same numbers look different there.
     """
+    # A set: the P3 keys, as a main script before v0.12.1 passes them.
+    named: dict[str, str] = (
+        spaces if isinstance(spaces, dict) else dict.fromkeys(spaces or (), "p3")
+    )
+    tags = [HASH_TAGS[named.get(k, "srgb")] for k in HASH_KEYS]  # a bad name raises
     try:
         parts = [
-            ",".join(f"{float32(v):.4f}" for v in rgb_by_key[k]) + (":p3" if k in p3_keys else "")
-            for k in HASH_KEYS
+            ",".join(f"{float32(v):.4f}" for v in rgb_by_key[k]) + tag
+            for k, tag in zip(HASH_KEYS, tags)
         ]
-    except KeyError:
+    except KeyError:  # a color the preset doesn't have
         return None
     return hashlib.sha1("|".join(parts).encode(), usedforsecurity=False).hexdigest()
 
@@ -90,45 +99,54 @@ def colors_hash(rgb_by_key, p3_keys=()):
 # a MIGRATIONS step, so the version alone can't tell a 0.6 DB from a 0.9 one below 6; every
 # DB at 6 or later was built by code that has all of them. Any later change to that shape
 # adds a MIGRATIONS step and raises this, so readers never need to probe for columns.
-MIN_SCHEMA = 7
+MIN_SCHEMA = 8
 REBUILD = "python3 .tools/srcp_build_scheme_db.py"
 
 
 class OldSchema(Exception):
-    """The DB was built by an older version; rebuilding it (the message says how) fixes it."""
+    """The DB doesn't match these scripts' version; the message says what to do."""
 
 
 def schema_problem(db):
-    """Why db is too old for these scripts, or None if it's fine."""
+    """Why db doesn't fit these scripts, or None if it's fine. Exactly MIN_SCHEMA (always
+    the number of migrations): an older DB needs a rebuild; a newer one was built by newer
+    code than this, usually a main script still running from before an update."""
     version = db.execute("PRAGMA user_version").fetchone()[0]
-    if version >= MIN_SCHEMA:
+    if version == MIN_SCHEMA:
         return None
+    if version > MIN_SCHEMA:
+        return (
+            f"the scheme DB is schema {version}, newer than this version reads "
+            f"({MIN_SCHEMA}): it was built by newer scripts. Restart the main script (Scripts "
+            "menu) or relaunch iTerm2; a tool run from an older copy needs that copy updated"
+        )
     return (
         f"the scheme DB is schema {version}, older than this version reads ({MIN_SCHEMA}); "
-        f"rebuild it: {REBUILD} (safe while iTerm2 runs)"
+        f"rebuild it: {REBUILD} (safe while iTerm2 runs), then restart the main script if "
+        "it was updated too"
     )
 
 
 def check_schema(db):
-    """Raise OldSchema if db is too old for these scripts."""
+    """Raise OldSchema if db doesn't fit these scripts."""
     problem = schema_problem(db)
     if problem:
         raise OldSchema(problem)
 
 
-# Display P3 colors, converted to sRGB so they're judged as they look: linear P3 -> XYZ (D65)
-# -> linear sRGB, with the exact fractions and the sign-keeping sRGB transfer functions of CSS
-# Color 4's sample code (drafts.csswg.org/css-color-4/conversions.js, checked 2026-11-05).
-P3_TO_XYZ = (
-    (608311 / 1250200, 189793 / 714400, 198249 / 1000160),
-    (35783 / 156275, 247089 / 357200, 198249 / 2500400),
-    (0 / 1, 32229 / 714400, 5220557 / 5000800),
-)
-XYZ_TO_SRGB = (
-    (12831 / 3959, -329 / 214, -1974 / 3959),
-    (-851781 / 878810, 1648619 / 878810, 36519 / 878810),
-    (705 / 12673, -2585 / 12673, 705 / 667),
-)
+# iTerm2 draws "sRGB" and "P3" colors as such, anything else (no key too) as calibrated,
+# Apple's Generic RGB (NSDictionary+iTerm.m colorValueForKey:, master, checked 2026-11-05);
+# its API reports those as Calibrated. Each is converted to sRGB for the color math.
+
+
+def space_named(name):
+    """ "srgb", "p3" or "generic" for a "Color Space" value (an API ColorSpace's .value too)."""
+    return "p3" if name == "P3" else "srgb" if name == "sRGB" else "generic"
+
+
+def space_of(color):
+    """How iTerm2 draws this prefs color dict (space_named of its "Color Space")."""
+    return space_named(color.get("Color Space"))
 
 
 def _times(m, v):
@@ -151,8 +169,9 @@ def _inverse(m):
     )
 
 
-P3_TO_SRGB = _product(XYZ_TO_SRGB, P3_TO_XYZ)  # linear to linear; every row sums to 1
-SRGB_TO_P3 = _inverse(P3_TO_SRGB)
+def _columns(r, g, b):
+    """A matrix whose columns are the r, g, b colorants (XYZ)."""
+    return tuple((r[i], g[i], b[i]) for i in range(3))
 
 
 def _decode(v):  # sRGB (and P3) transfer function, gamma-encoded -> linear; keeps the sign
@@ -165,14 +184,100 @@ def _encode(v):  # linear -> gamma-encoded; keeps the sign (out-of-gamut values 
     return 12.92 * v if a <= 0.0031308 else (1 if v >= 0 else -1) * (1.055 * a ** (1 / 2.4) - 0.055)
 
 
-def p3_to_srgb(rgb):
-    """A Display P3 color as sRGB, components 0-1 when in sRGB's gamut, else beyond."""
-    return tuple(_encode(v) for v in _times(P3_TO_SRGB, [_decode(v) for v in rgb]))
+encode_srgb = _encode  # for the build, which moves colors in linear sRGB (decoding: linear())
 
 
-def srgb_to_p3(rgb):
-    """An sRGB color as Display P3 (always inside P3's gamut, which holds all of sRGB)."""
-    return tuple(_encode(v) for v in _times(SRGB_TO_P3, [_decode(v) for v in rgb]))
+# Display P3: linear P3 -> XYZ (D65) -> linear sRGB, with the exact fractions and the
+# transfer functions of CSS Color 4's sample code (drafts.csswg.org/css-color-4/conversions.js,
+# checked 2026-11-05).
+P3_TO_XYZ = (
+    (608311 / 1250200, 189793 / 714400, 198249 / 1000160),
+    (35783 / 156275, 247089 / 357200, 198249 / 2500400),
+    (0 / 1, 32229 / 714400, 5220557 / 5000800),
+)
+XYZ_TO_SRGB = (
+    (12831 / 3959, -329 / 214, -1974 / 3959),
+    (-851781 / 878810, 1648619 / 878810, 36519 / 878810),
+    (705 / 12673, -2585 / 12673, 705 / 667),
+)
+P3_TO_SRGB = _product(XYZ_TO_SRGB, P3_TO_XYZ)  # linear to linear; every row sums to 1
+SRGB_TO_P3 = _inverse(P3_TO_SRGB)
+
+# Generic RGB as NSColor converts it to sRGB: the D50 colorants in /System/Library/ColorSync/
+# Profiles/{Generic RGB,sRGB} Profile.icc (s15Fixed16 / 65536), gamma 461/256, linear (v / 16)
+# below 1/32. Within 4e-4 of NSColor (237 samples, 2026-11-05); a 0.3% step at the knee.
+GENERIC_D50 = _columns(
+    (29773 / 65536, 15854 / 65536, 976 / 65536),
+    (23157 / 65536, 44147 / 65536, 5940 / 65536),
+    (10266 / 65536, 5535 / 65536, 47158 / 65536),
+)
+SRGB_D50 = _columns(
+    (28578 / 65536, 14581 / 65536, 912 / 65536),
+    (25241 / 65536, 46981 / 65536, 6362 / 65536),
+    (9376 / 65536, 3972 / 65536, 46799 / 65536),
+)
+GENERIC_TO_SRGB = _product(_inverse(SRGB_D50), GENERIC_D50)  # linear to linear
+SRGB_TO_GENERIC = _inverse(GENERIC_TO_SRGB)
+GENERIC_GAMMA = 461 / 256
+
+
+def _generic_decode(v):
+    a = abs(v)
+    return v / 16 if a < 1 / 32 else (1 if v >= 0 else -1) * a**GENERIC_GAMMA
+
+
+def _generic_encode(v):
+    a = abs(v)
+    return 16 * v if a < 1 / 512 else (1 if v >= 0 else -1) * a ** (1 / GENERIC_GAMMA)
+
+
+# space -> (linear to linear sRGB, linear sRGB to linear, decode, encode). No "srgb" entry:
+# it's the identity, passed through untouched (a round trip would change its floats).
+SPACES = {
+    "p3": (P3_TO_SRGB, SRGB_TO_P3, _decode, _encode),
+    "generic": (GENERIC_TO_SRGB, SRGB_TO_GENERIC, _generic_decode, _generic_encode),
+}
+
+
+def to_srgb(space, rgb):
+    """A color in space as sRGB, components 0-1 when in sRGB's gamut, else beyond."""
+    if space == "srgb":
+        return tuple(rgb)
+    matrix, _, decode, _ = SPACES[space]
+    return tuple(_encode(v) for v in _times(matrix, [decode(v) for v in rgb]))
+
+
+def from_srgb(space, rgb):
+    """An sRGB color in space (components outside 0-1: not in that space's gamut)."""
+    if space == "srgb":
+        return tuple(rgb)
+    _, matrix, _, encode = SPACES[space]
+    return tuple(encode(v) for v in _times(matrix, [_decode(v) for v in rgb]))
+
+
+def in_gamut(space, rgb, eps=1e-4):
+    """An sRGB color can be stored in space (P3 holds all of sRGB; Generic RGB doesn't). eps
+    allows for the 4-decimal sRGB a fix is chosen in; stored() clamps that much away."""
+    return all(-eps <= v <= 1 + eps for v in from_srgb(space, rgb))
+
+
+# WCAG 2 contrast, shared by the build and srcp_score_presets.py, on sRGB components 0-1.
+
+
+def linear(v):
+    # Clamped: a hand-edited preset with a component below 0 or above 1 would otherwise give
+    # a complex number further on (oklab's cube root). Hashes use the raw values.
+    return _decode(min(1.0, max(0.0, v)))
+
+
+def relative_luminance(c):
+    r, g, b = (linear(v) for v in c)
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def contrast_ratio(c1, c2):
+    l1, l2 = relative_luminance(c1) + 0.05, relative_luminance(c2) + 0.05
+    return max(l1, l2) / min(l1, l2)
 
 
 def is_busy(error):

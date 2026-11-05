@@ -386,6 +386,7 @@ class MigrationTest(DbTest):
         "b25981c4480b3f6e37af9a840e9a8714a0b3020c",
         "190d77892180900af589600618cac1ed2cc3312f",
         "5f5c310bd33c72ef4b7aa0f1dc85fbba846a0a13",
+        "1f8ef37474b2259ca39f59af37e66f25474beb1b",
     )
 
     def test_min_schema_is_the_newest_migration(self):
@@ -500,6 +501,19 @@ class OldSchemaTest(DbTest):
         every step so far that raised MIN_SCHEMA was harmless to run again)."""
         self.db.execute(f"PRAGMA user_version = {srcp_schema.MIN_SCHEMA - 1}")
 
+    def test_a_db_newer_than_the_running_script_asks_for_a_restart(self):
+        self.db.execute(
+            f"PRAGMA user_version = {srcp_schema.MIN_SCHEMA + 1}"
+        )  # built by newer code
+        problem = srcp_schema.schema_problem(self.db)
+        self.assertIn("newer than this version reads", problem)
+        self.assertIn("Restart the main script", problem)
+        store = self.main["Store"](self.db_path)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertIsNone(asyncio.run(store.call(self.main["look_fixes"], "Murky")))
+        self.assertIn("Restart the main script", out.getvalue())  # not its fixes, half-read
+
     def test_the_main_script_asks_once_for_a_rebuild_then_works_without_a_restart(self):
         self.make_old()
         store = self.main["Store"](self.db_path)
@@ -546,7 +560,7 @@ class OldSchemaTest(DbTest):
                     check=False,
                 )
                 self.assertNotEqual(result.returncode, 0)
-                self.assertIn("The DB is too old", result.stderr)
+                self.assertIn("The DB doesn't fit this version", result.stderr)
                 self.assertNotIn("Traceback", result.stderr)
 
 
@@ -1240,10 +1254,10 @@ class ColorFixTest(DbTest):
         self.assertAlmostEqual(m[0][0], 1.2249401762805596, places=12)
         self.assertAlmostEqual(m[2][2], 1.0982736001409663, places=12)
         for rgb in ((0.3, 0.6, 0.2), (1, 1, 1), (0.05, 0.0, 0.9)):  # the inverse undoes it
-            back = srcp_schema.p3_to_srgb(srcp_schema.srgb_to_p3(rgb))
+            back = srcp_schema.to_srgb("p3", srcp_schema.from_srgb("p3", rgb))
             for v, w in zip(back, rgb, strict=True):
                 self.assertAlmostEqual(v, w, places=12)
-        red = srcp_schema.p3_to_srgb((1, 0, 0))  # wider than sRGB: outside its gamut
+        red = srcp_schema.to_srgb("p3", (1, 0, 0))  # wider than sRGB: outside its gamut
         self.assertEqual([round(v, 4) for v in red], [1.0931, -0.2267, -0.1501])
 
     def test_p3_colors_are_judged_as_they_look(self):
@@ -1273,16 +1287,16 @@ class ColorFixTest(DbTest):
         target = (0.2, 0.4, 0.9)  # where the sRGB math moved a color to
         p3 = {**color(0.1, 0.1, 0.5), "Color Space": "P3"}
         kept = build.stored(p3, target)
-        expected = srcp_schema.srgb_to_p3(target)  # P3 numbers that show as the target
+        expected = srcp_schema.from_srgb("p3", target)  # P3 numbers that show as the target
         self.assertEqual(kept, tuple(round(v, 6) for v in expected))
         self.assertNotEqual([round(v, 3) for v in kept], [round(v, 3) for v in target])
         self.assertEqual(build.stored(color(0.1, 0.1, 0.5), target), target)  # sRGB: as is
 
     def test_p3_hashes_agree_between_the_build_and_the_main_script(self):
         p3 = self.as_p3(UNREADABLE)
-        live = {k: build.rgb({**v, "Color Space": None}) for k, v in p3.items()}  # raw values
-        keys = set(p3)
-        self.assertEqual(self.main["colors_hash"](live, keys), build.color_hash(p3))
+        live = {k: tuple(v[c] for c in build.COMPONENTS) for k, v in p3.items()}  # raw values
+        spaces = dict.fromkeys(p3, "p3")
+        self.assertEqual(self.main["colors_hash"](live, spaces), build.color_hash(p3))
         self.assertNotEqual(self.main["colors_hash"](live), build.color_hash(p3))
         # A P3 preset with the same numbers as an sRGB one isn't its twin.
         with contextlib.redirect_stdout(io.StringIO()):
@@ -1290,11 +1304,177 @@ class ColorFixTest(DbTest):
         duplicate_of = {r[0]: r[10] for r in rows}  # schemes.duplicate_of
         self.assertEqual(duplicate_of, {"Plain": None, "Wide": None})
 
+    # Mid-lightness colored backgrounds, as in Grass and Ocean (untagged presets): fixes there
+    # run into Generic RGB's own gamut edge.
+    GENERIC_CASES: ClassVar[dict[str, dict]] = {
+        "grass": with_colors(
+            DARK, Background_Color=(0.075, 0.467, 0.239), Foreground_Color=(1.0, 0.941, 0.647)
+        ),
+        "ocean": with_colors(
+            DARK, Background_Color=(0.133, 0.31, 0.737), Ansi_4_Color=(0.1, 0.2, 0.9)
+        ),
+    }
+
+    @staticmethod
+    def as_space(colors, space):
+        """The same numbers, tagged Calibrated (space "Calibrated") or untagged (None)."""
+        out = {}
+        for k, v in colors.items():
+            bare = {c: x for c, x in v.items() if c != "Color Space"}
+            out[k] = bare if space is None else {**bare, "Color Space": space}
+        return out
+
+    # NSColor colorWithCalibratedRed:...colorUsingColorSpace:sRGBColorSpace on this Mac,
+    # 2026-11-05 (osascript -l JavaScript): what iTerm2 shows an untagged color as.
+    NSCOLOR_SAMPLES = (
+        ((0.01, 0.01, 0.01), (0.00808, 0.00808, 0.00808)),  # the straight part below 1/32
+        ((0.02, 0.02, 0.02), (0.01615, 0.01615, 0.01615)),
+        ((0.03, 0.03, 0.03), (0.02423, 0.02423, 0.02423)),
+        ((0.05, 0.05, 0.05), (0.05655, 0.05655, 0.05655)),
+        ((0.1, 0.1, 0.1), (0.13261, 0.13261, 0.13261)),
+        ((0.5, 0.5, 0.5), (0.57231, 0.57231, 0.57231)),
+        ((0.8, 0.2, 0.2), (0.84598, 0.28729, 0.25793)),
+        ((0.0, 0.0, 1.0), (0.01684, 0.19834, 1.0)),
+    )
+
+    def test_generic_rgb_is_converted_as_macos_does(self):
+        m = srcp_schema.GENERIC_TO_SRGB
+        for row in m:
+            self.assertAlmostEqual(sum(row), 1.0, places=4)  # white (D50 in both) stays white
+        ident = srcp_schema._product(m, srcp_schema.SRGB_TO_GENERIC)
+        for i in range(3):
+            for j in range(3):
+                self.assertAlmostEqual(ident[i][j], float(i == j), places=12)
+        for generic, shown in self.NSCOLOR_SAMPLES:
+            with self.subTest(generic=generic):
+                got = srcp_schema.to_srgb("generic", generic)
+                for v, w in zip(got, shown, strict=True):
+                    self.assertAlmostEqual(min(1.0, v), w, delta=1e-3)
+        for rgb in ((0.3, 0.6, 0.2), (0.01, 0.02, 0.9), (1, 1, 1)):  # the inverse undoes it
+            back = srcp_schema.to_srgb("generic", srcp_schema.from_srgb("generic", rgb))
+            for v, w in zip(back, rgb, strict=True):
+                self.assertAlmostEqual(v, w, places=9)
+        self.assertFalse(srcp_schema.in_gamut("generic", (1, 0, 0)))  # sRGB red is outside it
+        self.assertTrue(srcp_schema.in_gamut("p3", (1, 0, 0)))
+
+    def test_generic_rgb_matches_nscolor_now(self):
+        js = (
+            "ObjC.import('AppKit'); [[0.02,0.3,0.7],[0.6,0.6,0.1]].map(function(c){"
+            "var s=$.NSColor.colorWithCalibratedRedGreenBlueAlpha(c[0],c[1],c[2],1)"
+            ".colorUsingColorSpace($.NSColorSpace.sRGBColorSpace);"
+            "return [s.redComponent,s.greenComponent,s.blueComponent].join(',')}).join(';')"
+        )
+        try:
+            out = subprocess.run(
+                ["osascript", "-l", "JavaScript", "-e", js],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=20,
+            ).stdout.strip()
+        except (OSError, subprocess.SubprocessError) as e:
+            self.skipTest(f"osascript unavailable: {e}")
+        for c, line in zip(((0.02, 0.3, 0.7), (0.6, 0.6, 0.1)), out.split(";"), strict=True):
+            want = [float(x) for x in line.split(",")]
+            got = [
+                min(1.0, max(0.0, v)) for v in srcp_schema.to_srgb("generic", c)
+            ]  # NSColor clips
+            for v, w in zip(got, want, strict=True):
+                self.assertAlmostEqual(v, w, delta=1e-3)
+
+    def test_untagged_and_calibrated_colors_are_judged_as_generic_rgb(self):
+        red, bg = DARK["Ansi 1 Color"], DARK["Background Color"]
+        for space in (None, "Calibrated"):
+            with self.subTest(space=space):
+                plain = self.as_space({"c": red}, space)["c"]
+                self.assertEqual(srcp_schema.space_of(plain), "generic")
+                self.assertNotAlmostEqual(
+                    build.contrast_ratio(build.rgb(plain), build.rgb(bg)),
+                    build.contrast_ratio(build.rgb(red), build.rgb(bg)),
+                    2,
+                )
+
+    def test_fixed_generic_colors_stay_generic_in_gamut_meet_targets_and_stay_fixed(self):
+        clamped = []
+        real = build.from_srgb
+
+        def watch(space, rgb):
+            out = real(space, rgb)
+            clamped.extend(v for v in out if not -1e-4 <= v <= 1 + 1e-4)
+            return out
+
+        for name, colors in {**self.CASES, **self.GENERIC_CASES}.items():
+            for space in (None, "Calibrated"):
+                with self.subTest(name, space=space), mock.patch.object(build, "from_srgb", watch):
+                    generic = self.as_space(colors, space)
+                    fixes = build.fix_colors(generic)
+                    after = build.apply_fixes(generic, fixes)
+                    bg = build.rgb(after["Background Color"])
+                    for key in fixes:
+                        self.assertEqual(after[key].get("Color Space"), space)  # kept as it was
+                        shown = build.contrast_ratio(build.rgb(after[key]), bg)
+                        self.assertAlmostEqual(fixes[key][4], shown, places=2)
+                        target = build.FIX_TARGETS.get(key)
+                        reachable = max(
+                            build.contrast_ratio((1, 1, 1), bg),
+                            build.contrast_ratio((0, 0, 0), bg),
+                        )
+                        if target and reachable >= target and name != "look-alike accents":
+                            self.assertGreaterEqual(shown, target - build.CONTRAST_EPS, key)
+        self.assertEqual(clamped, [])  # every fix was chosen inside Generic RGB's own gamut
+
+    def test_a_fix_for_a_generic_color_stays_inside_generic_rgb(self):
+        # sRGB's own red is outside Generic RGB: a move that ends there must be refused, and
+        # chroma given up instead, or the stored color would be clipped to something else.
+        lightness, a, b = build.oklab((1.0, 0.0, 0.0))
+        chroma, hue = math.hypot(a, b), math.atan2(b, a)
+        self.assertIsNotNone(build.lch_to_rgb(lightness, chroma, hue))
+        self.assertIsNone(build.lch_to_rgb(lightness, chroma, hue, "generic"))
+        bg = (1.0, 1.0, 1.0)  # a red that must get darker on white, from near sRGB's edge
+        moved = build.move_to_contrast((1.0, 0.25, 0.2), bg, 4.5, 0.0, "generic")
+        self.assertIsNotNone(moved)
+        self.assertTrue(srcp_schema.in_gamut("generic", moved))
+        self.assertGreaterEqual(build.contrast_ratio(moved, bg), 4.5)
+
+    def test_the_hash_takes_an_old_main_scripts_p3_keys_and_refuses_a_bad_space_name(self):
+        live = {k: tuple(v[c] for c in build.COMPONENTS) for k, v in UNREADABLE.items()}
+        old_style = self.main["colors_hash"](live, {"Ansi 1 Color"})  # 0.12.0 passed a set
+        self.assertEqual(old_style, self.main["colors_hash"](live, {"Ansi 1 Color": "p3"}))
+        with self.assertRaises(KeyError):  # a wrong name must not quietly hash as None
+            self.main["colors_hash"](live, {"Ansi 1 Color": "P3"})
+
+    def test_generic_hashes_agree_between_the_build_and_the_main_script(self):
+        mixed = self.as_space(UNREADABLE, None)
+        mixed["Ansi 1 Color"] = {**mixed["Ansi 1 Color"], "Color Space": "Calibrated"}
+        mixed["Ansi 2 Color"] = {**mixed["Ansi 2 Color"], "Color Space": "sRGB"}
+        mixed["Ansi 3 Color"] = {**mixed["Ansi 3 Color"], "Color Space": "P3"}
+        live = {k: tuple(v[c] for c in build.COMPONENTS) for k, v in mixed.items()}
+        ColorSpace = self.main["iterm2"].color.ColorSpace
+        api = {k: ColorSpace.CALIBRATED for k in mixed}  # how the API reports untagged ones
+        api["Ansi 2 Color"], api["Ansi 3 Color"] = ColorSpace.SRGB, ColorSpace.P3
+        from_api = {k: srcp_schema.space_named(v.value) for k, v in api.items()}
+        from_prefs = {k: srcp_schema.space_of(v) for k, v in mixed.items()}  # adjust_colors'
+        self.assertEqual(from_api, from_prefs)
+        built = build.color_hash(mixed)
+        self.assertEqual(self.main["colors_hash"](live, from_api), built)
+        self.assertNotEqual(self.main["colors_hash"](live), built)  # the tags matter
+        # Retagging a preset (untagged to sRGB, same numbers) changes how it looks, so its
+        # hash, and the build's fixes for it go stale.
+        untagged = self.as_space(UNREADABLE, None)
+        self.assertNotEqual(build.color_hash(untagged), build.color_hash(UNREADABLE))
+        # An untagged preset with the same numbers as an sRGB one isn't its twin.
+        with contextlib.redirect_stdout(io.StringIO()):
+            rows, _ = build.build_rows({"Plain": UNREADABLE, "Untagged": untagged}, self.repo)
+        self.assertEqual({r[0]: r[10] for r in rows}, {"Plain": None, "Untagged": None})
+
     def test_fixing_twice_changes_nothing(self):
-        for name, colors in self.CASES.items():
-            with self.subTest(name):
-                after = build.apply_fixes(colors, build.fix_colors(colors))
-                self.assertEqual(build.fix_colors(after), {})
+        cases = {**self.CASES, **self.GENERIC_CASES}
+        for name, colors in cases.items():
+            for space in ("sRGB", None, "Calibrated"):  # as tagged, untagged, Calibrated
+                with self.subTest(name, space=space):
+                    colors_in = self.as_space(colors, space)
+                    after = build.apply_fixes(colors_in, build.fix_colors(colors_in))
+                    self.assertEqual(build.fix_colors(after), {})  # 6-decimal rounding and all
         self.assertEqual(build.fix_colors(LIGHT), {})  # already readable
 
     def test_look_alike_accents_are_moved_apart_or_left_alone(self):
@@ -1380,10 +1560,36 @@ class ColorFixTest(DbTest):
                 red=v["Red Component"] * 255,
                 green=v["Green Component"] * 255,
                 blue=v["Blue Component"] * 255,
+                # As the API reports it: a color with no space comes back Calibrated.
+                color_space=self.main["iterm2"].color.ColorSpace(
+                    v.get("Color Space", "Calibrated")
+                ),
             )
             for k, v in colors.items()
         ]
         return types.SimpleNamespace(values=values)
+
+    def test_an_untagged_preset_gets_its_fixes_in_tabs_and_profiles_and_stays_untagged(self):
+        untagged = {
+            k: {c: x for c, x in v.items() if c != "Color Space"} for k, v in UNREADABLE.items()
+        }
+        target = os.path.join(self.tmp, "untagged", "schemes.db")
+        with contextlib.redirect_stdout(io.StringIO()):
+            rows, _ = build.build_rows({"Murky": untagged}, self.repo)
+            build.write_db(target, rows)
+        db = sqlite3.connect(target)
+        self.addCleanup(db.close)
+        fixes, built = self.main["look_fixes"](db, "Murky")
+        self.assertTrue(fixes)
+        n = len(json.loads(fixes))
+        preset = self.fake_preset(untagged)  # the API reports these as Calibrated
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(self.main["adjust_preset"]("Murky", preset, fixes, built), n)
+            colors, count = self.main["adjust_colors"]("Murky", untagged, fixes, built)
+        self.assertNotIn("changed since", out.getvalue())  # the hashes agree on both paths
+        self.assertEqual(count, n)
+        for key in json.loads(fixes):
+            self.assertNotIn("Color Space", colors[key])  # as iTerm2 had it: drawn as calibrated
 
     def test_a_tab_gets_the_adjusted_colors_unless_its_preset_changed(self):
         fixes, built = self.main["look_fixes"](self.db, "Murky")

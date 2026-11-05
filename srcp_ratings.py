@@ -61,7 +61,7 @@ def view_text(view: str) -> str:
     try:
         db = report.connect(report.DEFAULT_DB)  # it only reads
     except report.OldSchema as e:
-        return f"The database is too old: {e}."
+        return f"The database doesn't fit this version: {e}."
     try:
         return render(db, view)
     finally:

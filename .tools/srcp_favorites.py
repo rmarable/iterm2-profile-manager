@@ -214,7 +214,7 @@ def show_again(db, preset):
 def connect(path, timeout=5.0):
     """Read-write connection in autocommit mode; mode=rw never creates an empty DB.
 
-    Raises OldSchema (message: how to rebuild) for a DB older than these scripts read.
+    Raises OldSchema (message: what to do) for a DB that doesn't fit these scripts.
     """
     # mode=rw even to read: mode=ro can fail on a WAL DB that nothing else has open.
     db = sqlite3.connect(
@@ -245,7 +245,7 @@ def main():
     try:
         db = connect(args.db)
     except OldSchema as e:
-        sys.exit(f"The DB is too old: {e}.")
+        sys.exit(f"The DB doesn't fit this version: {e}.")
     try:
         if args.show_again is not None:
             result = show_again(db, args.show_again)

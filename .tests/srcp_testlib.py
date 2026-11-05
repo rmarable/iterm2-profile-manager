@@ -54,7 +54,8 @@ def load_main(data_dir, font_dir):
 
 
 def color(r, g, b):
-    return {"Red Component": r, "Green Component": g, "Blue Component": b}
+    """An sRGB color, as most presets tag theirs (untagged ones are drawn as Generic RGB)."""
+    return {"Red Component": r, "Green Component": g, "Blue Component": b, "Color Space": "sRGB"}
 
 
 def preset(bg, fg, accents):

@@ -35,9 +35,15 @@ from srcp_schema import (  # shared with the main script and srcp_favorites.py
     SEED_CONFIG,
     SEED_FONTS,
     colors_hash,
-    p3_to_srgb,
+    contrast_ratio,
+    encode_srgb,
+    from_srgb,
+    in_gamut,
+    linear,
+    relative_luminance,
     schema_problem,
-    srgb_to_p3,
+    space_of,
+    to_srgb,
 )
 from srcp_schema import (
     DB_PATH as DEFAULT_DB,
@@ -75,8 +81,8 @@ FIX_MAX_STEPS = 200  # enough to cross the whole 0-1 lightness range
 DISTINCT_STEP = 2 * FIX_STEP  # lightness per move when separating look-alike accents
 DISTINCT_MAX_STEPS = 40  # times the 6 accents: the moves all of them share, in all
 GAMUT_EPS = 1e-6
-# A color this close below its contrast target counts as reaching it: a P3 color stored to
-# 6 decimals can show a hair under the sRGB value it was moved to.
+# A color this close below its contrast target counts as reaching it: a P3 or Generic RGB
+# color stored to 6 decimals can show a hair under the sRGB value it was moved to.
 CONTRAST_EPS = 1e-4
 GAMUT_FLOOR_MARGIN = 0.001  # last-resort chroma floor above CHROMA_MIN: still counts as colored
 
@@ -102,47 +108,29 @@ SEED_FONT_LABELS = {
 # gate; a color hash to find twins; the repo's yaml variants), and whether a font is installed.
 
 
-def is_p3(c):
-    return c.get("Color Space") == "P3"
-
-
 def rgb(c):
-    """A color as sRGB components 0-1, for the color math: Display P3 colors are converted,
-    and one outside sRGB's gamut is clipped to its edge (judged as the nearest sRGB color)."""
+    """A color as sRGB components 0-1, for the color math: Display P3 and Generic RGB colors
+    are converted (srcp_schema.space_of), and one outside sRGB's gamut is clipped per
+    channel."""
     raw = tuple(c[k] for k in COMPONENTS)
-    if not is_p3(c):
+    space = space_of(c)
+    if space == "srgb":
         return raw
-    return tuple(min(1.0, max(0.0, v)) for v in p3_to_srgb(raw))
+    return tuple(min(1.0, max(0.0, v)) for v in to_srgb(space, raw))
 
 
 def stored(c, srgb_rgb):
     """The components to store for c moved to srgb_rgb: back in c's own color space."""
-    if not is_p3(c):
+    space = space_of(c)
+    if space == "srgb":
         return srgb_rgb
-    # 6 decimals, not 4: a P3 value's rounding moves the sRGB color it shows as, too. The
-    # clamp only catches float noise just outside 0-1 (sRGB colors are all inside P3).
-    return tuple(round(min(1.0, max(0.0, v)), 6) for v in srgb_to_p3(srgb_rgb))
+    # 6 decimals, not 4: rounding in the color's own space moves the sRGB color it shows as,
+    # too. The clamp only catches float noise: a fix is chosen inside the color's own gamut.
+    return tuple(round(min(1.0, max(0.0, v)), 6) for v in from_srgb(space, srgb_rgb))
 
 
 def has_colors(colors):
     return all(k in colors and all(p in colors[k] for p in COMPONENTS) for k in HASH_KEYS)
-
-
-def linear(v):
-    # Clamped: a hand-edited preset with a component below 0 or above 1 would otherwise give
-    # a complex cube root in oklab() and stop the whole build. Hashes use the raw values.
-    v = min(1.0, max(0.0, v))
-    return v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4
-
-
-def relative_luminance(c):
-    r, g, b = (linear(v) for v in c)
-    return 0.2126 * r + 0.7152 * g + 0.0722 * b
-
-
-def contrast_ratio(c1, c2):
-    l1, l2 = relative_luminance(c1) + 0.05, relative_luminance(c2) + 0.05
-    return max(l1, l2) / min(l1, l2)
 
 
 def oklab(c):
@@ -200,13 +188,6 @@ def classify(colors):
     }
 
 
-def srgb(v):
-    """Inverse of linear() (same 0.03928 threshold, so the two round-trip)."""
-    if v <= 0.03928 / 12.92:
-        return v * 12.92
-    return 1.055 * v ** (1 / 2.4) - 0.055
-
-
 def oklab_to_linear(lab):
     """Linear RGB for an OKLab color; components outside 0-1 mean out of gamut."""
     lightness, a, b = lab
@@ -220,16 +201,17 @@ def oklab_to_linear(lab):
     )
 
 
-def lch_to_rgb(lightness, chroma, hue):
-    """Rounded sRGB (4 decimals, as color_hash), or None if out of gamut."""
+def lch_to_rgb(lightness, chroma, hue, space="srgb"):
+    """Rounded sRGB (4 decimals, as color_hash), or None if out of sRGB's gamut or of the
+    gamut of space, the color's own (Generic RGB doesn't hold all of sRGB)."""
     lin = oklab_to_linear((lightness, chroma * math.cos(hue), chroma * math.sin(hue)))
     if any(v < -GAMUT_EPS or v > 1 + GAMUT_EPS for v in lin):
         return None
-    # Clamped before srgb(): a tiny negative would make ** a complex number.
-    return tuple(round(srgb(min(1.0, max(0.0, v))), 4) for v in lin)
+    out = tuple(round(encode_srgb(min(1.0, max(0.0, v))), 4) for v in lin)
+    return out if space == "srgb" or in_gamut(space, out) else None
 
 
-def move_to_contrast(c, bg, target, floor):
+def move_to_contrast(c, bg, target, floor, space="srgb"):
     """c moved in lightness (hue kept) until its contrast with bg reaches target.
 
     Steps toward whichever end (white or black) can reach the target, preferring the side c
@@ -251,10 +233,10 @@ def move_to_contrast(c, bg, target, floor):
         lt = lightness + direction * step * FIX_STEP
         if not 0.0 <= lt <= 1.0:
             break
-        cc, rgb_ = chroma, lch_to_rgb(lt, chroma, hue)
+        cc, rgb_ = chroma, lch_to_rgb(lt, chroma, hue, space)
         while rgb_ is None and cc > floor:
             cc = max(floor, cc - FIX_STEP)
-            rgb_ = lch_to_rgb(lt, cc, hue)
+            rgb_ = lch_to_rgb(lt, cc, hue, space)
         if rgb_ is None:  # even the chroma floor is out of gamut here: keep the best so far
             break
         contrast = contrast_ratio(rgb_, bg)
@@ -265,7 +247,7 @@ def move_to_contrast(c, bg, target, floor):
     return best
 
 
-def adjust_one(c, bg, target, is_ansi):
+def adjust_one(c, bg, target, is_ansi, space="srgb"):
     """move_to_contrast with the chroma floors in order: a colored ANSI color first keeps a
     margin above CHROMA_MIN; if that misses the target, just above it (still colored, so the
     gate's monochrome check can't flip). Text may go grey. None if nothing beat c."""
@@ -278,7 +260,7 @@ def adjust_one(c, bg, target, is_ansi):
         floors = [CHROMA_MIN + FIX_STEP, CHROMA_MIN + GAMUT_FLOOR_MARGIN]
     best = None
     for floor in floors:
-        moved = move_to_contrast(c, bg, target, min(chroma, floor))
+        moved = move_to_contrast(c, bg, target, min(chroma, floor), space)
         if moved is not None and (
             best is None or contrast_ratio(moved, bg) > contrast_ratio(best, bg)
         ):
@@ -288,13 +270,14 @@ def adjust_one(c, bg, target, is_ansi):
     return best
 
 
-def separate_accents(palette, bg):
+def separate_accents(palette, bg, spaces):
     """Nudge look-alike accents (ANSI 1-6) apart until 5 are distinct; None if it can't.
 
     Deterministic, at most DISTINCT_MAX_STEPS * 6 moves shared by all the accents (one accent
     can take most of them): each move takes one of the closest pair DISTINCT_STEP in lightness
     away from the other, preferring a move that also raises its contrast, and never below its
-    contrast target.
+    contrast target. So a readable accent can lose some contrast (down to its target) to
+    tell it from its look-alike. spaces: {key: its color space}, for the gamut check.
     """
     work = dict(palette)
     bg_lightness = oklab(bg)[0]
@@ -310,7 +293,10 @@ def separate_accents(palette, bg):
             lightness, a, b = labs[k]
             direction = 1 if lightness >= labs[other][0] else -1
             candidate = lch_to_rgb(
-                lightness + direction * DISTINCT_STEP, math.hypot(a, b), math.atan2(b, a)
+                lightness + direction * DISTINCT_STEP,
+                math.hypot(a, b),
+                math.atan2(b, a),
+                spaces[k],
             )
             if candidate and contrast_ratio(candidate, bg) >= FIX_TARGETS[k]:
                 raises = (lightness >= bg_lightness) == (direction > 0)
@@ -329,27 +315,29 @@ def fix_colors(colors):
     """
     bg = rgb(colors["Background Color"])
     palette = {k: rgb(colors[k]) for k in FIX_TARGETS}
+    shown_before = dict(palette)  # converted once: rgb() of a P3 or Generic RGB color isn't free
+    spaces = {k: space_of(colors[k]) for k in FIX_TARGETS}
     for key, target in FIX_TARGETS.items():
         if contrast_ratio(palette[key], bg) < target - CONTRAST_EPS:
-            moved = adjust_one(palette[key], bg, target, key != "Foreground Color")
+            moved = adjust_one(palette[key], bg, target, key != "Foreground Color", spaces[key])
             if moved is not None:
                 palette[key] = moved
     # A bright color (ANSI 9-14) that ended up identical to its normal one, though they
     # differed, gets a little more contrast so the two stay apart.
     for i in range(1, 7):
         normal, bright = f"Ansi {i} Color", f"Ansi {i + 8} Color"
-        if palette[bright] == palette[normal] and rgb(colors[bright]) != rgb(colors[normal]):
+        if palette[bright] == palette[normal] and shown_before[bright] != shown_before[normal]:
             nudged = adjust_one(
-                palette[bright], bg, contrast_ratio(palette[bright], bg) + 0.1, True
+                palette[bright], bg, contrast_ratio(palette[bright], bg) + 0.1, True, spaces[bright]
             )
             if nudged is not None:
                 palette[bright] = nudged
     labs = [oklab(palette[k]) for k in ACCENT_KEYS]
     if not is_monochrome(labs) and distinct_accents(labs) < MIN_DISTINCT_ACCENTS:
-        palette = separate_accents(palette, bg) or palette  # best effort: keep contrast fixes
+        palette = separate_accents(palette, bg, spaces) or palette  # best effort: keep fixes
     out = {}
     for k, v in palette.items():
-        before = rgb(colors[k])
+        before = shown_before[k]
         if v != before:
             keep = stored(colors[k], v)
             shown = rgb({**colors[k], **dict(zip(COMPONENTS, keep))})  # as it will look
@@ -376,9 +364,9 @@ def apply_fixes(colors, fixes):
 
 def color_hash(colors):
     """srcp_schema.colors_hash of a prefs preset dict: its raw components, as stored."""
-    # The stored components, not rgb(): that converts P3 ones for the color math.
+    # The stored components, not rgb(): that converts P3 and Generic RGB ones for the math.
     raw = {k: tuple(colors[k][c] for c in COMPONENTS) for k in HASH_KEYS}
-    return colors_hash(raw, {k for k in HASH_KEYS if is_p3(colors[k])})
+    return colors_hash(raw, {k: space_of(colors[k]) for k in HASH_KEYS})
 
 
 def yaml_variants(repo):
@@ -482,6 +470,11 @@ MIGRATIONS = [
     # (srcp_schema.MIN_SCHEMA), so this rebuild happens.
     """
     -- nothing to change
+    """,
+    # 8: no table changes. Untagged and "Calibrated" colors are now judged as the Generic RGB
+    # iTerm2 draws them in, and marked in color_hash: stale rows again, so the same rebuild.
+    """
+    -- nothing to change either
     """,
 ]
 

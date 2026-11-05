@@ -198,7 +198,7 @@ def main():
         modes = [args.mode] if args.mode else ["light", "dark"]
         results = [odds(db, m) for m in modes]
     except OldSchema as e:
-        sys.exit(f"The DB is too old: {e}.")
+        sys.exit(f"The DB doesn't fit this version: {e}.")
     except sqlite3.OperationalError as e:
         if is_busy(e):
             sys.exit(f"The DB is busy ({e}). Try again in a moment.")

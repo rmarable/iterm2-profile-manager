@@ -10,15 +10,14 @@ import os
 import sys
 
 import iterm2
-from iterm2.color import ColorSpace
 
-# .tools/srcp_schema.py converts Display P3 colors to sRGB, so they're scored as they look;
-# without it (a partial install) they're scored as if sRGB.
+# .tools/srcp_schema.py converts Display P3 and Generic RGB colors to sRGB, so they're
+# scored as they look, with the build's own contrast; setup.sh installs it.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".tools"))
 try:
-    from srcp_schema import p3_to_srgb
+    import srcp_schema
 except ImportError:
-    p3_to_srgb = None
+    srcp_schema = None
 
 ANSI_KEYS = [f"Ansi {i} Color" for i in range(16)]
 BG_KEY = "Background Color"
@@ -30,21 +29,9 @@ def saturation(r, g, b):
     return s
 
 
-def relative_luminance(r, g, b):
-    def chan(c):
-        c = c / 255
-        return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
-
-    return 0.2126 * chan(r) + 0.7152 * chan(g) + 0.0722 * chan(b)
-
-
-def contrast_ratio(rgb1, rgb2):
-    l1 = relative_luminance(*rgb1) + 0.05
-    l2 = relative_luminance(*rgb2) + 0.05
-    return max(l1, l2) / min(l1, l2)
-
-
 async def score_preset(connection, name):
+    if srcp_schema is None:  # main() says so
+        return None
     try:
         preset = await iterm2.ColorPreset.async_get(connection, name)
     except (iterm2.GetPresetException, iterm2.ListPresetsException):  # e.g. deleted meanwhile
@@ -54,11 +41,9 @@ async def score_preset(connection, name):
 
     colors = {}
     for v in preset.values:
-        rgb = (v.red, v.green, v.blue)
-        if v.color_space == ColorSpace.P3 and p3_to_srgb:
-            srgb = p3_to_srgb(tuple(c / 255 for c in rgb))
-            rgb = tuple(255 * min(1.0, max(0.0, c)) for c in srgb)  # clipped, as the build does
-        colors[v.key] = rgb
+        space = srcp_schema.space_named(v.color_space.value)  # no space at all: Calibrated
+        srgb = srcp_schema.to_srgb(space, (v.red / 255, v.green / 255, v.blue / 255))
+        colors[v.key] = tuple(255 * min(1.0, max(0.0, c)) for c in srgb)  # clipped, as the build
 
     bg = colors.get(BG_KEY)
     fg = colors.get(FG_KEY)
@@ -71,7 +56,7 @@ async def score_preset(connection, name):
 
     bg_sat = saturation(*bg)
     avg_ansi_sat = sum(saturation(*c) for c in ansi_colors) / len(ansi_colors)
-    contrast = contrast_ratio(bg, fg)
+    contrast = srcp_schema.contrast_ratio(tuple(c / 255 for c in bg), tuple(c / 255 for c in fg))
 
     pop_score = (avg_ansi_sat * 0.7) + (bg_sat * 0.3)
 
@@ -85,8 +70,9 @@ async def score_preset(connection, name):
 
 
 async def main(connection):
-    if p3_to_srgb is None:
-        print("[warn] .tools/srcp_schema.py not found: Display P3 presets are scored as sRGB")
+    if srcp_schema is None:
+        print("[error] .tools/srcp_schema.py not found: run ./setup.sh again from Terminal.app")
+        return
     names = await iterm2.ColorPreset.async_get_list(connection)
     print(f"[info] scoring {len(names)} installed presets...\n")
 

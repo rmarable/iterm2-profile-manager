@@ -4,6 +4,10 @@ What changed for someone using iTerm2 Profile Manager, newest first. Releases up
 
 ## Unreleased
 
+- After updating, run `python3 .tools/srcp_build_scheme_db.py` once (the database is now schema 8), then restart the main script from the Scripts menu or relaunch iTerm2. Until it's restarted, a main script from before the update would treat about 180 presets as changed and leave them unadjusted.
+- From this version on, a main script still running from before an update says to restart it, instead of reading a database built by newer code.
+- Presets whose colors have no color space, or "Calibrated" (about 180 of the repo's), are judged and adjusted as iTerm2 actually draws them, in Apple's Generic RGB, instead of as sRGB. Most of them are dark themes that need fewer adjustments now; a few, like Violet Light and Grass, are now adjusted more or judged harder to read.
+- The Scripts menu's **srcp_score_presets.py** scores those presets as they look too. It now needs `.tools/srcp_schema.py` (`setup.sh` installs it) and says so instead of scoring without it.
 - Each new tab's Console line ends with how long coloring it took, e.g. `(84 ms)`.
 - A busy database no longer makes a tab that was colored fine report "took over 30 s and was given up"; its launch is recorded once the database is free.
 - Tabs opened while the main script is starting up are colored sooner: they no longer wait for it to finish, and the tabs already open are colored before it reads iTerm2's settings.

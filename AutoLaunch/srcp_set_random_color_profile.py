@@ -39,7 +39,6 @@ from typing import IO, Any, NamedTuple, TypeVar
 import iterm2
 from iterm2 import api_pb2
 from iterm2.capabilities import supports_context_menu_submenus_and_visibility
-from iterm2.color import ColorSpace
 
 # What this script shares with the build and the other tools; setup.sh installs them in the
 # Scripts folder's .tools/, next to AutoLaunch/ (a checkout that is the Scripts folder has them).
@@ -61,16 +60,19 @@ try:
         colors_hash,
         is_busy,
         schema_problem,
+        space_named,
+        space_of,
     )
 except ImportError as e:
     print(
-        f"[error] missing {TOOLS}/srcp_schema.py, srcp_db_backup.py or srcp_iterm_prefs.py "
+        f"[error] missing or outdated {TOOLS}/srcp_schema.py, srcp_db_backup.py or "
+        "srcp_iterm_prefs.py "
         f"({e}); run ./setup.sh again",
         flush=True,
     )
     sys.exit(1)
 
-VERSION = "0.12.0"  # bump on every change, so the Console shows which code is running
+VERSION = "0.12.1"  # bump on every change, so the Console shows which code is running
 LOCK_PATH = os.path.join(DATA_DIR, ".lock")
 # How often the running script checks whether a snapshot is due. asyncio's clock stops while
 # the Mac sleeps, so check often (it's a few file stats) to keep it close to daily.
@@ -352,16 +354,16 @@ def usable_fixes(
     fixes_json: str | None,
     built_hash: str | None,
     live: dict[str, tuple[float, float, float]],
-    p3_keys: set[str],
+    spaces: dict[str, str],
 ) -> dict[str, tuple[float, float, float]]:
     """{key: (r, g, b)} to apply to preset, or {} (none, or its colors changed since the build).
 
-    live: the installed preset's own colors, before any adjustment; p3_keys: those whose
-    color space is Display P3 (the fixes are in each color's own space).
+    live: the installed preset's own colors, before any adjustment; spaces: each one's color
+    space, as srcp_schema.space_of names them (the fixes are in each color's own space).
     """
     if not fixes_json:
         return {}
-    if colors_hash(live, p3_keys) != built_hash:
+    if colors_hash(live, spaces) != built_hash:
         warn_once(
             f"fixes-stale-{preset}",
             f"{preset} changed since the DB was built; its color adjustments are skipped "
@@ -382,8 +384,10 @@ def adjust_preset(
 ) -> int:
     """Apply the adjustments to preset's colors in place (each keeps its color space)."""
     live = {v.key: (v.red / 255, v.green / 255, v.blue / 255) for v in preset.values}
-    p3 = {v.key for v in preset.values if getattr(v, "color_space", None) == ColorSpace.P3}
-    fixes = usable_fixes(name, fixes_json, built_hash, live, p3)
+    # The API reports a color with no space as Calibrated, as iTerm2 draws it (checked
+    # 2026-11-05, read-only ColorPreset.async_get), so this hashes like the build's prefs dicts.
+    spaces = {v.key: space_named(v.color_space.value) for v in preset.values}
+    fixes = usable_fixes(name, fixes_json, built_hash, live, spaces)
     for v in preset.values:
         if v.key in fixes:
             v.red, v.green, v.blue = (c * 255 for c in fixes[v.key])
@@ -400,8 +404,8 @@ def adjust_colors(
         for k, v in colors.items()
         if isinstance(v, dict) and all(c in v for c in COMPONENTS)
     }
-    p3 = {k for k, v in colors.items() if isinstance(v, dict) and v.get("Color Space") == "P3"}
-    fixes = usable_fixes(name, fixes_json, built_hash, live, p3)  # pyright: ignore[reportArgumentType]  # 3-tuples by construction
+    spaces = {k: space_of(v) for k, v in colors.items() if isinstance(v, dict)}
+    fixes = usable_fixes(name, fixes_json, built_hash, live, spaces)  # pyright: ignore[reportArgumentType]  # 3-tuples by construction
     adjusted = {
         k: {**colors[k], **dict(zip(COMPONENTS, rgb, strict=True))} for k, rgb in fixes.items()
     }
