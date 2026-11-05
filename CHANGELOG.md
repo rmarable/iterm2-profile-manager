@@ -2,7 +2,7 @@
 
 What changed for someone using iTerm2 Profile Manager, newest first. Releases up to v0.7.1 are described on [GitHub releases](https://github.com/rmarable/iterm2-profile-manager/releases).
 
-## Unreleased
+## v0.12.2 (2026-11-05)
 
 - The database build refuses a damaged database, with a sentence on how to restore a snapshot, instead of stopping with an error after copying the damage into `backups/`, where it could push a good snapshot out.
 - Restoring a curation export (`sqlite3 schemes.db < srcp-curation-….sql`) waits up to 5 seconds for the main script to finish a write, instead of failing with "database is locked".
