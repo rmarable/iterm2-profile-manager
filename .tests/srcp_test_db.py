@@ -71,6 +71,11 @@ class DbTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="srcp-test-")
         self.addCleanup(shutil.rmtree, self.tmp)
+        # The main script quits with os._exit, which would end the whole test run with
+        # status 0 (so lint.sh would pass with the rest unrun): raise SystemExit instead.
+        patch = mock.patch.object(os, "_exit", side_effect=sys.exit)
+        patch.start()
+        self.addCleanup(patch.stop)
         self.repo = os.path.join(self.tmp, "repo")
         os.makedirs(os.path.join(self.repo, "schemes"))
         for name in REPO_NAMES:
@@ -574,9 +579,20 @@ class MainScriptTest(DbTest):
             return None
 
         connection = types.SimpleNamespace(websocket=types.SimpleNamespace(wait_closed=closed))
-        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as cm:
-            asyncio.run(self.main["exit_on_disconnect"](connection))
-        self.assertEqual(cm.exception.code, 0)
+        store = self.main["Store"](self.db_path)
+        with contextlib.redirect_stdout(io.StringIO()):
+            asyncio.run(store.call(self.main["read_config"]))  # opens its connection
+        with (
+            contextlib.redirect_stdout(io.StringIO()),
+            mock.patch.object(os, "_exit", side_effect=SystemExit) as exit_now,
+            self.assertRaises(SystemExit),
+        ):
+            asyncio.run(self.main["exit_on_disconnect"](connection, store))
+        with self.assertRaises(sqlite3.ProgrammingError):
+            store.db.execute("SELECT 1")  # closed first, so SQLite cleans up its -wal/-shm
+        # os._exit, not sys.exit: unwinding would unsubscribe the monitors over the closed
+        # connection.
+        exit_now.assert_called_once_with(0)
 
     def test_change_ends_the_old_launch_and_close_ends_the_new(self):
         self.main["now"] = lambda: "2026-11-05 12:00:00"  # no second boundary mid-test
@@ -622,7 +638,7 @@ class MainScriptTest(DbTest):
     def test_reroll_replaces_the_look_and_never_repeats_it(self):
         self.fixing("0")  # Murky (unreadable) stays out of the re-roll
         self.tab({"user.color_preset": "Dark One"})
-        color = self.main["color_session"]
+        color = self.main["color_one_at_a_time"]  # colors, then records the launch
         self.record("Dark One", "Monaco", 13, "dark", "discovery", None, "Default", "s1")
         self.run_quietly(color(None, self.app, self.store, self.session))  # has a look: left alone
         self.profile.async_set_color_preset.assert_not_called()
@@ -631,6 +647,37 @@ class MainScriptTest(DbTest):
         self.assertEqual(self.variables["user.color_preset"], "Dark Two")
         rows = self.db.execute("SELECT preset, end_reason FROM launches ORDER BY id")
         self.assertEqual(rows.fetchall(), [("Dark One", "changed"), ("Dark Two", None)])
+
+    def test_a_favorite_warns_again_when_its_preset_goes_missing_after_coming_back(self):
+        self.main["save_favorite"](self.db, "Dark One", "Monaco", 13, 4)
+        rows = self.main["read_favorites"](self.db).rows
+        favorite_profiles = self.main["favorite_profiles"]
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            favorite_profiles(rows, {}, "Default", None)  # not installed: warned
+            favorite_profiles(rows, {}, "Default", None)  # still not: once
+            favorite_profiles(rows, {"Dark One": DARK}, "Default", None)  # back
+            favorite_profiles(rows, {}, "Default", None)  # gone again: warned again
+        self.assertEqual(out.getvalue().count("isn't an installed preset"), 2)
+
+    def test_a_current_profiles_file_clears_a_half_written_copy(self):
+        self.export_prefs({"Custom Color Presets": {"Dark One": DARK}})
+        self.main["save_favorite"](self.db, "Dark One", "Monaco", 13, 4)
+        self.assertIsNotNone(self.write_profiles())
+        folder, name = os.path.split(self.main["DYNAMIC_PATH"])
+        partial = os.path.join(folder, f".{name}.partial")
+        open(partial, "w").close()  # a run that quit between the write and the rename
+        self.assertIsNone(self.write_profiles())  # current: nothing written
+        self.assertFalse(os.path.exists(partial))
+
+    def test_a_deleted_profiles_file_is_written_again(self):
+        self.export_prefs({"Custom Color Presets": {"Dark One": DARK}})
+        self.main["save_favorite"](self.db, "Dark One", "Monaco", 13, 4)
+        self.main["_profiles_state"][0] = None
+        self.assertEqual(self.sync_now(), 1)
+        self.assertIsNone(self.sync_now())  # current: nothing to do
+        os.remove(self.main["DYNAMIC_PATH"])  # deleted by hand
+        self.assertEqual(self.sync_now(), 1)
+        self.assertTrue(os.path.exists(self.main["DYNAMIC_PATH"]))
 
     def test_font_label_edits_trigger_a_profiles_rewrite(self):
         self.export_prefs({"Custom Color Presets": {"Dark One": DARK}})
@@ -1397,7 +1444,7 @@ class ColorFixTest(DbTest):
         out = self.run_quietly(self.main["color_session"](None, self.app, self.store, self.session))
         n = len(json.loads(self.scheme_fixes("Murky")))
         line = next(x for x in out.splitlines() if "Murky |" in x)  # random font
-        self.assertTrue(line.endswith(f" 13, {self.main['colors_adjusted'](n)}"), line)
+        self.assertRegex(line, rf" 13, {self.main['colors_adjusted'](n)} \(\d+ ms\)$")
         self.assertEqual(self.variables["user.adjusted"], n)
         self.profile.async_set_color_preset.assert_called_once_with(preset)
         fg = next(v for v in preset.values if v.key == "Foreground Color")
@@ -1505,6 +1552,185 @@ class TabTest(DbTest):
         self.assertIn("Change to another profile", out)  # how to fix a half-done tab
         self.assertEqual(self.main["_coloring"], {})  # freed for the next try
 
+    def test_a_locked_db_while_recording_doesnt_give_the_tab_up(self):
+        self.fixing("0")
+        self.tab({})
+        real = self.main["record_launch"]
+
+        def locked(db, launch):  # waits on the DB, as a busy one makes it (up to 5 s)
+            time.sleep(1.0)
+            real(db, launch)
+
+        self.main["record_launch"] = locked
+        self.main["COLOR_TIMEOUT_S"] = 0.5  # shorter than the wait: only the coloring counts
+        color_once = self.main["color_one_at_a_time"]
+        out = self.run_quietly(color_once(None, self.app, self.store, self.session))
+        self.assertNotIn("given up", out)
+        self.assertIn("user.color_preset", self.variables)
+        self.assertEqual(self.db.execute("SELECT count(*) FROM launches").fetchone(), (1,))
+
+    def test_a_favorite_profile_tab_logs_its_time_and_is_recorded(self):
+        self.main["save_favorite"](self.db, "Dark One", "Monaco", 13, 4)
+        self.tab({})
+        self.profile.original_guid = self.main["favorite_guid"]("Dark One", "Monaco")
+        color_once = self.main["color_one_at_a_time"]
+        out = self.run_quietly(color_once(None, self.app, self.store, self.session))
+        self.assertRegex(out, r"favorite profile 4 ★: Dark One \| Monaco 13(, [^(]+)? \(\d+ ms\)")
+        rows = self.db.execute("SELECT preset, source, end_reason FROM launches").fetchall()
+        self.assertEqual(rows, [("Dark One", "favorite", None)])
+
+    def test_a_reroll_waits_until_the_previous_one_is_recorded(self):
+        self.fixing("0")
+        self.tab({"user.color_preset": "Dark One"})
+        self.record("Dark One", "Monaco", 13, "dark", "discovery", None, "Default", "s1")
+        main, real = self.main, self.store
+        picks = []
+
+        class GatedStore:  # the first re-roll's row waits, without holding the DB lock
+            def __init__(self):
+                self.gate, self.recording = asyncio.Event(), asyncio.Event()
+
+            async def call(self, fn, *args):
+                if fn is main["pick_look"]:
+                    picks.append(1)
+                if fn is main["record_change"] and not self.gate.is_set():
+                    self.recording.set()
+                    await self.gate.wait()
+                return await real.call(fn, *args)
+
+        color_once = self.main["color_one_at_a_time"]
+
+        async def scenario():
+            store = GatedStore()
+            first = asyncio.ensure_future(
+                color_once(None, self.app, store, self.session, reroll=True)
+            )
+            await store.recording.wait()  # colored, its row not written yet
+            second = asyncio.ensure_future(
+                color_once(None, self.app, store, self.session, reroll=True)
+            )
+            await asyncio.sleep(0.05)
+            self.assertEqual(len(picks), 1)  # the second waits for the first's row
+            store.gate.set()
+            await asyncio.gather(first, second)
+
+        self.run_quietly(scenario())
+        rows = self.db.execute("SELECT preset, end_reason FROM launches ORDER BY id").fetchall()
+        self.assertEqual([r[1] for r in rows], ["changed", "changed", None])
+        self.assertEqual(rows[-1][0], self.variables["user.color_preset"])
+
+    def test_a_favorite_whose_saved_font_is_off_says_so(self):
+        self.fixing("0")
+        self.main["save_favorite"](self.db, "Dark One", "Monaco", 13, 4)
+        self.db.execute("UPDATE fonts SET enabled = 0 WHERE name = 'Monaco'")
+        self.db.execute(
+            "UPDATE config SET value = '1' WHERE key IN ('favorite_share', 'favorite_target')"
+        )  # always the favorite
+        self.tab({})
+        out = self.run_quietly(self.main["color_session"](None, self.app, self.store, self.session))
+        self.assertIn("favorite 4 ★ (saved font off; random font): Dark One", out)
+        self.assertEqual(self.variables["user.is_favorite"], 0)  # not saved in this font
+        self.db.execute("UPDATE fonts SET enabled = 0")  # no font left to give
+        self.tab({})
+        out = self.run_quietly(self.main["color_session"](None, self.app, self.store, self.session))
+        self.assertIn("(saved font off; profile font): Dark One | (profile font) 13", out)
+
+    def test_a_disabled_saved_font_is_noted_even_if_the_random_one_is_also_saved(self):
+        self.main["save_favorite"](self.db, "Dark One", "Monaco", 13, 4)
+        self.main["save_favorite"](self.db, "Dark One", "Menlo-Regular", 13, 2)
+        self.db.execute("UPDATE fonts SET enabled = (name = 'Menlo-Regular')")  # Monaco off
+        self.main["pick"] = lambda db, mode, exclude: ("Dark One", None, "favorite", 4)  # Monaco's
+        look = self.main["pick_look"](self.db, "dark", set())
+        self.assertEqual(
+            (look.font, look.is_favorite, look.font_off), ("Menlo-Regular", True, True)
+        )
+
+    def test_a_favorite_in_its_saved_font_has_no_note_even_with_others_off(self):
+        self.fixing("0")
+        self.main["save_favorite"](self.db, "Dark One", "Monaco", 13, 4)
+        self.db.execute(
+            "UPDATE config SET value = '1' WHERE key IN ('favorite_share', 'favorite_target')"
+        )
+        self.tab({})
+        out = self.run_quietly(self.main["color_session"](None, self.app, self.store, self.session))
+        self.assertIn("favorite 4 ★: Dark One | Monaco 13", out)
+        self.assertNotIn("saved font off", out)
+
+    def test_a_db_failure_leaves_a_tabs_favorite_mark_alone(self):
+        self.tab({"user.color_preset": "Dark One", "user.font": "Monaco", "user.is_favorite": 1})
+        tab = types.SimpleNamespace(all_sessions=[self.session])
+        self.app.windows = [types.SimpleNamespace(tabs=[tab])]
+
+        def locked(db, preset, font):
+            raise sqlite3.OperationalError("database is locked")
+
+        self.main["is_favorite"] = locked
+        tab.all_sessions.append(self.session)  # two tabs of it: one failure, said once
+        out = self.run_quietly(self.main["favorites_changed"](self.app, self.store, "Dark One"))
+        self.assertEqual(self.variables["user.is_favorite"], 1)  # unknown, so not changed
+        self.assertEqual(out.count("database is locked"), 1)
+
+    def test_a_failing_tab_doesnt_stop_the_favorites_check(self):
+        self.tab({"user.color_preset": "Dark One", "user.font": "Monaco", "user.is_favorite": 1})
+        tab = types.SimpleNamespace(all_sessions=[self.session])
+        self.app.windows = [types.SimpleNamespace(tabs=[tab])]
+
+        def broken(db, preset, font):
+            raise ValueError("unexpected")
+
+        self.main["is_favorite"] = broken
+        spawned = []
+        self.main["spawn"] = lambda what, coro: spawned.append(what) or coro.close()
+        out = self.run_quietly(self.main["favorites_changed"](self.app, self.store, "Dark One"))
+        self.assertIn("favorite mark not updated on session s1: ValueError", out)
+        self.assertEqual(spawned, ["favorite profiles sync"])  # still synced after it
+
+    def test_nothing_left_to_pick_on_a_reroll_is_said_every_time(self):
+        self.tab({"user.color_preset": "Dark One"})
+        self.main["pick_look"] = lambda db, mode, exclude: ()
+        color = self.main["color_session"]
+        out = "".join(
+            self.run_quietly(color(None, self.app, self.store, self.session, reroll=True))
+            for _ in range(2)
+        )
+        self.assertEqual(out.count("nothing left to pick"), 2)  # the dialog says to look here
+        self.tab({})
+        out = "".join(
+            self.run_quietly(color(None, self.app, self.store, self.session)) for _ in range(2)
+        )
+        self.assertEqual(out.count("no dark presets to pick from"), 1)  # new tabs: once
+
+    def test_a_background_task_that_fails_is_logged(self):
+        async def broken():
+            raise RuntimeError("boom")
+
+        async def scenario():
+            self.main["spawn"]("the check", broken())
+            await asyncio.sleep(0.01)
+
+        out = self.run_quietly(scenario())
+        self.assertIn("[warn] the check failed: RuntimeError('boom')", out)
+        self.assertIn("Traceback", out)  # a bug: where it happened, too
+        self.assertEqual(self.main["_background"], set())
+
+    def test_startup_colors_open_tabs_before_reading_the_settings(self):
+        self.tab({})
+        tab = types.SimpleNamespace(all_sessions=[self.session])
+        self.app.windows = [types.SimpleNamespace(tabs=[tab])]
+        self.app.buried_sessions = []
+        order = []
+
+        async def colored(*args, **kwargs):
+            order.append("color")
+
+        async def synced(store):
+            order.append("sync")
+
+        self.main["color_one_at_a_time"] = colored
+        self.main["sync_and_log"] = synced
+        self.run_quietly(self.main["startup"](None, self.app, self.store, "2026-11-05 12:00:00"))
+        self.assertEqual(order, ["color", "sync"])
+
     def test_a_failing_profiles_write_is_retried_rarely_and_logged_once(self):
         self.export_prefs({"Custom Color Presets": {"Dark One": DARK}})
         self.main["save_favorite"](self.db, "Dark One", "Monaco", 13, 3)
@@ -1601,7 +1827,8 @@ class TabTest(DbTest):
         )
         self.tab({})
         self.profile.original_guid = self.main["favorite_guid"]("Gone", "Monaco")
-        self.run_quietly(self.main["color_session"](None, self.app, self.store, self.session))
+        color = self.main["color_one_at_a_time"]
+        self.run_quietly(color(None, self.app, self.store, self.session))
         self.assertEqual(self.db.execute("SELECT mode FROM launches").fetchall(), [("dark",)])
 
     def test_never_show_from_the_rating_dialog_rerolls_the_tab(self):

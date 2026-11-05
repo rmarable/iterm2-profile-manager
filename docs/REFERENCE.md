@@ -25,7 +25,7 @@ Right-click a session → **Change to another profile** re-rolls its look on the
 
 Each favorite becomes a profile named `<preset> - <font>` under **Profiles → Favorites**. Sessions opened from one keep that look.
 
-The main script writes these profiles to a Dynamic Profiles file (see [Files on disk](#files-on-disk)); iTerm2 reloads it automatically. Each profile is based on your default profile, so it keeps your other settings (triggers, key bindings, etc.). Edits made to one in Settings are lost when the file is rewritten. A favorite is one preset + font: changing the font in a session doesn't change what the rating dialog saves (it uses the font the script applied). To keep a preset with another font, rate it from a tab that shows it in that font; to drop the old one, open it from **Profiles → Favorites** and choose **Remove favorite**. If the file is deleted, it comes back at the next script start or favorite change.
+The main script writes these profiles to a Dynamic Profiles file (see [Files on disk](#files-on-disk)); iTerm2 reloads it automatically. Each profile is based on your default profile, so it keeps your other settings (triggers, key bindings, etc.). Edits made to one in Settings are lost when the file is rewritten. A favorite is one preset + font: changing the font in a session doesn't change what the rating dialog saves (it uses the font the script applied). To keep a preset with another font, rate it from a tab that shows it in that font; to drop the old one, open it from **Profiles → Favorites** and choose **Remove favorite**. If the file is deleted, it comes back within 30 seconds.
 
 ## Review ratings
 
@@ -70,7 +70,7 @@ For each new session, the main script:
 3. **Chooses a favorite or a discovery preset.** Chance of a favorite: `favorite_share × min(1, favorite presets in this mode / favorite_target)`. With defaults that is 5% per favorite preset, capped at 50% from 10 on. No favorites means discovery every time.
    - **Favorite:** weighted by stars per saved preset + font (a 5 ★ is picked 5× as often as a 1 ★; a preset saved with three fonts has three chances), in its saved font. If that font has since been disabled, a random one.
    - **Discovery:** a preset of this mode (with `fix_colors` off: only one that passes the readability checks) that isn't a favorite, and isn't among the last 20 discovery picks in this mode. Colored-background presets (yellow, pink, teal rather than white, grey or black) get 3× weight. They are rare, so this lifts them to roughly a fifth of light and a third of dark sessions. Random font.
-4. **Applies the preset and font** to this session only, at the profile's font size, with the preset's [color adjustments](#color-adjustments) (the Console line ends ", N colors adjusted"). Also sets the non-ASCII font to MesloLGS Nerd Font (`nonascii_font`), so prompt icons (Powerlevel10k etc.) render with any font.
+4. **Applies the preset and font** to this session only, at the profile's font size, with the preset's [color adjustments](#color-adjustments) (the Console line ends ", N colors adjusted", then how long coloring the tab took, e.g. "(84 ms)"). Also sets the non-ASCII font to MesloLGS Nerd Font (`nonascii_font`), so prompt icons (Powerlevel10k etc.) render with any font.
 5. **Logs the launch**, and the close time when the session ends. Sessions open when iTerm2 quits get `end_reason = 'unknown'` at the next start. A look replaced by **Change to another profile** ends with `end_reason = 'changed'`.
 
 ### Light or dark

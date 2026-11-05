@@ -57,7 +57,7 @@ Setup changes iTerm2's settings, and iTerm2 overwrites them when it quits, so ru
    ./setup.sh
    ```
 
-3. Open iTerm2. **Scripts → Manage → Console** should show `srcp_set_random_color_profile <version>`, then one line per new session, e.g. `[info] dark discovery: Nord | Menlo-Regular 13`.
+3. Open iTerm2. **Scripts → Manage → Console** should show `srcp_set_random_color_profile <version>`, then one line per new session, e.g. `[info] dark discovery: Nord | Menlo-Regular 13 (84 ms)`.
 
 `setup.sh` is safe to re-run. It:
 
@@ -131,10 +131,10 @@ Kept: this repo, iTerm2 settings backups, shell config, and the Claude Code inte
 | Console: `no scheme DB at ...` | Run `python3 .tools/srcp_build_scheme_db.py`. No restart needed. |
 | Console: `preset not found: X` | Preset renamed or deleted in iTerm2. Run `python3 .tools/srcp_build_scheme_db.py`. |
 | Console: `3 picks in a row weren't installed presets` | Same cause, for many presets at once (presets were removed). Run `python3 .tools/srcp_build_scheme_db.py`. |
-| Console: `no dark presets to pick from; sessions left as is` (or `light`) | Every preset of that mode is hidden or left out. Show some again with **Scripts → srcp_never_show.py**. |
+| Console: `no dark presets to pick from; sessions left as is` (or `light`), or after **Change to another profile** / **Never show**, `nothing left to pick: ...` | Every preset of that mode is hidden or left out. Show some again with **Scripts → srcp_never_show.py**. |
 | Console: `the scheme DB is schema N, older than this version reads ...` | The scripts were updated but the database wasn't rebuilt. Run `python3 .tools/srcp_build_scheme_db.py`; new tabs are colored again right away, no restart needed. |
 | Console: `MesloLGSNFM-Regular isn't installed; icon font left as is` | Prompt icons (Powerlevel10k and the like) need MesloLGS Nerd Font: `brew install --cask font-meslo-lg-nerd-font`, or turn the icon font off ([Configuration](docs/REFERENCE.md#configuration)). Tabs are colored either way. |
-| Console: `favorite profiles not updated: ...` | Reading iTerm2's settings failed or took over 30 s, so **Profiles → Favorites** wasn't refreshed. Tabs are still colored; it's tried again when anything changes, or every 10 minutes. |
+| Console: `favorite profiles not updated (tried again every 10 minutes): ...` | Reading iTerm2's settings failed or took over 30 s, so **Profiles → Favorites** wasn't refreshed. Tabs are still colored; it's tried again when anything changes, or every 10 minutes. |
 | Console: `X changed since the DB was built; its color adjustments are skipped` | You edited or re-imported the preset after the last build, so its colors show unadjusted. Run `python3 .tools/srcp_build_scheme_db.py`. No restart needed. |
 | A preset looks a little different from its screenshots | Colors that were hard to see are adjusted. To see the originals, turn that off: [docs/REFERENCE.md](docs/REFERENCE.md#color-adjustments). |
 | Most presets show your default profile's colors | Settings → Profiles → Colors: turn off **Use separate colors for light and dark mode** (few presets define both). |

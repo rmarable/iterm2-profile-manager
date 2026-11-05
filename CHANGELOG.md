@@ -4,6 +4,16 @@ What changed for someone using iTerm2 Profile Manager, newest first. Releases up
 
 ## Unreleased
 
+- Each new tab's Console line ends with how long coloring it took, e.g. `(84 ms)`.
+- A busy database no longer makes a tab that was colored fine report "took over 30 s and was given up"; its launch is recorded once the database is free.
+- Tabs opened while the main script is starting up are colored sooner: they no longer wait for it to finish, and the tabs already open are colored before it reads iTerm2's settings.
+- When iTerm2 quits, the main script exits at once, and closes the database first, so its `schemes.db-wal` / `-shm` files are cleaned up (unless another tool has the database open).
+- The Console line for a favorite whose saved font you've since turned off says so (it still comes up, in a random font, or the profile's if none is on).
+- **Profiles → Favorites** is written again within 30 seconds if its file was deleted.
+- The Console warns again about a favorite whose preset goes missing a second time, once its profiles have been rewritten in between.
+- **Change to another profile** and **Never show** say in the Console every time there's nothing left to pick, not only the first time.
+- A database problem while you save or remove a favorite no longer marks open tabs of it as not favorites.
+- **Never show** (from the rating dialog or right-click) gives the tab its new look without waiting for **Profiles → Favorites** to be rewritten; saving and removing favorites don't wait for it either.
 - `setup.sh` no longer overwrites a font you already have under the same name; it only updates its own copy, and leaves any other one alone. To get Terminal.app's copy instead, delete yours in Font Book and run `setup.sh` again.
 - `./uninstall.sh --repo` keeps the iTerm2-Color-Schemes clone if it holds files of yours that git ignores (for example `notes.bak`), not only changes and commits. `.DS_Store` files don't count.
 - `./uninstall.sh --fonts` also removes a font `setup.sh` installed after Terminal.app's own copy has changed, as long as the installed one is unchanged.

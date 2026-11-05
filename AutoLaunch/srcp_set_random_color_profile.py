@@ -30,6 +30,7 @@ import sqlite3
 import sys
 import threading
 import time
+import traceback
 import uuid
 from collections.abc import Awaitable, Callable, Coroutine
 from pathlib import Path
@@ -69,7 +70,7 @@ except ImportError as e:
     )
     sys.exit(1)
 
-VERSION = "0.11.0"  # bump on every change, so the Console shows which code is running
+VERSION = "0.12.0"  # bump on every change, so the Console shows which code is running
 LOCK_PATH = os.path.join(DATA_DIR, ".lock")
 # How often the running script checks whether a snapshot is due. asyncio's clock stops while
 # the Mac sleeps, so check often (it's a few file stats) to keep it close to daily.
@@ -316,24 +317,34 @@ class Look(NamedTuple):
     built_hash: str | None
     nonascii: str | None  # the icon font to set, if any
     is_favorite: bool  # this (preset, font) is a favorite
+    font_off: bool  # a favorite picked without its saved font, since disabled
 
 
 def pick_look(db: sqlite3.Connection, mode: str, exclude: set[str]) -> Look | tuple[()]:
-    """pick(), plus its font, adjustments and icon font; () if nothing fits."""
+    """pick(), plus its font, adjustments and icon font; () if nothing fits.
+
+    In one read transaction, so a rebuild committing meanwhile can't pair one build's pick
+    with another's adjustments (under WAL a reader never blocks the rebuild).
+    """
+    db.execute("BEGIN")  # Store.call rolls back if anything below fails
     choice = pick(db, mode, exclude)
     if not choice:
-        return ()
-    preset, font, source, stars = choice
-    font = font or random_font(db)
-    return Look(
-        preset,
-        font,
-        source,
-        stars,
-        *look_fixes(db, preset),
-        nonascii_font(db),
-        bool(font) and is_favorite(db, preset, font),
-    )
+        look: Look | tuple[()] = ()
+    else:
+        preset, saved, source, stars = choice
+        font = saved or random_font(db)
+        look = Look(
+            preset,
+            font,
+            source,
+            stars,
+            *look_fixes(db, preset),
+            nonascii_font(db),
+            bool(font) and is_favorite(db, preset, font),
+            source == "favorite" and saved is None,  # pick() drops a disabled saved font
+        )
+    db.execute("COMMIT")
+    return look
 
 
 def usable_fixes(
@@ -678,6 +689,7 @@ def favorite_profiles(
         if row.preset not in presets:
             warn_once(f"profile-{row.preset}", f"favorite {row.preset!r} isn't an installed preset")
             continue
+        _warned.discard(f"profile-{row.preset}")  # installed again: say so again if it goes
         colors, adjusted[row.preset] = adjust_colors(
             row.preset, presets[row.preset], row.fixes_json, row.built_hash
         )
@@ -717,19 +729,21 @@ def write_favorite_profiles(snap: FavoritesSnapshot) -> int | None:
         snap.rows, prefs.get("Custom Color Presets", {}), parent, snap.fallback
     )
     data = plistlib.dumps({"Profiles": profiles})
+    folder, name = os.path.split(DYNAMIC_PATH)
+    partial = os.path.join(folder, f".{name}.partial")
     try:
         with open(DYNAMIC_PATH, "rb") as f:
             if f.read() == data:
                 _profile_adjusted.update(adjusted)
+                with contextlib.suppress(FileNotFoundError):
+                    os.remove(partial)  # left by a run that quit mid-write
                 return None
     except FileNotFoundError:
         pass
-    folder, name = os.path.split(DYNAMIC_PATH)
     os.makedirs(folder, exist_ok=True)
     # Write, then rename, so iTerm2 never reads half a file. The temp name starts with a dot
     # because iTerm2 reloads every other file in the folder on any change (it skips dot-files;
     # iTermDynamicProfileManager.m), and a temp copy would duplicate every GUID.
-    partial = os.path.join(folder, f".{name}.partial")
     with open(partial, "wb") as f:
         f.write(data)
     os.replace(partial, DYNAMIC_PATH)
@@ -832,12 +846,13 @@ async def set_variables(session: iterm2.Session, **values: Any) -> None:
 
 async def keep_favorite_profile(
     store: Store, session: iterm2.Session, profile: iterm2.Profile, theme_mode: str
-) -> bool:
-    """A session opened from a favorite's profile keeps its look; True if this is one."""
+) -> tuple[Launch, int] | None:
+    """A session opened from a favorite's profile keeps its look: (its launch row to record,
+    colors adjusted), or None if this isn't one."""
     guid = profile.original_guid or profile.guid
     fav = await store.call(favorite_by_guid, guid) if guid else None
     if not fav:
-        return False
+        return None
     preset, font, stars, preset_mode, adjusted = fav
     # The preset's own mode, not the current theme: a dark favorite can be opened in light
     # mode. The theme's only if the preset is gone from the DB (not rebuilt since).
@@ -845,9 +860,6 @@ async def keep_favorite_profile(
     # What its profile file got (none if the preset changed since the build), when known.
     adjusted = _profile_adjusted.get(preset, adjusted)
     _, size = split_font(profile.normal_font)
-    # Its profile file already holds the adjusted colors (write_favorite_profiles).
-    note = f", {colors_adjusted(adjusted)}" if adjusted else ""
-    log("info", f"{mode} favorite profile {stars} ★: {preset} | {font} {size}{note}")
     await set_variables(
         session,
         color_preset=preset,
@@ -858,15 +870,20 @@ async def keep_favorite_profile(
         adjusted=adjusted,
     )
     launch = Launch(preset, font, size, mode, "favorite", stars, profile.name, session.session_id)
-    await store.call(record_launch, launch)
-    return True
+    return launch, adjusted
 
 
 # Coloring a session: at most one at a time per session, and never forever. The iterm2 module
 # sends a request before it listens for the reply, so a reply can in rare cases be lost and
-# its call never return; the timeout frees the session (and the next tab) instead.
+# its call never return; the timeout frees the session (and the next tab) instead. Kept well
+# above the DB's 5 s busy timeout; each coloring logs its time, to lower this from data.
 COLOR_TIMEOUT_S = 30
+MISSING_PICKS = 3  # picks in a row of presets no longer installed before giving up
 _coloring: dict[str, asyncio.Task[None]] = {}
+
+
+def took(started: float) -> str:
+    return f" ({(time.monotonic() - started) * 1000:.0f} ms)"
 
 
 async def color_session(
@@ -875,26 +892,44 @@ async def color_session(
     store: Store,
     session: iterm2.Session,
     reroll: bool = False,
-) -> None:
-    """reroll: replace the session's look (the menu's Change), even a favorite profile's."""
+) -> Launch | None:
+    """Give the session a look; the launch row to record, or None if it got none.
+
+    reroll: replace the session's look (the menu's Change), even a favorite profile's. The row
+    is recorded by the caller, after the time limit, so a busy DB can't run the coloring out.
+    """
+    started = time.monotonic()
     current = await session.async_get_variable("user.color_preset")
     # Already has a look: a restored window, or one startup() colored while it was also
     # queued as new. Coloring again would change it and log a second launch.
     if current and not reroll:
-        return
+        return None
     theme, profile = await asyncio.gather(app.async_get_theme(), session.async_get_profile())
     mode = "dark" if "dark" in theme else "light"
-    if not reroll and await keep_favorite_profile(store, session, profile, mode):
-        return
+    if not reroll:
+        kept = await keep_favorite_profile(store, session, profile, mode)
+        if kept:
+            launch, adjusted = kept
+            # Its profile file already holds the adjusted colors (write_favorite_profiles).
+            note = f", {colors_adjusted(adjusted)}" if adjusted else ""
+            log(
+                "info",
+                f"{launch.mode} favorite profile {launch.stars} ★: {launch.preset} | "
+                f"{launch.font} {launch.size}{note}{took(started)}",
+            )
+            return launch
     exclude: set[str] = {current} if current else set()  # a re-roll never gives the same back
-    for _ in range(3):
+    for _ in range(MISSING_PICKS):
         look = await store.call(pick_look, mode, exclude)
         if look is None:  # store.call already logged why
             log("warn", "couldn't read the DB; session left as is")
-            return
+            return None
         if not look:
-            warn_once(f"empty-{mode}", f"no {mode} presets to pick from; sessions left as is")
-            return
+            if reroll:  # asked for by hand, and the dialog says to look here: every time
+                log("warn", f"nothing left to pick: no {mode} presets; this tab keeps its look")
+            else:
+                warn_once(f"empty-{mode}", f"no {mode} presets to pick from; sessions left as is")
+            return None
         preset = await get_preset(connection, look.preset)
         if preset:
             break
@@ -903,10 +938,11 @@ async def color_session(
     else:
         warn_once(
             "presets-missing",
-            "3 picks in a row weren't installed presets, so this session was left as is; "
-            "rebuild the DB (.tools/srcp_build_scheme_db.py) after adding or removing presets",
+            f"{MISSING_PICKS} picks in a row weren't installed presets, so this session was "
+            "left as is; rebuild the DB (.tools/srcp_build_scheme_db.py) after adding or "
+            "removing presets",
         )
-        return
+        return None
 
     adjusted = adjust_preset(look.preset, preset, look.fixes_json, look.built_hash)
     _, size = split_font(profile.normal_font)
@@ -922,9 +958,11 @@ async def color_session(
     )
 
     label = f"favorite {look.stars} ★" if look.source == "favorite" else "discovery"
+    if look.font_off:
+        label += f" (saved font off; {'random font' if look.font else 'profile font'})"
     note = f", {colors_adjusted(adjusted)}" if adjusted else ""
     font_text = look.font or "(profile font)"
-    log("info", f"{mode} {label}: {look.preset} | {font_text} {size}{note}")
+    log("info", f"{mode} {label}: {look.preset} | {font_text} {size}{note}{took(started)}")
     # After the profile writes, so a tab that closed meanwhile never names a look it didn't
     # get. font "" on a tab with no font of ours, so a re-roll doesn't keep the old one's.
     await set_variables(
@@ -936,7 +974,7 @@ async def color_session(
         is_favorite=int(look.is_favorite),  # 1/0: the menu's visible_when compares with 1
         adjusted=adjusted,  # for the rating dialog
     )
-    launch = Launch(
+    return Launch(
         look.preset,
         look.font,
         size,
@@ -946,7 +984,6 @@ async def color_session(
         profile.name,
         session.session_id,
     )
-    await store.call(record_change if reroll else record_launch, launch)
 
 
 def colors_adjusted(n: int) -> str:
@@ -961,7 +998,7 @@ async def color_one_at_a_time(
     reroll: bool = False,
 ) -> None:
     """color_session, unless this session is already being colored (a re-roll waits for that
-    first), given up after COLOR_TIMEOUT_S."""
+    first), given up after COLOR_TIMEOUT_S; then record the launch it returns."""
     sid = session.session_id
     running = _coloring.get(sid)
     if running and not running.done() and not reroll:
@@ -971,18 +1008,29 @@ async def color_one_at_a_time(
     while (running := _coloring.get(sid)) and not running.done():
         with contextlib.suppress(Exception):  # its own caller logs how it went
             await running
-    task = asyncio.ensure_future(
-        asyncio.wait_for(color_session(connection, app, store, session, reroll), COLOR_TIMEOUT_S)
-    )
+
+    async def color_then_record() -> None:
+        limit = COLOR_TIMEOUT_S  # read now, so a test can shorten it
+        try:
+            launch = await asyncio.wait_for(
+                color_session(connection, app, store, session, reroll), limit
+            )
+        except TimeoutError:
+            log(
+                "warn",
+                f"coloring session {sid} took over {limit} s and was given up; if the tab looks "
+                "half-done, right-click > Change to another profile",
+            )
+            return
+        # Outside the time limit (a locked DB only delays this row; store.call logs it), but
+        # inside this session's slot, so a re-roll's row can't land before this one.
+        if launch:
+            await store.call(record_change if reroll else record_launch, launch)
+
+    task = asyncio.ensure_future(color_then_record())
     _coloring[sid] = task
     try:
         await task
-    except TimeoutError:
-        log(
-            "warn",
-            f"coloring session {sid} took over {COLOR_TIMEOUT_S} s and was given up; if the tab "
-            "looks half-done, right-click > Change to another profile",
-        )
     finally:
         if _coloring.get(sid) is task:
             del _coloring[sid]
@@ -1013,8 +1061,8 @@ async def sync_and_log(store: Store) -> int | None:
     """Rewrite the favorites' profiles if what they're made of changed; the count, or None."""
     async with store.sync_lock:  # the read and the write, so two syncs can't interleave
         snap = await store.call(read_favorites)
-        if snap is None or snap.state == _profiles_state[0]:
-            return None
+        if snap is None or (snap.state == _profiles_state[0] and os.path.exists(DYNAMIC_PATH)):
+            return None  # current (a file deleted by hand is written again)
         failed_state, failed_at = _profiles_failed
         if snap.state == failed_state and time.monotonic() - failed_at < SYNC_RETRY_S:
             return None  # the same write failed a moment ago: don't hammer defaults or the log
@@ -1022,7 +1070,8 @@ async def sync_and_log(store: Store) -> int | None:
             count = await asyncio.to_thread(write_favorite_profiles, snap)
         except Exception as e:  # e.g. defaults export failed: profiles are optional, coloring isn't
             if snap.state != failed_state:
-                log("warn", f"favorite profiles not updated (tried again every 10 minutes): {e!r}")
+                retry = f"tried again every {SYNC_RETRY_S // 60} minutes"
+                log("warn", f"favorite profiles not updated ({retry}): {e!r}")
             _profiles_failed[:] = [snap.state, time.monotonic()]
             return None
         _profiles_state[0] = snap.state  # only once written, so a failed write is retried
@@ -1035,21 +1084,52 @@ async def sync_and_log(store: Store) -> int | None:
 async def favorites_changed(app: iterm2.App, store: Store, preset: str) -> None:
     """Update user.is_favorite on open sessions showing preset, and the profiles file."""
 
+    db_failed = False
+
     async def update(session: iterm2.Session) -> None:
+        nonlocal db_failed
         try:
-            if await session.async_get_variable("user.color_preset") != preset:
+            if db_failed or await session.async_get_variable("user.color_preset") != preset:
                 return
             font = await session.async_get_variable("user.font")
-            fav = bool(font) and bool(await store.call(is_favorite, preset, font))
-            await session.async_set_variable("user.is_favorite", int(fav))
+            fav = await store.call(is_favorite, preset, font) if font else False
+            if fav is None:  # the DB failed (store.call logged it): leave the marks alone
+                db_failed = True  # and don't wait on it, or log it, once per tab
+                return
+            await session.async_set_variable("user.is_favorite", int(bool(fav)))
         except iterm2.RPCException:
             pass  # closed while we were looking
+        except Exception as e:  # one tab must not stop the others, or the sync below
+            log("warn", f"favorite mark not updated on session {session.session_id}: {e!r}")
 
-    try:
-        sessions = [s for w in app.windows for t in w.tabs for s in t.all_sessions]
-        await asyncio.gather(*(update(s) for s in sessions))
-    finally:
-        await sync_and_log(store)
+    sessions = [s for w in app.windows for t in w.tabs for s in t.all_sessions]
+    for session in sessions:  # one at a time: they queue on Store.lock anyway
+        await update(session)
+    # In the background: a rewrite reads all of iTerm2's settings, and the dialog's re-roll
+    # shouldn't wait for it. sync_lock keeps syncs from overlapping.
+    spawn("favorite profiles sync", sync_and_log(store))
+
+
+_background: set[asyncio.Task[Any]] = set()
+
+
+def spawn(what: str, coro: Coroutine[Any, Any, Any]) -> asyncio.Task[Any]:
+    """Run coro as a task, kept referenced until done, and log it if it fails (with the
+    traceback, unless it's an OSError: a file or a command, said in one line)."""
+    task = asyncio.create_task(coro)
+    _background.add(task)
+
+    def done(t: asyncio.Task[Any]) -> None:
+        _background.discard(t)
+        e = None if t.cancelled() else t.exception()
+        if e is None:
+            return
+        log("warn", f"{what} failed: {e!r}")
+        if not isinstance(e, OSError):
+            print("".join(traceback.format_exception(e)), end="", flush=True)
+
+    task.add_done_callback(done)
+    return task
 
 
 async def apply_choice(
@@ -1140,10 +1220,7 @@ async def save_dialog(
     # Return can't save 1 star: NSAlert gives Return to the first button and Escape to one
     # titled Cancel, so here Escape cancels and Return only beeps (checked in iTerm2 3.7.6).
     buttons = [CANCEL, *STAR_BUTTONS, *([REMOVE] if stars else []), NEVER]
-    for b in buttons:
-        alert.add_button(b)
-    index = await alert.async_run(connection) - 1000
-    choice = buttons[index] if 0 <= index < len(buttons) else CANCEL
+    choice = await alert_choice(connection, alert, buttons)
     # Never show on a favorite asks first, as the right-click item does.
     go = choice != CANCEL and (
         choice != NEVER or await confirm_never_show(connection, store, preset, window_id)
@@ -1222,6 +1299,16 @@ async def change_from_menu(
 NEVER_TITLE = "Never show this profile"
 
 
+async def alert_choice(
+    connection: iterm2.Connection, alert: iterm2.Alert, buttons: list[str]
+) -> str:
+    """Show alert with these buttons (added in order); the one clicked, or CANCEL."""
+    for b in buttons:
+        alert.add_button(b)
+    index = await alert.async_run(connection) - 1000  # NSAlert numbers the first button 1000
+    return buttons[index] if 0 <= index < len(buttons) else CANCEL
+
+
 async def confirm_never_show(
     connection: iterm2.Connection, store: Store, preset: str, window_id: str | None
 ) -> bool | None:
@@ -1237,10 +1324,7 @@ async def confirm_never_show(
     lines.append("Never show removes it from your favorites and from Profiles > Favorites.")
     alert = iterm2.Alert(NEVER_TITLE, "\n".join(lines), window_id)
     buttons = [CANCEL, NEVER]  # Cancel first: Escape cancels and Return can't hide it
-    for b in buttons:
-        alert.add_button(b)
-    index = await alert.async_run(connection) - 1000
-    return 0 <= index < len(buttons) and buttons[index] == NEVER
+    return await alert_choice(connection, alert, buttons) == NEVER
 
 
 async def reroll_after_hide(
@@ -1314,15 +1398,9 @@ async def register_save_handlers(
             log("info", f"{action}: another action is still running on this session; ignored")
             return
         # Run outside the RPC so iTerm2's RPC timeout can't cut a dialog off.
-        task = asyncio.create_task(coro)
+        task = spawn(action, coro)
         running[session_id] = task
-
-        def done(t: asyncio.Task[None]) -> None:
-            running.pop(session_id, None)
-            if not t.cancelled() and t.exception():
-                log("warn", f"{action} failed: {t.exception()!r}")
-
-        task.add_done_callback(done)
+        task.add_done_callback(lambda _t: running.pop(session_id, None))
 
     def start_dialog(session_id: str) -> None:
         start(f"save:{session_id}", save_dialog(connection, app, store, session_id))
@@ -1388,13 +1466,15 @@ async def main(connection: iterm2.Connection) -> None:
             iterm2.SessionTerminationMonitor(connection)
         )
         await register_save_handlers(connection, app, store)
-        await startup(connection, app, store, started)
+        # startup with the watchers, not before them: a tab opened while it reads the
+        # settings or colors the windows already open isn't held up behind it.
         await asyncio.gather(
+            startup(connection, app, store, started),
             watch_new(connection, app, store, new_sessions),
             watch_ended(store, ended_sessions),
             snapshot_periodically(store),
             sync_periodically(store),
-            exit_on_disconnect(connection),
+            exit_on_disconnect(connection, store),
         )
 
 
@@ -1410,7 +1490,6 @@ async def startup(
     backup = await store.call(daily_snapshot)
     if backup:
         log("info", f"DB snapshot: {backup}")
-    await sync_and_log(store)
     # Windows iTerm2 opened before this script connected (the one at launch) got no look.
     # Restored windows keep theirs: iTerm2 saves user.* variables with them.
     for session in open_sessions:
@@ -1418,6 +1497,9 @@ async def startup(
             await color_one_at_a_time(connection, app, store, session)
         except Exception as e:  # one session must not stop the rest, or startup
             log("warn", f"coloring open session failed: {e!r}")
+    # Last: parsing iTerm2's settings (about 0.3 s, holding Python's GIL) slows every coloring
+    # that overlaps it, so the tabs open at launch go first.
+    await sync_and_log(store)
 
 
 async def watch_new(
@@ -1447,13 +1529,21 @@ async def watch_ended(store: Store, mon: iterm2.SessionTerminationMonitor) -> No
             log("warn", f"recording session end failed: {e!r}")
 
 
-async def exit_on_disconnect(connection: iterm2.Connection) -> None:
+async def exit_on_disconnect(connection: iterm2.Connection, store: Store | None = None) -> None:
     # The monitors never return once iTerm2 quits, so without this the process outlives it
     # and holds the lock, and the copy the next iTerm2 launch starts exits.
     if connection.websocket is not None:
         await connection.websocket.wait_closed()
     log("info", "iTerm2 closed the connection; exiting")
-    sys.exit(0)  # returning would leave the watchers, and so the process, alive
+    # Close the DB, so SQLite folds in and deletes its -wal/-shm files; not past 1 s, in case
+    # a call holds it (a locked DB's 5 s wait): WAL recovers at the next open anyway.
+    if store and store.lock.acquire(timeout=1) and store.db is not None:
+        with contextlib.suppress(sqlite3.Error):
+            store.db.close()
+    # os._exit, not sys.exit: unwinding would unsubscribe the monitors over the closed
+    # connection (the iterm2 module's monitors do so on exit). Nothing else is left: log()
+    # flushes, writes are whole-file renames, and the kernel drops the flock.
+    os._exit(0)
 
 
 iterm2.run_forever(main)
