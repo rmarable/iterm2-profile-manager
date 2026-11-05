@@ -10,11 +10,47 @@ import shutil
 import sys
 import tempfile
 import types
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, ".tools"))
 
 import srcp_iterm_prefs  # noqa: E402  (needs .tools on sys.path first)
+
+MAIN = os.path.join(ROOT, "AutoLaunch", "srcp_set_random_color_profile.py")
+
+
+RUN_FOREVER = "iterm2.run_forever(main)"
+
+
+# The main script's own paths; load_main points every one of them into the temp folder.
+MAIN_PATHS = ("DATA_DIR", "DB_PATH", "LOCK_PATH", "DYNAMIC_PATH", "FONT_DIRS")
+
+
+def exec_main(home):
+    """The main script's namespace, minus run_forever, its source run with HOME at home (a
+    temp folder), so a path it expands at import time lands there, never in the real HOME."""
+    with open(MAIN) as f:
+        source = f.read()
+    # If the line were reworded, exec would start the script for real.
+    if source.count(RUN_FOREVER) != 1:
+        raise AssertionError(f"{MAIN} should contain {RUN_FOREVER!r} exactly once")
+    source = source.replace(RUN_FOREVER, "")
+    ns = {"__name__": "srcp_main", "__file__": MAIN}
+    with mock.patch.dict(os.environ, {"HOME": home}):
+        exec(compile(source, MAIN, "exec"), ns)  # noqa: S102  (our own script, read from the repo)
+    return ns
+
+
+def load_main(data_dir, font_dir):
+    """The main script's functions, minus run_forever, with its paths under data_dir."""
+    ns = exec_main(os.path.join(data_dir, "home"))
+    ns["DATA_DIR"] = data_dir
+    ns["DB_PATH"] = os.path.join(data_dir, "schemes.db")
+    ns["LOCK_PATH"] = os.path.join(data_dir, ".lock")
+    ns["DYNAMIC_PATH"] = os.path.join(data_dir, "dynamic.plist")
+    ns["FONT_DIRS"] = [font_dir]
+    return ns
 
 
 def color(r, g, b):

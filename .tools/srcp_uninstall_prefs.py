@@ -18,7 +18,7 @@ import plistlib
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # works under python3 -I too
-from srcp_iterm_prefs import QUIT_FIRST, iterm_app, iterm_running, load_prefs, save_prefs
+from srcp_iterm_prefs import DOMAIN, QUIT_FIRST, iterm_app, iterm_running, load_prefs, save_prefs
 from srcp_preset_history import from_repo, repo_root
 
 KEY_MAP = "GlobalKeyMap"
@@ -55,6 +55,12 @@ def remove_key_binding(prefs):
         # puts iTerm2 back on its built-in defaults, which can change in later versions.
         print(f"  - {KEY_MAP}: the rest is iTerm2's defaults; remove it so iTerm2 uses its own")
         return [KEY_MAP]
+    # Bindings of yours, or the defaults of the iTerm2 version setup.sh copied them from.
+    print(
+        f"  = {KEY_MAP} kept: it isn't exactly this iTerm2's defaults (bindings of yours, or an "
+        f"older iTerm2's defaults). To go back to iTerm2's own, with iTerm2 quit: "
+        f"defaults delete {DOMAIN} {KEY_MAP} (that removes any bindings of yours too)"
+    )
     return []
 
 

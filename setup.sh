@@ -51,16 +51,33 @@ run() {
 	if ! $DRYRUN; then "$@"; fi
 }
 
-# What setup.sh installed (not what was there already), so uninstall.sh --fonts removes only
-# that: one line per font file ("font NAME") and for the Homebrew package ("cask NAME"). It
-# always exists after a setup.sh run, even empty: none means an install from before 0.11.0.
-# (The same path is in uninstall.sh.)
+# What setup.sh installed, so uninstall.sh --fonts removes only that (format: docs/REFERENCE.md,
+# Files, installed.txt; uninstall.sh reads the same file). It always exists after a run, even
+# empty: none means an install from before 0.11.0.
 MANIFEST="$HOME/.local/share/iterm2-profile-manager/installed.txt"
 record() {
 	$DRYRUN && return
 	mkdir -p "$(dirname "$MANIFEST")"
+	# A hand-edited last line may lack its newline; add it, or the next line would run on.
+	if [[ -s "$MANIFEST" && "$(tail -c 1 "$MANIFEST")" != "" ]]; then echo >>"$MANIFEST"; fi
 	if [[ -n "$1" ]] && ! grep -qxF "$1" "$MANIFEST" 2>/dev/null; then echo "$1" >>"$MANIFEST"; fi
 	touch "$MANIFEST"
+}
+font_hash() { shasum -a 256 "$1" | cut -d' ' -f1; }
+# The sha256 the record holds for font NAME, from its "fonthash HASH NAME" line (the name last,
+# so one with spaces survives); empty if none (recorded before v0.12).
+recorded_hash() {
+	[[ -f "$MANIFEST" ]] || return 0
+	N="$1" awk '$1 == "fonthash" && substr($0, length($1) + length($2) + 3) == ENVIRON["N"] { h = $2 }
+		END { print h }' "$MANIFEST"
+}
+# Record font NAME's sha256 (of the file at PATH), replacing an older hash line for it.
+record_hash() {
+	$DRYRUN && return
+	N="$1" awk '!($1 == "fonthash" && substr($0, length($1) + length($2) + 3) == ENVIRON["N"])' \
+		"$MANIFEST" >"$MANIFEST.new"
+	echo "fonthash $(font_hash "$2") $1" >>"$MANIFEST.new"
+	mv "$MANIFEST.new" "$MANIFEST"
 }
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
@@ -95,12 +112,24 @@ if [[ -d "$TERMINAL_FONTS" ]]; then
 		if [[ ! -e "$FONT_DIR/$name" ]]; then
 			run install -m 644 "$src" "$FONT_DIR/$name"
 			record "font $name"
-		elif cmp -s "$src" "$FONT_DIR/$name"; then
+			record_hash "$name" "$src"
+			continue
+		fi
+		hash="$(recorded_hash "$name")"
+		if cmp -s "$src" "$FONT_DIR/$name"; then
 			echo "  already installed: $name"
-		else
+			# Ours (listed) but recorded before hashes were: identical, so hash it now.
+			if [[ -z "$hash" ]] && grep -qxF "font $name" "$MANIFEST" 2>/dev/null; then
+				record_hash "$name" "$src"
+			fi
+		elif [[ -n "$hash" && "$(font_hash "$FONT_DIR/$name")" == "$hash" ]]; then
+			# setup.sh's own copy, unchanged since; Terminal.app's has been updated.
 			echo "  updated: $name"
 			run install -m 644 "$src" "$FONT_DIR/$name"
-			record "font $name" # Terminal's copy now, put there by setup.sh
+			record_hash "$name" "$src"
+		else
+			# Yours, or one setup.sh can't tell is its own: never overwritten.
+			echo "  = $name: a different copy is installed; left alone"
 		fi
 	done
 else

@@ -4,7 +4,9 @@ the menu scripts' setup, and setup.sh / uninstall.sh dry runs.
 Runs under iTerm2's Python, like srcp_test_db.py, against temp folders only.
 """
 
+import ast
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -24,11 +26,30 @@ from unittest import mock
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, ".tools"))  # before importing the tools
 
-import srcp_enable_claude_integration  # noqa: E402
-import srcp_iterm_prefs  # noqa: E402
-import srcp_preset_history  # noqa: E402
-import srcp_uninstall_prefs  # noqa: E402
-from srcp_testlib import DARK, DARK_2, LIGHT, YELLOW, defaults_writes, fake_defaults  # noqa: E402
+import srcp_db_backup  # noqa: E402  (after the sys.path line above)
+import srcp_enable_claude_integration  # noqa: E402  (after the sys.path line above)
+import srcp_iterm_prefs  # noqa: E402  (after the sys.path line above)
+import srcp_preset_history  # noqa: E402  (after the sys.path line above)
+import srcp_schema  # noqa: E402  (after the sys.path line above)
+import srcp_uninstall_prefs  # noqa: E402  (after the sys.path line above)
+from srcp_testlib import (  # noqa: E402  (after the sys.path line above)
+    DARK,
+    DARK_2,
+    LIGHT,
+    YELLOW,
+    defaults_writes,
+    exec_main,
+    fake_defaults,
+)
+
+
+def setUpModule():
+    """No test here may reach the real prefs backups, even one that forgets fake_defaults."""
+    tmp = tempfile.mkdtemp(prefix="srcp-backups-")
+    unittest.addModuleCleanup(shutil.rmtree, tmp)
+    real = srcp_iterm_prefs.BACKUP_DIR
+    srcp_iterm_prefs.BACKUP_DIR = os.path.join(tmp, "prefs-backups")
+    unittest.addModuleCleanup(setattr, srcp_iterm_prefs, "BACKUP_DIR", real)
 
 
 class HelperTest(unittest.TestCase):
@@ -66,9 +87,25 @@ class HelperTest(unittest.TestCase):
             self.assertEqual(prefs["GlobalKeyMap"], defaults)
             edited = {**defaults, "0x61-0x100000": {"Action": 12, "Text": "x"}}
             prefs = {"GlobalKeyMap": {**edited, "0x73-0x1c0000-0x1-0x1": ours}}
+            out.seek(0)
+            out.truncate(0)
             self.assertEqual(srcp_uninstall_prefs.remove_key_binding(prefs), [])
+            self.assertIn("GlobalKeyMap kept", out.getvalue())  # and how to go back to defaults
+            out.seek(0)
+            out.truncate(0)
             self.assertEqual(prefs["GlobalKeyMap"], edited)  # the user's own binding stays
             self.assertIsNone(srcp_uninstall_prefs.remove_key_binding({"GlobalKeyMap": edited}))
+        self.assertNotIn("GlobalKeyMap kept", out.getvalue())  # no binding of ours: nothing to say
+
+    def test_menu_scripts_check_for_every_tool_they_import(self):
+        for script in MENU_SCRIPTS:
+            checked = have_tools(os.path.join(ROOT, script))
+            if checked is None:
+                continue  # the main script exits on ImportError instead
+            with self.subTest(script=script):
+                uses = tools_used(os.path.join(ROOT, script)) - {"srcp_popup.js"}
+                self.assertTrue(uses)
+                self.assertEqual({f"{m}.py" for m in checked}, uses)
 
     def test_uninstall_removes_current_and_past_presets_but_keeps_edited(self):
         with tempfile.TemporaryDirectory() as repo:
@@ -107,22 +144,40 @@ class HelperTest(unittest.TestCase):
         fake_defaults(self)
         folder = srcp_iterm_prefs.BACKUP_DIR
         os.makedirs(folder)
-        stem = f"{srcp_iterm_prefs.DOMAIN}-20261101-0000"
+        stem = f"{srcp_iterm_prefs.DOMAIN}-20261101T0000"
         # One second with many backups: -10 is newer than -9 and -2, though it sorts first as
         # text, and the cut falls among them.
-        names = [f"{stem}10.plist", f"{stem}11.plist"]
-        names += [f"{stem}11-{n}.plist" for n in range(1, 11)]
+        names = [f"{stem}10Z.plist", f"{stem}11Z.plist"]
+        names += [f"{stem}11Z-{n}.plist" for n in range(1, 11)]
         decoys = ["my-own-backup.plist", f"{srcp_iterm_prefs.DOMAIN}-notes.plist"]
         for i, name in enumerate([*names, *decoys]):
             path = os.path.join(folder, name)
             open(path, "w").close()
             scrambled = time.time() - 1000 * ((i * 5) % 13)  # mtime says nothing
             os.utime(path, (scrambled, scrambled))
-        with mock.patch.object(srcp_iterm_prefs.time, "strftime", return_value="20261101-000011"):
+        utc = time.strptime("20261101T000011Z", "%Y%m%dT%H%M%SZ")
+        with (
+            mock.patch.object(srcp_iterm_prefs.time, "gmtime", return_value=utc),
+            mock.patch.object(srcp_iterm_prefs.time, "time", return_value=1793491211.0),
+        ):
             new = srcp_iterm_prefs.save_prefs({"K": 1}, ["K"])  # that second again: -11
-        self.assertTrue(new.endswith("-000011-11.plist"))
+        self.assertTrue(new.endswith("-20261101T000011Z-11.plist"))
         ours = [*names, os.path.basename(new)][-srcp_iterm_prefs.BACKUP_KEEP :]
         self.assertEqual(sorted(os.listdir(folder)), sorted([*ours, *decoys]))
+
+    def test_prefs_backups_from_before_and_after_utc_names_rotate_together(self):
+        fake_defaults(self)  # also points BACKUP_DIR at a temp folder
+        folder = srcp_iterm_prefs.BACKUP_DIR
+        os.makedirs(folder)
+        local = time.strftime("%Y%m%d-%H%M%S", time.localtime(1_000_000_000))  # 2001
+        old = f"{srcp_iterm_prefs.DOMAIN}-{local}.plist"
+        new = f"{srcp_iterm_prefs.DOMAIN}-20260101T000000Z.plist"
+        future = f"{srcp_iterm_prefs.DOMAIN}-29990101T000000Z.plist"
+        bad = f"{srcp_iterm_prefs.DOMAIN}-20261399T000000Z.plist"  # month 13: not one of ours
+        for name in (new, future, old, bad):
+            open(os.path.join(folder, name), "w").close()
+        got = [os.path.basename(p) for p in srcp_iterm_prefs.backup_files(now=1_800_000_000)]
+        self.assertEqual(got, [old, new])  # oldest first across both formats; future left out
 
     def test_load_prefs_reads_defaults_export(self):
         fake_defaults(self, live={"Custom Color Presets": {"A": DARK}, "Flag": True})
@@ -318,12 +373,30 @@ class ClaudeIntegrationRemoveTest(unittest.TestCase):
         self.assertEqual(len(kept), 1)  # yours, moved aside rather than deleted
         self.assertEqual(os.readlink(os.path.join(folder, kept[0])), "/usr/local/bin/elsewhere")
 
+    def test_settings_backups_keep_the_newest_ten_of_ours(self):
+        folder = os.path.dirname(self.settings)
+        os.makedirs(folder)
+        ours = [f"settings.json.backup-202501{d:02d}-120000" for d in range(1, 13)]
+        future = "settings.json.backup-29990101-000000"  # a clock that was set ahead
+        mine = ["settings.json.backup-before-upgrade", "cc-status.backup-20250101-000000"]
+        for name in [*ours, future, *mine, "settings.json"]:
+            with open(os.path.join(folder, name), "w") as f:
+                f.write("{}")
+        srcp_enable_claude_integration.write_settings({"x": 1})
+        left = sorted(os.listdir(folder))
+        for name in [*mine, future]:
+            self.assertIn(name, left)  # not this tool's, or dated after now: never pruned
+        backups = [n for n in left if re.fullmatch(r"settings\.json\.backup-\d{8}-\d{6}", n)]
+        backups.remove(future)
+        self.assertEqual(len(backups), srcp_enable_claude_integration.SETTINGS_BACKUP_KEEP)
+        self.assertEqual(backups[:-1], ours[3:])  # the oldest three went; the new one stays
+
 
 class ShellDryRunTest(unittest.TestCase):
     """setup.sh and uninstall.sh --dryrun change nothing.
 
-    They run from a temp copy of this checkout, in a temp HOME that holds a full install,
-    with stand-ins for defaults, brew, ps and git that log every call. A dry run may only
+    They run from a temp copy of this checkout, in a temp HOME that holds a full install, with
+    stand-ins for defaults, brew, ps, git, curl and open that log every call. A dry run may only
     make the calls in ALLOWED; anything else (a write, or a new command) fails the test.
     """
 
@@ -347,6 +420,9 @@ class ShellDryRunTest(unittest.TestCase):
             "esac"
         ),
         "brew": "exit 1",  # nothing installed with Homebrew
+        # Neither script fetches anything or opens apps; one that did is logged, and fails.
+        "curl": "exit 3",
+        "open": "exit 3",
         # iTerm2 "is running": a dry run must still go through (its guards skip the check).
         "ps": "echo /Applications/iTerm.app/Contents/MacOS/iTerm2",
         # The real git, for exactly the read-only calls the scripts make (after "-C <dir>");
@@ -354,8 +430,9 @@ class ShellDryRunTest(unittest.TestCase):
         "git": (
             '[[ "$1" == -C ]] && call=("${@:3}") || call=("$@")\n'
             'case "${call[*]}" in\n'
-            '"status --porcelain --untracked-files=normal" | "rev-list --count --all --not '
-            '--remotes" | "worktree list --porcelain" | "remote get-url origin" | '
+            '"status --porcelain -z --ignored --untracked-files=all" | '
+            '"rev-list --count --all --not --remotes" | "worktree list --porcelain" | '
+            '"remote get-url origin" | '
             '"rev-parse --show-toplevel" | "log --format=%H -- "* | "show "[0-9a-f]*:*)\n'
             '    exec /usr/bin/git "$@" ;;\n'
             "esac\n"
@@ -431,14 +508,7 @@ class ShellDryRunTest(unittest.TestCase):
         """What setup.sh leaves in HOME, so every uninstall step has something to remove."""
         support = os.path.join(self.home, "Library", "Application Support", "iTerm2")
         scripts = os.path.join(support, "Scripts")
-        for rel in (
-            "AutoLaunch/srcp_set_random_color_profile.py",
-            "srcp_ratings.py",
-            "srcp_never_show.py",
-            "srcp_score_presets.py",
-            ".tools/srcp_favorites.py",
-            ".tools/srcp_schema.py",
-        ):
+        for rel in (*MENU_SCRIPTS, ".tools/srcp_favorites.py", ".tools/srcp_schema.py"):
             os.makedirs(os.path.dirname(os.path.join(scripts, rel)), exist_ok=True)
             shutil.copy(os.path.join(ROOT, rel), os.path.join(scripts, rel))
         os.makedirs(os.path.join(support, "DynamicProfiles"))
@@ -450,10 +520,12 @@ class ShellDryRunTest(unittest.TestCase):
         os.makedirs(os.path.join(data, "backups"))
         sqlite3.connect(os.path.join(data, "schemes.db")).close()
         sqlite3.connect(os.path.join(data, "backups", "schemes-20260101T000000Z.db")).close()
-        fonts = "/System/Applications/Utilities/Terminal.app/Contents/Resources/Fonts"
         os.makedirs(os.path.join(self.home, "Library", "Fonts"))
-        for name in sorted(os.listdir(fonts))[:1] if os.path.isdir(fonts) else []:
-            shutil.copy(os.path.join(fonts, name), os.path.join(self.home, "Library", "Fonts"))
+        terminal = sorted(os.listdir(TERMINAL_FONTS)) if os.path.isdir(TERMINAL_FONTS) else []
+        for name in terminal[:3]:  # identical copies, as setup.sh installs them
+            shutil.copy(
+                os.path.join(TERMINAL_FONTS, name), os.path.join(self.home, "Library", "Fonts")
+            )
 
     def state(self):
         """What a dry run must leave as it was: HOME, the checkout, iTerm2's prefs."""
@@ -476,48 +548,152 @@ class ShellDryRunTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return result.stdout
 
-    def assert_only_allowed_calls(self):
+    def assert_only_allowed_calls(self, expected=()):
+        """Every logged call is allowed, and the expected ones were made (so a script that
+        bypassed the stand-ins, with an absolute path, can't pass on an empty log)."""
         with open(self.log) as f:
             calls = f.read().splitlines()
         self.assertEqual([c for c in calls if not self.ALLOWED.match(c)], [])
+        for call in expected:
+            self.assertIn(call, calls)
 
     def test_setup_dry_run_changes_nothing(self):
         self.set_prefs(**{"Custom Color Presets": {"Dark One": DARK}})  # no key binding yet
         before = self.state()
         out = self.run_script("setup.sh", "--dryrun")
         self.assertEqual(self.state(), before)
-        self.assert_only_allowed_calls()
+        self.assert_only_allowed_calls([f"defaults export {self.DOMAIN} -"])
         # The prefs writers got as far as their own dry run, and said so.
         self.assertIn("+ Light One", out)  # import: one new preset
         self.assertIn("Ctrl-Opt-Cmd-S -> Invoke Script Function", out)  # key binding
         self.assertEqual(out.count("(dry run: nothing written)"), 3)  # import, build, binding
         self.assertNotIn("key binding skipped", out)
-        self.assertIn("srcp_schema.py", out)  # it would install what the main script needs
+        # It would install exactly the .tools/ files the installed scripts import.
+        self.assertEqual(tool_files(out, "$ cp "), tools_needed())
 
     def test_uninstall_dry_run_changes_nothing(self):
         binding = {"0x73-0x1c0000-0x1-0x1": {"Action": 60, "Text": "save_profile()"}}
         self.set_prefs(
             **{"GlobalKeyMap": binding, "Custom Color Presets": {"Dark One": DARK, "Mine": LIGHT}}
         )
+        with open(os.path.join(self.repo, ".git", "info", "exclude"), "a") as f:
+            f.write(".DS_Store\n._*\n")  # as the schemes repo's own .gitignore does
+        os.makedirs(os.path.join(self.repo, "my café"))  # git quotes such paths unless -z
+        for name in (".DS_Store", "._mine.itermcolors", "my café/.DS_Store"):
+            open(os.path.join(self.repo, name), "w").close()  # what Finder leaves
         before = self.state()
         out = self.run_script("uninstall.sh", "--dryrun", "--all")
         self.assertEqual(self.state(), before)
-        self.assert_only_allowed_calls()
+        self.assert_only_allowed_calls([f"defaults export {self.DOMAIN} -"])
         self.assertIn("(dry run: nothing written)", out)  # the prefs part
         self.assertIn("- 1 color presets matching", out)  # Dark One; Mine isn't the repo's
         for step in ("iterm2-profile-manager.plist", "srcp_ratings.py", "srcp-curation-"):
             self.assertIn(step, out)  # each would be removed (or exported), had this been real
-        self.assertIn("$ rm -rf", out)  # the clean, pushed clone would go
+        self.assertIn(
+            "$ rm -rf", out
+        )  # the clean, pushed clone would go: Finder's files aren't yours
+        self.assertEqual(tool_files(out, "$ rm "), tools_needed())  # what setup.sh installs
 
-    def fonts_out(self, manifest):
-        """uninstall.sh --dryrun --fonts with this install record (None: none, an old install)."""
+    def write_record(self, lines, end="\n"):
+        """setup.sh's install record, with these lines (None: none, an old install); end="":
+        no newline after the last one, as a hand edit can leave it."""
         path = os.path.join(self.home, ".local", "share", "iterm2-profile-manager", "installed.txt")
-        if manifest is not None:
+        if lines is None:
+            with contextlib.suppress(FileNotFoundError):
+                os.remove(path)
+        else:
             os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, "w") as f:
-                f.write("".join(f"{line}\n" for line in manifest))
+                f.write("\n".join(lines) + end)
+        return path
+
+    def fonts_out(self, manifest, end="\n"):
+        """uninstall.sh --dryrun --fonts with this install record (None: none, an old install)."""
+        self.write_record(manifest, end)
         self.set_prefs()
         return self.run_script("uninstall.sh", "--dryrun", "--fonts")
+
+    def installed_font(self, n=1):
+        """(folder, name) of a Terminal.app font install() put in HOME (with n > 1, (folder,
+        names)), or skip."""
+        fonts = os.path.join(self.home, "Library", "Fonts")
+        names = sorted(os.listdir(fonts))
+        if len(names) < n:
+            self.skipTest("not enough Terminal.app fonts on this Mac")
+        return (fonts, names[0]) if n == 1 else (fonts, names[:n])
+
+    def sha256(self, path):
+        with open(path, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+
+    def test_setup_never_overwrites_a_font_it_cant_tell_is_its_own(self):
+        fonts, (unhashed, replaced, ours) = self.installed_font(3)
+        for name in (unhashed, replaced, ours):
+            with open(os.path.join(fonts, name), "ab") as f:
+                f.write(b"different")  # differs from Terminal.app's copy now
+        self.set_prefs()
+        left_alone = "= {}: a different copy is installed; left alone"
+        out = self.run_script("setup.sh", "--dryrun")  # no record: an install before 0.11.0
+        for name in (unhashed, replaced, ours):
+            self.assertIn(left_alone.format(name), out)
+        record = [
+            f"font {unhashed}",  # recorded before hashes were: can't tell it's ours
+            f"font {replaced}",
+            f"fonthash {'0' * 64} {replaced}",  # not the copy setup.sh installed: yours
+            f"font {ours}",
+            f"fonthash {self.sha256(os.path.join(fonts, ours))} {ours}",  # setup.sh's, unchanged
+        ]
+        self.write_record(record)
+        out = self.run_script("setup.sh", "--dryrun")
+        for name in (unhashed, replaced):
+            self.assertIn(left_alone.format(name), out)
+            self.assertNotIn(f"{name} {os.path.join(fonts, name)}", out)  # no install over it
+        self.assertIn(f"updated: {ours}", out)
+        self.assertIn(f"{TERMINAL_FONTS}/{ours} {os.path.join(fonts, ours)}", out)
+
+    def test_uninstall_fonts_checks_the_records_fonts_even_if_terminal_lost_them(self):
+        fonts, name = self.installed_font()
+        open(os.path.join(fonts, "Gone.otf"), "w").close()  # recorded; Terminal.app has no copy
+        path = os.path.join(fonts, name)
+        with open(path, "ab") as f:
+            f.write(b"older")  # Terminal's copy changed since setup.sh installed this one
+        record = [
+            f"font {name}",
+            f"fonthash {self.sha256(path)} {name}",
+            "font Gone.otf",  # last, with no newline after it
+        ]
+        os.remove(os.path.join(self.tmp, "stubs", "brew"))  # Homebrew not on PATH
+        out = self.fonts_out(["cask font-meslo-lg-nerd-font", *record], end="")
+        self.assertIn("Gone.otf: Terminal.app's copy not found, so it can't be checked", out)
+        self.assertIn(f"$ rm -f {path}", out)  # unchanged since setup.sh installed it: ours
+        self.assertIn("Homebrew not found", out)
+        self.assertNotIn("installed.txt", out)  # kept: it still lists Gone.otf and the cask
+        self.assertIn("record keeps what's still there: font Gone.otf, cask font-meslo-lg", out)
+
+    def test_uninstall_data_removes_exactly_the_files_the_scripts_make(self):
+        data = os.path.join(self.home, os.path.relpath(srcp_schema.DATA_DIR, HOME))
+        backups = os.path.join(data, "backups")
+        main = exec_main(self.home)  # its paths, as they are with this HOME
+        lock = os.path.basename(main["LOCK_PATH"])
+        ours = [os.path.join(data, n) for n in ("schemes.db-wal", "schemes.db-shm", lock)]
+        for path in ours:
+            open(path, "w").close()
+        stem = os.path.join(backups, "schemes-20260102T000000Z")
+        ours += [srcp_db_backup.claim(stem) + ".partial", srcp_db_backup.claim(stem)]  # as named
+        os.rename(ours[-1] + ".partial", ours[-1])  # a finished snapshot -1 beside it
+        ours += [
+            os.path.join(data, "schemes.db"),
+            os.path.join(backups, "schemes-20260101T000000Z.db"),
+        ]
+        mine = os.path.join(backups, "manual-x.db")
+        open(mine, "w").close()
+        self.set_prefs()
+        out = self.run_script("uninstall.sh", "--dryrun", "--data")
+        section = out.split("==> Scheme DB")[1]
+        removed = [line[len("  $ rm -f ") :] for line in section.splitlines() if "$ rm -f" in line]
+        self.assertEqual(sorted(removed), sorted(ours))  # ours, and nothing else
+        self.assertIn(f"left in place: {mine}", out)
+        self.assertIn(f"$ rm -f {main['DYNAMIC_PATH']}\n", out)  # the file the script writes
 
     def test_uninstall_fonts_removes_only_what_setup_installed(self):
         fonts = os.path.join(self.home, "Library", "Fonts")
@@ -615,6 +791,78 @@ class ShellDryRunTest(unittest.TestCase):
         self.assertEqual(outcome(), "kept")  # a commit no remote has
         self.assertTrue(os.path.isdir(self.repo))
         self.assert_only_allowed_calls()
+
+    def test_uninstall_repo_keeps_ignored_files_of_yours(self):
+        self.set_prefs()
+        with open(os.path.join(self.repo, ".git", "info", "exclude"), "a") as f:
+            f.write("*.bak\n")  # as a global excludes file would
+        out = self.run_script("uninstall.sh", "--dryrun", "--repo")
+        self.assertIn("$ rm -rf", out)  # an exclude alone isn't yours: nothing matches it yet
+        open(os.path.join(self.repo, "notes.bak"), "w").close()
+        out = self.run_script("uninstall.sh", "--dryrun", "--repo")
+        self.assertIn("has ignored files of yours (notes.bak); left alone", out)
+        self.assertNotIn("$ rm -rf", out)
+        self.assert_only_allowed_calls()
+
+
+MENU_SCRIPTS = (
+    "AutoLaunch/srcp_set_random_color_profile.py",
+    "srcp_ratings.py",
+    "srcp_never_show.py",
+    "srcp_score_presets.py",
+)
+TERMINAL_FONTS = "/System/Applications/Utilities/Terminal.app/Contents/Resources/Fonts"
+HOME = os.path.expanduser("~")  # the real one, which the modules' paths were built from
+
+
+def tools_used(path):
+    """The .tools/ files a script needs: its srcp_ imports found in .tools/, theirs in turn,
+    and srcp_popup.js with srcp_popup.py."""
+    found, todo = set(), [path]
+    while todo:
+        with open(todo.pop()) as f:
+            parsed = ast.parse(f.read())
+        for node in ast.walk(parsed):
+            names = []
+            if isinstance(node, ast.Import):
+                names = [a.name for a in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                names = [node.module]
+            for name in names:
+                file = os.path.join(ROOT, ".tools", f"{name}.py")
+                if name.startswith("srcp_") and os.path.exists(file) and f"{name}.py" not in found:
+                    found.add(f"{name}.py")
+                    todo.append(file)
+    if "srcp_popup.py" in found:
+        found.add("srcp_popup.js")
+    return found
+
+
+def tools_needed():
+    """Every .tools/ file the installed scripts need."""
+    return set().union(*(tools_used(os.path.join(ROOT, script)) for script in MENU_SCRIPTS))
+
+
+def tool_files(out, command):
+    """The .tools/ file names on a dry run's echoed lines for command (e.g. "$ cp ")."""
+    pattern = re.compile(r"/\.tools/(srcp_\w+\.(?:py|js))")
+    return {m for line in out.splitlines() if command in line for m in pattern.findall(line)}
+
+
+def have_tools(path):
+    """The module names a menu script's HAVE_TOOLS checks, or None if it has none."""
+    with open(path) as f:
+        parsed = ast.parse(f.read())
+    for node in parsed.body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == "HAVE_TOOLS" for t in node.targets
+        ):
+            return {
+                n.value
+                for n in ast.walk(node.value)
+                if isinstance(n, ast.Constant) and isinstance(n.value, str)
+            }
+    return None
 
 
 def tree(root, skip=(".git",)):

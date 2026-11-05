@@ -58,6 +58,22 @@ def remove_stale_partials(folder, older_than_s=3600):
             pass
 
 
+def claim(stem):
+    """A free schemes-<time>[-n].db name under stem, its .partial created (empty) so no other
+    snapshot in the same second (the build's and the main script's) can take it too."""
+    n = 0
+    while True:
+        dest = f"{stem}-{n}.db" if n else stem + ".db"
+        n += 1
+        if os.path.exists(dest):
+            continue
+        try:
+            os.close(os.open(dest + ".partial", os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644))
+        except FileExistsError:
+            continue  # another one is writing this name right now
+        return dest
+
+
 def snapshot(db_path, keep=KEEP, src=None):
     """Copy db_path to backups/schemes-<UTC>.db; return the copy's path, or None if no DB.
 
@@ -70,25 +86,41 @@ def snapshot(db_path, keep=KEEP, src=None):
     os.makedirs(folder, exist_ok=True)
     remove_stale_partials(folder)
     stem = os.path.join(folder, "schemes-" + time.strftime(NAME_TIME, time.gmtime()))
-    dest, n = stem + ".db", 1
-    while os.path.exists(dest):
-        dest, n = f"{stem}-{n}.db", n + 1
+    dest = claim(stem)
     # Not mode=ro: a read-only connection can't open a WAL DB that nothing else has open.
     own = src is None
     uri = Path(db_path).resolve().as_uri() + "?mode=rw"
-    source = sqlite3.connect(uri, uri=True) if own else src
-    out = sqlite3.connect(dest + ".partial")
+    source = out = None
     try:
+        source = sqlite3.connect(uri, uri=True) if own else src
+        out = sqlite3.connect(dest + ".partial")
         source.backup(out)
     except BaseException:
-        out.close()
-        os.remove(dest + ".partial")
+        if out is not None:
+            out.close()
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(dest + ".partial")  # the claim too, so the name is free again
         raise
     finally:
-        out.close()
-        if own:
+        if out is not None:
+            out.close()
+        if own and source is not None:
             source.close()
-    os.replace(dest + ".partial", dest)
+    # A hard link never replaces: if another snapshot finished under this name meanwhile,
+    # move this copy to the next free name instead of overwriting it.
+    while True:
+        try:
+            os.link(dest + ".partial", dest)
+        except FileExistsError:
+            free = claim(stem)
+            os.replace(dest + ".partial", free + ".partial")
+            dest = free
+            continue
+        except OSError:  # a filesystem without hard links: a plain rename, as before
+            os.replace(dest + ".partial", dest)
+            break
+        os.remove(dest + ".partial")
+        break
     prune(folder, keep)
     return dest
 

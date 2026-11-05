@@ -65,17 +65,25 @@ run() {
 }
 
 # Why a clone holds work of yours (empty if it holds none): uncommitted or untracked files
-# (even if git config hides untracked ones), commits no remote has (on a branch, HEAD, a tag
-# or a stash), or linked worktrees. A git error keeps the clone too. Read-only, so a dry run
-# reports it as well.
+# (even if git config hides untracked ones), ignored files other than .DS_Store/._*, commits
+# no remote has (on a branch, HEAD, a tag or a stash), or linked worktrees. A git error keeps
+# the clone too. Read-only, so a dry run reports it as well.
 repo_keep_reason() {
-	local dir="$1" out
+	local dir="$1" out ignored
 	# Keep git status from refreshing .git/index, so this stays strictly read-only.
 	local -x GIT_OPTIONAL_LOCKS=0
-	if ! out="$(git -C "$dir" status --porcelain --untracked-files=normal 2>/dev/null)"; then
+	# -z: paths as they are, never quoted (git quotes ones with spaces or accents otherwise).
+	if ! out="$(git -C "$dir" status --porcelain -z --ignored --untracked-files=all 2>/dev/null |
+		tr '\0' '\n')"; then
 		echo "a state git couldn't check"
-	elif [[ -n "$out" ]]; then
+	elif [[ -n "$out" ]] && grep -qv '^!! ' <<<"$out"; then
 		echo "uncommitted or untracked changes"
+	elif ignored="$(grep '^!! ' <<<"$out" | grep -Ev '(^!! |/)(\.DS_Store|\._[^/]*)$' || true)" &&
+		[[ -n "$ignored" ]]; then
+		# Files .gitignore (or a global excludes file) hides, e.g. notes.bak; not what macOS
+		# drops into any folder Finder opens.
+		echo "ignored files of yours ($(head -n 3 <<<"$ignored" | cut -c4- | paste -sd, - |
+			sed 's/,/, /g'))"
 	elif ! out="$(git -C "$dir" rev-list --count --all --not --remotes 2>/dev/null)"; then
 		echo "a state git couldn't check"
 	elif ((out > 0)); then
@@ -95,7 +103,7 @@ is_our_snapshot() {
 }
 # The DB and the files SQLite and the main script keep next to it.
 DB_FILES=(schemes.db schemes.db-wal schemes.db-shm schemes.db-journal .lock)
-# Where setup.sh lists what it installed (the same path is in setup.sh).
+# What setup.sh installed (format: docs/REFERENCE.md, Files, installed.txt; setup.sh writes it).
 MANIFEST="$HOME/.local/share/iterm2-profile-manager/installed.txt"
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
@@ -230,7 +238,7 @@ if $FONTS; then
 	# it kept none, so nothing can be told apart from fonts of yours: all are left alone.
 	installed() { [[ -f "$MANIFEST" ]] && grep -qxF "$1" "$MANIFEST"; }
 	still_listed=() # what the record lists that's still there afterwards
-	echo "==> Terminal.app fonts in $FONT_DIR (only ones setup.sh installed, still identical)"
+	echo "==> Terminal.app fonts in $FONT_DIR (only ones setup.sh installed, unchanged since)"
 	if [[ ! -f "$MANIFEST" ]]; then
 		echo "  (no record of what setup.sh installed, from before 0.11.0: all left alone;"
 		echo "   remove fonts by hand in Font Book, and brew uninstall --cask font-meslo-lg-nerd-font)"
@@ -239,34 +247,63 @@ if $FONTS; then
 	if defaults read com.googlecode.iterm2 "New Bookmarks" 2>/dev/null | grep SFMono >/dev/null; then
 		echo "  ! an iTerm2 profile still uses SF Mono; change its font after this"
 	fi
-	if [[ ! -d "$TERMINAL_FONTS" ]] && [[ -f "$MANIFEST" ]]; then
-		# Can't check they're still Terminal's copies: keep them, and their lines.
-		echo "  (skipped: Terminal.app fonts not found)"
-		while IFS= read -r line; do
-			if [[ "$line" == "font "* ]]; then still_listed+=("$line"); fi
+	font_hash() { shasum -a 256 "$1" | cut -d' ' -f1; }
+	# The sha256 setup.sh recorded for font NAME (empty if none: recorded before v0.12).
+	recorded_hash() {
+		N="$1" awk '$1 == "fonthash" && substr($0, length($1) + length($2) + 3) == ENVIRON["N"] { h = $2 }
+			END { print h }' "$MANIFEST"
+	}
+	if [[ -f "$MANIFEST" ]]; then
+		# The record's fonts, so one Terminal.app no longer has is still checked (and kept).
+		# "|| [[ -n ]]": a last line without a newline (a hand edit) still counts.
+		while IFS= read -r line || [[ -n "$line" ]]; do
+			[[ "$line" == "font "* ]] || continue
+			name="${line#font }"
+			[[ -e "$FONT_DIR/$name" ]] || continue # already gone: nothing to remove or keep
+			hash="$(recorded_hash "$name")"
+			terminal="$TERMINAL_FONTS/$name"
+			if [[ -n "$hash" ]]; then
+				# The hash of the copy setup.sh installed decides, whatever Terminal has now.
+				ours=false
+				[[ "$(font_hash "$FONT_DIR/$name")" == "$hash" ]] && ours=true
+			else
+				# Recorded before hashes were: ours only while identical to Terminal's copy.
+				ours=false
+				[[ -f "$terminal" ]] && cmp -s "$terminal" "$FONT_DIR/$name" && ours=true
+			fi
+			if $ours; then
+				run rm -f "$FONT_DIR/$name"
+				continue
+			elif [[ -n "$hash" || -f "$terminal" ]]; then
+				echo "  = $name: changed since setup.sh installed it; left alone"
+			else
+				echo "  = $name: Terminal.app's copy not found, so it can't be checked; left alone"
+			fi
+			still_listed+=("$line")
+			if [[ -n "$hash" ]]; then still_listed+=("fonthash $hash $name"); fi
 		done <"$MANIFEST"
 	fi
 	if [[ -d "$TERMINAL_FONTS" ]]; then
 		for src in "$TERMINAL_FONTS"/*; do
 			[[ -e "$src" ]] || continue # empty folder: the glob stays literal
 			name="$(basename "$src")"
-			[[ -e "$FONT_DIR/$name" ]] || continue
-			if ! installed "font $name"; then
+			if [[ -e "$FONT_DIR/$name" ]] && ! installed "font $name"; then
 				# setup.sh records what it installs since 0.11.0; one from before isn't listed.
-				echo "  = $name: not in setup.sh's record; left alone (remove it in Font Book if setup.sh put it there before 0.11.0)"
-			elif cmp -s "$src" "$FONT_DIR/$name"; then
-				run rm -f "$FONT_DIR/$name"
-			else
-				echo "  = $name: changed since setup.sh installed it; left alone"
-				still_listed+=("font $name")
+				echo "  = $name: not in setup.sh's record; left alone" \
+					"(remove it in Font Book if setup.sh put it there before 0.11.0)"
 			fi
 		done
+	else
+		echo "  (Terminal.app fonts not found)"
 	fi
 	echo "==> MesloLGS Nerd Font (Homebrew)"
 	cask=font-meslo-lg-nerd-font
 	if ! installed "cask $cask"; then
 		echo "  = not installed by setup.sh; left alone"
-	elif command -v brew >/dev/null && brew list --cask "$cask" >/dev/null 2>&1; then
+	elif ! command -v brew >/dev/null; then
+		echo "  = Homebrew not found (not on PATH?), so it can't be removed now; kept in the record"
+		still_listed+=("cask $cask")
+	elif brew list --cask "$cask" >/dev/null 2>&1; then
 		# Not grep -q: with pipefail, an early exit can turn defaults' SIGPIPE into "no match".
 		if defaults read com.googlecode.iterm2 "New Bookmarks" 2>/dev/null | grep MesloLGS >/dev/null; then
 			echo "  ! an iTerm2 profile still uses MesloLGS; change its font after this"
@@ -281,6 +318,8 @@ if $FONTS; then
 	# The record keeps what's still there, so a later --fonts can finish the job.
 	if [[ -f "$MANIFEST" ]]; then
 		if ((${#still_listed[@]})); then
+			kept_lines="$(printf '%s\n' "${still_listed[@]}" | grep -v '^fonthash ' | paste -sd, - | sed 's/,/, /g')"
+			echo "  = setup.sh's record keeps what's still there: $kept_lines"
 			$DRYRUN || printf '%s\n' "${still_listed[@]}" >"$MANIFEST"
 		else
 			run rm -f "$MANIFEST"

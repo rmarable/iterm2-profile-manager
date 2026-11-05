@@ -24,6 +24,7 @@ import argparse
 import contextlib
 import json
 import os
+import re
 import shutil
 import sys
 import time
@@ -111,10 +112,27 @@ def read_settings():
             sys.exit(f"{CLAUDE_SETTINGS} isn't valid JSON ({e}); fix it and run this again.")
 
 
+SETTINGS_BACKUP_KEEP = 10
+
+
+def prune_settings_backups(keep):
+    """Keep the newest SETTINGS_BACKUP_KEEP settings.json backups this tool made (named
+    settings.json.backup-<local time>), always including keep, the one just written. Any other
+    file, a hand-made backup included, and names dated after it (a clock set back) stay."""
+    folder, base = os.path.split(CLAUDE_SETTINGS)
+    ours = re.compile(re.escape(base) + r"\.backup-\d{8}-\d{6}")
+    names = sorted(n for n in os.listdir(folder) if ours.fullmatch(n) and n < keep)
+    for name in names[: max(0, len(names) - (SETTINGS_BACKUP_KEEP - 1))]:
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(os.path.join(folder, name))
+
+
 def write_settings(settings):
     """Back up ~/.claude/settings.json, then replace it with settings in one rename."""
     if os.path.exists(CLAUDE_SETTINGS):
-        shutil.copy2(CLAUDE_SETTINGS, f"{CLAUDE_SETTINGS}.backup-{stamp()}")
+        backup = f"{CLAUDE_SETTINGS}.backup-{stamp()}"
+        shutil.copy2(CLAUDE_SETTINGS, backup)
+        prune_settings_backups(keep=os.path.basename(backup))
     # Write a temp file and rename it over the real one (through a symlink, e.g. dotfiles),
     # so a crash can't leave a half-written settings file.
     target = os.path.realpath(CLAUDE_SETTINGS)

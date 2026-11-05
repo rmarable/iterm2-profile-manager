@@ -217,7 +217,7 @@ python3 .tools/srcp_enable_claude_integration.py
 It:
 
 - Links `~/.config/iterm2/cc-status` to the helper inside iTerm.app
-- Adds a `cc-status` hook for 10 Claude Code events to `~/.claude/settings.json` (backs up the file; other settings kept)
+- Adds a `cc-status` hook for 10 Claude Code events to `~/.claude/settings.json` (backs up the file first, newest 10 backups kept; other settings kept)
 - Adds two triggers per iTerm2 profile that track a running `claude` job
 - Sets the two iTerm2 flags that record this
 
@@ -227,7 +227,7 @@ It doesn't touch iTerm2's AI chat settings or API key. `uninstall.sh` doesn't un
 
 ### Custom schemes folder
 
-`SRC_DIR=~/code ./setup.sh` clones the schemes repo into `~/code` instead of `~/src`. Set `SRC_DIR` again for later rebuilds and for `uninstall.sh --repo`; the database build reads the repo's light/dark labels from there. `--repo` leaves the clone alone if `git status --porcelain --untracked-files=normal` shows anything, `git rev-list --all --not --remotes` finds commits (branches, `HEAD`, tags, stashes) no remote has, it has linked worktrees, or git fails.
+`SRC_DIR=~/code ./setup.sh` clones the schemes repo into `~/code` instead of `~/src`. Set `SRC_DIR` again for later rebuilds and for `uninstall.sh --repo`; the database build reads the repo's light/dark labels from there. `--repo` leaves the clone alone if `git status --porcelain --ignored --untracked-files=all` shows anything but ignored `.DS_Store` / `._*` files (which Finder leaves in any folder it opens), `git rev-list --all --not --remotes` finds commits (branches, `HEAD`, tags, stashes) no remote has, it has linked worktrees, or git fails.
 
 ### Clone into the Scripts folder
 
@@ -268,10 +268,10 @@ Double-clicking an `.itermcolors` file also imports it, with one dialog per file
 | `~/.local/share/iterm2-color-schemes/schemes.db` | The database. |
 | `~/.local/share/iterm2-color-schemes/backups/` | Database snapshots. |
 | `~/Library/Application Support/iTerm2/DynamicProfiles/iterm2-profile-manager.plist` | Favorite profiles. |
-| `~/.local/share/iterm2-profile-manager/prefs-backups/com.googlecode.iterm2-<timestamp>.plist` | iTerm2 settings backups, newest 10 kept. Restore one with iTerm2 quit: `defaults import com.googlecode.iterm2 <file>`. Versions before 0.6.7 wrote them to `~/Library/Preferences/com.googlecode.iterm2.backup-*.plist`; those can be deleted. |
+| `~/.local/share/iterm2-profile-manager/prefs-backups/com.googlecode.iterm2-<UTC time>.plist` | iTerm2 settings backups, newest 10 kept (by the time in the name; local time before v0.12). Restore one with iTerm2 quit: `defaults import com.googlecode.iterm2 <file>`. Versions before 0.6.7 wrote them to `~/Library/Preferences/com.googlecode.iterm2.backup-*.plist`; those can be deleted. |
 | `$SRC_DIR/iTerm2-Color-Schemes` (default `~/src`) | Schemes repo clone. |
 | `~/Library/Fonts` | Copied Terminal.app fonts. |
-| `~/.local/share/iterm2-profile-manager/installed.txt` | What `setup.sh` installed: `font <file>` and `cask <name>` lines, so `uninstall.sh --fonts` removes only those. An install from before 0.11.0 has none, and keeps its fonts on uninstall. |
+| `~/.local/share/iterm2-profile-manager/installed.txt` | What `setup.sh` installed: `font <file>`, `fonthash <sha256> <file>` (the copy it installed) and `cask <name>` lines, so `uninstall.sh --fonts` removes only those, and only while unchanged. `setup.sh` updates a font only while it still has the recorded hash; any other copy is left alone (to get Terminal.app's copy, delete yours in Font Book and run `setup.sh` again; that is also the way out for a font recorded by 0.11.0, before hashes, that Terminal.app has since changed). The hash comes before the name, so names with spaces survive. An install from before 0.11.0 has no record, and keeps its fonts on uninstall. |
 | `~/srcp-curation-<time>.sql`, `~/srcp-curation-<time>.db` | Written by `uninstall.sh --data`: the ratings export, and a copy of the whole database. |
 
 ### Repo files
@@ -298,7 +298,7 @@ Double-clicking an `.itermcolors` file also imports it, with one dialog per file
 
 ## Database
 
-`PRAGMA user_version` is the schema version (`MIGRATIONS` in the build). The scripts read only a database at `srcp_schema.MIN_SCHEMA` (7) or later; an older one gets one Console line asking for a rebuild, and works as soon as it's rebuilt, without a restart. Every change to the shape of `schemes` or the views adds a migration, even an empty one (7 marks the P3 color math), so that check is all a reader needs.
+`PRAGMA user_version` is the schema version (`MIGRATIONS` in the build). The scripts read only a database at `srcp_schema.MIN_SCHEMA` (7, always the number of migrations) or later; an older one gets one Console line asking for a rebuild, and works as soon as it's rebuilt, without a restart. Every change to the shape of `schemes` or the views adds a migration, even an empty one (7 marks the P3 color math), so that check is all a reader needs.
 
 | Table or view | Contents |
 |---|---|
@@ -330,7 +330,7 @@ select * from favorites where preset not in (select name from schemes);  -- favo
 ## Development
 
 ```sh
-./lint.sh               # ruff format --check, ruff check, pyright, shellcheck, tests
+./lint.sh               # ruff format --check, ruff check, pyright, shellcheck, tests, VERSION bumped
 ./lint.sh --fix         # apply formatting and safe fixes first
 ./lint.sh --allow-skip  # pass even if pyright and the tests were skipped (no iTerm2 Python)
 ```

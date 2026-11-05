@@ -20,9 +20,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # works under python3 -I too
-from srcp_build_scheme_db import SEED_CONFIG
 from srcp_schema import DB_PATH as DEFAULT_DB
-from srcp_schema import OldSchema, check_schema, is_busy
+from srcp_schema import SEED_CONFIG, OldSchema, check_schema, is_busy
 
 NUMERIC = ("favorite_share", "favorite_target", "recent_window", "colorful_weight")
 BAR = 30

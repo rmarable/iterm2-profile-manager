@@ -66,6 +66,26 @@ else
 	echo "  (skipped: iTerm2's Python runtime not found at $ITERM_PY)"
 	skipped=1
 fi
+# CLAUDE.md: VERSION is bumped on every change to the main script, so the Console shows
+# which code runs. Checked against the last commit and the last release tag.
+echo "==> VERSION bumped"
+main=AutoLaunch/srcp_set_random_color_profile.py
+if [[ ! -f "$main" ]]; then
+	echo "  (skipped: $main not there; parked as .py.disabled?)"
+elif git rev-parse --git-dir >/dev/null 2>&1; then
+	now="$(grep -m1 '^VERSION = ' "$main" || echo "(no VERSION line)")"
+	for base in HEAD "$(git describe --tags --abbrev=0 2>/dev/null || true)"; do
+		if [[ -z "$base" ]] || ! git cat-file -e "$base:$main" 2>/dev/null; then continue; fi
+		if ! git diff --quiet "$base" -- "$main" &&
+			[[ "$(git show "$base:$main" | grep -m1 '^VERSION = ')" == "$now" ]]; then
+			echo "  $main changed since $base, but VERSION didn't: bump it"
+			status=1
+			break
+		fi
+	done
+else
+	echo "  (skipped: not a git checkout)"
+fi
 if ((skipped)) && ! $ALLOW_SKIP; then
 	echo "==> FAILED: pyright and the tests need $ITERM_PY; pass --allow-skip to accept skipping them"
 	status=1

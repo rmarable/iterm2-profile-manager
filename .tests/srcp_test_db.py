@@ -13,6 +13,7 @@ import asyncio
 import contextlib
 import fcntl
 import glob
+import hashlib
 import io
 import json
 import math
@@ -33,55 +34,27 @@ from unittest import mock
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, ".tools"))  # before importing the tools
 
-import srcp_build_scheme_db as build  # noqa: E402
-import srcp_db_backup  # noqa: E402
-import srcp_export_curation  # noqa: E402
-import srcp_favorites  # noqa: E402
-import srcp_iterm_prefs  # noqa: E402
-import srcp_odds  # noqa: E402
-import srcp_schema  # noqa: E402
-from srcp_testlib import (  # noqa: E402
+import srcp_build_scheme_db as build  # noqa: E402  (after the sys.path line above)
+import srcp_db_backup  # noqa: E402  (after the sys.path line above)
+import srcp_export_curation  # noqa: E402  (after the sys.path line above)
+import srcp_favorites  # noqa: E402  (after the sys.path line above)
+import srcp_iterm_prefs  # noqa: E402  (after the sys.path line above)
+import srcp_odds  # noqa: E402  (after the sys.path line above)
+import srcp_schema  # noqa: E402  (after the sys.path line above)
+from srcp_testlib import (  # noqa: E402  (after the sys.path line above)
     DARK,
     LIGHT,
+    MAIN,
+    MAIN_PATHS,
     PRESETS,
     REPO_NAMES,
+    RUN_FOREVER,
     UNREADABLE,
     color,
+    load_main,
 )
 
-MAIN = os.path.join(ROOT, "AutoLaunch", "srcp_set_random_color_profile.py")
-
-
 BUILD = os.path.join(ROOT, ".tools", "srcp_build_scheme_db.py")
-RUN_FOREVER = "iterm2.run_forever(main)"
-
-
-# The main script's own paths; load_main points every one of them into the temp folder.
-MAIN_PATHS = ("DATA_DIR", "DB_PATH", "LOCK_PATH", "DYNAMIC_PATH", "FONT_DIRS")
-
-
-def load_main(data_dir, font_dir):
-    """The main script's functions, minus run_forever, with its paths under data_dir.
-
-    HOME points into the temp folder while the source runs, so a path the script expands at
-    import time can't reach the real one even before the overrides below.
-    """
-    with open(MAIN) as f:
-        source = f.read()
-    # If the line were reworded, exec would start the script for real.
-    if source.count(RUN_FOREVER) != 1:
-        raise AssertionError(f"{MAIN} should contain {RUN_FOREVER!r} exactly once")
-    source = source.replace(RUN_FOREVER, "")
-    ns = {"__name__": "srcp_main", "__file__": MAIN}
-    home = os.path.join(data_dir, "home")
-    with mock.patch.dict(os.environ, {"HOME": home}):
-        exec(compile(source, MAIN, "exec"), ns)  # noqa: S102  (our own script, read from the repo)
-    ns["DATA_DIR"] = data_dir
-    ns["DB_PATH"] = os.path.join(data_dir, "schemes.db")
-    ns["LOCK_PATH"] = os.path.join(data_dir, ".lock")
-    ns["DYNAMIC_PATH"] = os.path.join(data_dir, "dynamic.plist")
-    ns["FONT_DIRS"] = [font_dir]
-    return ns
 
 
 class Stop(Exception):
@@ -385,8 +358,42 @@ class BuildTest(DbTest):
         self.assertEqual(fonts["Monaco"], (1, 0))
 
 
+class RepoModeTest(DbTest):
+    def test_the_repos_yaml_variant_decides_the_mode(self):
+        self.assertEqual(self.scheme("Dark One")[0], "dark")  # by luminance
+        os.makedirs(os.path.join(self.repo, "yaml"))
+        with open(os.path.join(self.repo, "yaml", "Dark One.yml"), "w") as f:
+            f.write('name: "Dark One"\nvariant: "light"\nbackground: "#000000"\n')
+        self.build()
+        self.assertEqual(self.scheme("Dark One")[0], "light")  # the repo says so: it wins
+
+
 class MigrationTest(DbTest):
     """A rebuild brings a database from every older schema up to date and keeps its data."""
+
+    # sha1 of each shipped MIGRATIONS step, whitespace collapsed. A DB that already ran a step
+    # never runs it again, so editing one in place reaches nobody who has it: add a step instead.
+    SHIPPED = (
+        "e54775956c4fa3f823009b7513402fbcc6d8c8f0",
+        "c3d0f080a1ce57ef28326c8f10662cc88c721302",
+        "a69899c5ffbea0a73650d114ebea22b784547cd6",
+        "3f138a2cfe42d0754b6a3db5439f5316bef1f6f0",
+        "b25981c4480b3f6e37af9a840e9a8714a0b3020c",
+        "190d77892180900af589600618cac1ed2cc3312f",
+        "5f5c310bd33c72ef4b7aa0f1dc85fbba846a0a13",
+    )
+
+    def test_min_schema_is_the_newest_migration(self):
+        # Stricter than "a change to the shape or meaning of schemes raises it": every step so
+        # far has, and a step that didn't would let readers accept a DB they can't read.
+        self.assertEqual(srcp_schema.MIN_SCHEMA, len(build.MIGRATIONS))
+
+    def test_shipped_migrations_are_never_edited(self):
+        for n, (sql, sha) in enumerate(zip(build.MIGRATIONS, self.SHIPPED, strict=False), 1):
+            with self.subTest(migration=n):
+                got = hashlib.sha1(" ".join(sql.split()).encode(), usedforsecurity=False)
+                self.assertEqual(got.hexdigest(), sha, "a shipped step changed: add a new one")
+        self.assertEqual(len(self.SHIPPED), len(build.MIGRATIONS), "list a new step's sha1 here")
 
     def db_at_version(self, n):
         """A DB as a build with only MIGRATIONS[:n] left it, holding some user data.
@@ -484,9 +491,9 @@ class OldSchemaTest(DbTest):
     """A DB older than srcp_schema.MIN_SCHEMA: one message to rebuild, then it just works."""
 
     def make_old(self):
-        """This DB as an older build left it (its last migration not applied yet)."""
-        self.db.execute("DROP INDEX launches_open")  # migration 6's
-        self.db.execute("PRAGMA user_version = 5")
+        """This DB as the build before the newest step left it (only the version is behind:
+        every step so far that raised MIN_SCHEMA was harmless to run again)."""
+        self.db.execute(f"PRAGMA user_version = {srcp_schema.MIN_SCHEMA - 1}")
 
     def test_the_main_script_asks_once_for_a_rebuild_then_works_without_a_restart(self):
         self.make_old()
@@ -580,6 +587,20 @@ class MainScriptTest(DbTest):
         self.main["record_end"](self.db, "s1")
         rows = self.db.execute("SELECT preset, end_reason, duration_s FROM launches ORDER BY id")
         self.assertEqual(rows.fetchall(), [("Dark One", "changed", 0), ("Dark Two", "closed", 0)])
+
+    def test_startup_ends_only_launches_whose_session_is_gone(self):
+        self.main["now"] = lambda: "2026-11-05 11:00:00"  # a previous run
+        launch = ("Dark One", "Monaco", 13, "dark", "discovery", None, "Default")
+        self.record(*launch, "still-open")
+        self.record(*launch, "gone")
+        self.main["now"] = lambda: "2026-11-05 12:30:00"
+        self.record(*launch, "new")  # colored since this run started, so not in live_ids
+        ended = self.main["close_stale"](self.db, {"still-open"}, "2026-11-05 12:00:00")
+        self.assertEqual(ended, 1)
+        rows = self.db.execute("SELECT session_id, end_reason FROM launches ORDER BY id")
+        self.assertEqual(
+            rows.fetchall(), [("still-open", None), ("gone", "unknown"), ("new", None)]
+        )
 
     def test_changed_looks_count_apart_and_stay_out_of_the_average(self):
         for duration, reason in ((60, "closed"), (120, "closed"), (2, "changed")):
@@ -712,7 +733,7 @@ class SnapshotTest(DbTest):
     def test_snapshots_keep_coming_while_iterm2_stays_open(self):
         store = self.main["Store"](self.db_path)
         before = len(self.snapshots())
-        nothing = lambda: None  # noqa: E731
+        nothing = lambda: None  # noqa: E731  (a no-op tick, beside the two methods it sits with)
         self.run_ticks(store, [self.backdate, nothing, self.backdate])
         # Tick 1: due (none, or a day old); tick 2: one is fresh, so none; tick 3: due again.
         self.assertEqual(len(self.snapshots()), before + 2)
@@ -727,6 +748,42 @@ class SnapshotTest(DbTest):
         os.utime(old, (two_hours_ago, two_hours_ago))
         srcp_db_backup.remove_stale_partials(folder)
         self.assertEqual(os.listdir(folder), [os.path.basename(fresh)])  # may be in progress
+
+    def test_a_snapshot_on_a_filesystem_without_hard_links_still_finishes(self):
+        with mock.patch.object(srcp_db_backup.os, "link", side_effect=PermissionError(1, "no")):
+            got = srcp_db_backup.snapshot(self.db_path)
+        self.assertTrue(os.path.exists(got))
+        self.assertEqual(glob.glob(os.path.join(os.path.dirname(got), "*.partial")), [])
+
+    def test_a_snapshot_finishing_under_the_same_name_is_never_overwritten(self):
+        folder = os.path.join(self.data, "backups")
+        then = time.strptime("20261105T120000Z", "%Y%m%dT%H%M%SZ")
+        other = os.path.join(folder, "schemes-20261105T120000Z.db")
+        real = sqlite3.connect(self.db_path)
+        self.addCleanup(real.close)
+
+        class Racing:  # copies the DB, then another snapshot finishes under the same name
+            def backup(self, out):
+                real.backup(out)
+                with open(other, "w") as f:
+                    f.write("the other snapshot")
+
+        with mock.patch.object(srcp_db_backup.time, "gmtime", return_value=then):
+            got = srcp_db_backup.snapshot(self.db_path, src=Racing())
+        self.assertEqual(got, other[: -len(".db")] + "-1.db")
+        with open(other) as f:
+            self.assertEqual(f.read(), "the other snapshot")
+        self.assertEqual(glob.glob(os.path.join(folder, "*.partial")), [])
+
+    def test_a_snapshot_being_written_in_the_same_second_keeps_its_name(self):
+        folder = os.path.join(self.tmp, "claims")
+        os.makedirs(folder)
+        stem = os.path.join(folder, "schemes-20261105T120000Z")
+        open(stem + ".db.partial", "w").close()  # another snapshot is writing this one now
+        open(stem + "-1.db", "w").close()  # and one finished a moment ago
+        self.assertEqual(srcp_db_backup.claim(stem), stem + "-2.db")
+        self.assertTrue(os.path.exists(stem + "-2.db.partial"))  # taken, so not handed out again
+        self.assertEqual(srcp_db_backup.claim(stem), stem + "-3.db")
 
     def make_snapshots(self, names):
         folder = os.path.join(self.tmp, "rotation")
@@ -1009,6 +1066,18 @@ class ExportTest(DbTest):
         self.assertEqual(db.execute("SELECT stars FROM favorites").fetchall(), [(4,)])
         enabled = db.execute("SELECT enabled FROM fonts WHERE name = 'Other-Regular'")
         self.assertEqual(enabled.fetchone(), (0,))
+
+    def test_a_name_with_a_quote_restores(self):
+        self.main["save_favorite"](self.db, "O'Hara", "Monaco", 13, 5)
+        sql = self.export()
+        target = os.path.join(self.tmp, "target", "schemes.db")
+        with contextlib.redirect_stdout(io.StringIO()):
+            rows, _ = build.build_rows(PRESETS, self.repo)
+            build.write_db(target, rows)
+        self.restore(sql, target)
+        db = sqlite3.connect(target)
+        self.addCleanup(db.close)
+        self.assertEqual(db.execute("SELECT preset FROM favorites").fetchall(), [("O'Hara",)])
 
     def test_fonts_you_disabled_carry_over_but_missing_ones_do_not(self):
         self.db.execute("UPDATE fonts SET enabled = 0, missing = 0 WHERE name = 'Monaco'")

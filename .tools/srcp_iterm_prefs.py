@@ -4,6 +4,7 @@ Writes go through `defaults import`, so the macOS prefs cache stays consistent.
 iTerm2 rewrites its prefs when it quits, so writers must run with iTerm2 quit.
 """
 
+import calendar
 import glob
 import os
 import plistlib
@@ -15,7 +16,8 @@ DOMAIN = "com.googlecode.iterm2"
 # Not ~/Library/Preferences: every plist there shows up as a settings domain.
 BACKUP_DIR = os.path.expanduser("~/.local/share/iterm2-profile-manager/prefs-backups")
 BACKUP_KEEP = 10
-BACKUP_RE = re.compile(re.escape(DOMAIN) + r"-(\d{8}-\d{6})(?:-(\d+))?\.plist")
+# <UTC time>[-n] since v0.12; <local time>[-n] before (still rotated with the rest).
+BACKUP_RE = re.compile(re.escape(DOMAIN) + r"-(\d{8}T\d{6}Z|\d{8}-\d{6})(?:-(\d+))?\.plist")
 APP_DIRS = ["/Applications/iTerm.app", os.path.expanduser("~/Applications/iTerm.app")]
 QUIT_FIRST = "iTerm2 is running. Quit it (Cmd-Q) and run this from Terminal.app."
 CUSTOM_FOLDER = (
@@ -97,7 +99,8 @@ def save_prefs(prefs, keys, delete=()):
     if folder:
         raise SystemExit(CUSTOM_FOLDER.format(folder))
     os.makedirs(BACKUP_DIR, exist_ok=True)
-    stem = os.path.join(BACKUP_DIR, f"{DOMAIN}-{time.strftime('%Y%m%d-%H%M%S')}")
+    # UTC: local time repeats an hour when the clocks go back, and the newest could sort first.
+    stem = os.path.join(BACKUP_DIR, f"{DOMAIN}-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}")
     backup, n = stem + ".plist", 1
     while os.path.exists(backup):  # two writers in one setup.sh run can share a second
         backup, n = f"{stem}-{n}.plist", n + 1
@@ -115,14 +118,30 @@ def save_prefs(prefs, keys, delete=()):
     return backup
 
 
-def backup_files():
-    """The prefs backups save_prefs made, oldest first by name (local time, then -n).
+def backup_time(stamp):
+    """Seconds since the epoch of a backup name's time (UTC, or local before v0.12); None if
+    it isn't a real time."""
+    try:
+        if stamp.endswith("Z"):
+            return calendar.timegm(time.strptime(stamp, "%Y%m%dT%H%M%SZ"))
+        return time.mktime(time.strptime(stamp, "%Y%m%d-%H%M%S"))
+    except (ValueError, OverflowError):
+        return None
 
-    By name, not mtime: a copy or touch changes that. Other files in the folder are left alone.
+
+def backup_files(now=None):
+    """The prefs backups save_prefs made, oldest first by the time in their names, then -n.
+
+    By name, not mtime: a copy or touch changes that. Names dated in the future (a wrong
+    clock) are left out, so they are never pruned; other files in the folder are left alone.
     """
+    now = time.time() if now is None else now
     found = []
     for path in glob.glob(os.path.join(BACKUP_DIR, f"{DOMAIN}-*.plist")):
         m = BACKUP_RE.fullmatch(os.path.basename(path))
-        if m:
-            found.append((m.group(1), int(m.group(2) or 0), path))
+        if not m:
+            continue
+        when = backup_time(m.group(1))
+        if when is not None and when <= now + 1:  # + 1: the one just written, this second
+            found.append((when, int(m.group(2) or 0), path))
     return [path for *_, path in sorted(found)]

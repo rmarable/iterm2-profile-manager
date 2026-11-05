@@ -61,7 +61,7 @@ Setup changes iTerm2's settings, and iTerm2 overwrites them when it quits, so ru
 
 `setup.sh` is safe to re-run. It:
 
-1. Copies SF Mono and SF Mono Terminal from Terminal.app into `~/Library/Fonts`.
+1. Copies SF Mono and SF Mono Terminal from Terminal.app into `~/Library/Fonts`. A different copy you already have there is left alone (delete it in Font Book and re-run to get Terminal.app's).
 2. Installs MesloLGS Nerd Font via Homebrew, if installed.
 3. Clones or updates iTerm2-Color-Schemes in `~/src/iTerm2-Color-Schemes` (set `SRC_DIR` to use another folder).
 4. Imports its schemes as iTerm2 color presets, and updates ones the repo has changed since, unless you've edited them.
@@ -119,7 +119,7 @@ Quit iTerm2, then from Terminal.app in the repo:
 | Database, snapshots, launch history (ratings exported to `~/srcp-curation-<time>.sql` first, with a copy of the whole database beside it; other files there are kept) | `--data` |
 | Presets matching the repo's files, current or earlier versions (edited ones are kept) | `--presets` |
 | Terminal.app fonts and the MesloLGS Homebrew package that `setup.sh` installed (ones you had already stay) | `--fonts` |
-| iTerm2-Color-Schemes clone (kept if it has changes, commits or stashes of yours) | `--repo` |
+| iTerm2-Color-Schemes clone (kept if it has changes, commits, stashes or ignored files of yours) | `--repo` |
 
 Kept: this repo, iTerm2 settings backups, shell config, and the Claude Code integration (`python3 .tools/srcp_enable_claude_integration.py --remove` undoes that). Open sessions keep their colors until closed. Re-run `setup.sh` to reinstall.
 

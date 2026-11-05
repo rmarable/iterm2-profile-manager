@@ -2,6 +2,17 @@
 
 What changed for someone using iTerm2 Profile Manager, newest first. Releases up to v0.7.1 are described on [GitHub releases](https://github.com/rmarable/iterm2-profile-manager/releases).
 
+## Unreleased
+
+- `setup.sh` no longer overwrites a font you already have under the same name; it only updates its own copy, and leaves any other one alone. To get Terminal.app's copy instead, delete yours in Font Book and run `setup.sh` again.
+- `./uninstall.sh --repo` keeps the iTerm2-Color-Schemes clone if it holds files of yours that git ignores (for example `notes.bak`), not only changes and commits. `.DS_Store` files don't count.
+- `./uninstall.sh --fonts` also removes a font `setup.sh` installed after Terminal.app's own copy has changed, as long as the installed one is unchanged.
+- `./uninstall.sh --fonts` keeps its record of what it couldn't check (Homebrew not on PATH, or Terminal.app's copy gone), so a later run can finish.
+- `./uninstall.sh --fonts` says what it kept in `setup.sh`'s record.
+- `./uninstall.sh` says when it keeps your key bindings, and how to go back to iTerm2's defaults.
+- iTerm2 settings backups are named in UTC, so a clock change can't get the newest one deleted.
+- `srcp_enable_claude_integration.py` keeps its newest 10 `settings.json` backups instead of all of them.
+
 ## v0.11.0 (2026-11-05)
 
 - After updating, run `python3 .tools/srcp_build_scheme_db.py` once. The main script asks for it in the Console when the database is too old, and colors tabs again as soon as it's rebuilt.
