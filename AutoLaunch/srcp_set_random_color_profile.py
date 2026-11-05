@@ -65,7 +65,7 @@ except ImportError as e:
     )
     sys.exit(1)
 
-VERSION = "0.10.0"  # bump on every change, so the Console shows which code is running
+VERSION = "0.10.1"  # bump on every change, so the Console shows which code is running
 LOCK_PATH = os.path.join(DATA_DIR, ".lock")
 # How often the running script checks whether a snapshot is due. asyncio's clock stops while
 # the Mac sleeps, so check often (it's a few file stats) to keep it close to daily.
@@ -1059,7 +1059,7 @@ async def save_dialog_text(
         lines.append(f"Saved now with {STAR_BUTTONS[stars - 1]}.")
     adjusted = await session.async_get_variable("user.adjusted")
     if adjusted:
-        lines.append(f"{colors_adjusted(int(adjusted))} so they're easier to see.")
+        lines.append(f"{colors_adjusted(int(adjusted))}.")
     return "\n".join(lines), stars
 
 

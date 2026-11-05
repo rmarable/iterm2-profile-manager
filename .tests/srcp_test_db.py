@@ -1,4 +1,6 @@
-"""Tests for the database layer: build, migrations, picking, rating, export and helpers.
+"""Tests for the database layer and the main script: build, migrations, picking, rating,
+export, snapshots, and the per-tab and menu paths (iTerm2 mocked). Prefs and the shell
+scripts: srcp_test_tools.py; shared fixtures: srcp_testlib.py.
 
 Runs under iTerm2's Python (the main script imports iterm2) against a temp folder; nothing
 touches the real database or iTerm2's settings. lint.sh runs it with
@@ -29,17 +31,23 @@ from typing import ClassVar
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, ".tools"))
+sys.path.insert(0, os.path.join(ROOT, ".tools"))  # before importing the tools
 
-import srcp_build_scheme_db as build  # noqa: E402  (needs .tools on sys.path first)
+import srcp_build_scheme_db as build  # noqa: E402
 import srcp_db_backup  # noqa: E402
 import srcp_export_curation  # noqa: E402
 import srcp_favorites  # noqa: E402
 import srcp_iterm_prefs  # noqa: E402
 import srcp_odds  # noqa: E402
-import srcp_preset_history  # noqa: E402
 import srcp_schema  # noqa: E402
-import srcp_uninstall_prefs  # noqa: E402
+from srcp_testlib import (  # noqa: E402
+    DARK,
+    LIGHT,
+    PRESETS,
+    REPO_NAMES,
+    UNREADABLE,
+    color,
+)
 
 MAIN = os.path.join(ROOT, "AutoLaunch", "srcp_set_random_color_profile.py")
 
@@ -74,87 +82,6 @@ def load_main(data_dir, font_dir):
     ns["DYNAMIC_PATH"] = os.path.join(data_dir, "dynamic.plist")
     ns["FONT_DIRS"] = [font_dir]
     return ns
-
-
-def color(r, g, b):
-    return {"Red Component": r, "Green Component": g, "Blue Component": b}
-
-
-def preset(bg, fg, accents):
-    """A full preset: ANSI 0-15 (1-6 and 9-14 are the accents), foreground, background."""
-    ansi = [(0, 0, 0), *accents, (0.8, 0.8, 0.8)]
-    p = {f"Ansi {i} Color": color(*ansi[i % 8]) for i in range(16)}
-    p["Foreground Color"] = color(*fg)
-    p["Background Color"] = color(*bg)
-    return p
-
-
-DARK_ACCENTS = [(0.9, 0.2, 0.2), (0.2, 0.8, 0.2), (0.9, 0.9, 0.2), (0.3, 0.4, 1.0)]
-DARK_ACCENTS += [(0.9, 0.3, 0.9), (0.2, 0.9, 0.9)]
-LIGHT_ACCENTS = [(0.7, 0.0, 0.0), (0.0, 0.5, 0.0), (0.55, 0.45, 0.0), (0.0, 0.2, 0.8)]
-LIGHT_ACCENTS += [(0.6, 0.0, 0.6), (0.0, 0.45, 0.5)]
-DARK = preset((0.1, 0.1, 0.1), (0.9, 0.9, 0.9), DARK_ACCENTS)
-LIGHT = preset((0.97, 0.97, 0.97), (0.1, 0.1, 0.1), LIGHT_ACCENTS)
-YELLOW = preset((0.98, 0.9, 0.4), (0.1, 0.1, 0.1), LIGHT_ACCENTS)  # colored background
-UNREADABLE = preset((0.2, 0.2, 0.2), (0.3, 0.3, 0.3), DARK_ACCENTS)
-DARK_2 = preset((0.12, 0.1, 0.15), (0.85, 0.85, 0.8), DARK_ACCENTS)
-PRESETS = {
-    "Dark One": DARK,
-    "Dark Two": DARK_2,
-    "Dark Two Copy": DARK_2,  # the repo's own identical twin of Dark Two
-    "dark one": DARK,  # an old spelling of Dark One, not in the repo
-    "Light One": LIGHT,
-    "Yellow": YELLOW,
-    "Murky": UNREADABLE,
-}
-REPO_NAMES = ["Dark One", "Dark Two", "Dark Two Copy", "Light One", "Yellow", "Murky"]
-
-
-def fake_defaults(test, live=None, running=False):
-    """Swap srcp_iterm_prefs' subprocess for a recorder; return the list of (argv, input).
-
-    `live` is the prefs as they are now (what `defaults export DOMAIN -` and `defaults read
-    DOMAIN key` see); `running` is whether ps shows iTerm2. Prefs backups go to a temp
-    folder. Nothing reaches the real defaults or ps; test.addCleanup restores both.
-    """
-    calls = []
-    live = {} if live is None else live
-
-    def run(argv, **kwargs):
-        calls.append((argv, kwargs.get("input")))
-        if argv[0] == "ps":
-            out = "/Applications/iTerm.app/Contents/MacOS/iTerm2\n" if running else "zsh\n"
-            return types.SimpleNamespace(stdout=out, returncode=0)
-        if argv[:2] == ["defaults", "read"]:
-            if argv[3] not in live:
-                return types.SimpleNamespace(stdout="", returncode=1)
-            value = live[argv[3]]
-            text = str(int(value)) if isinstance(value, bool) else str(value)
-            return types.SimpleNamespace(stdout=text + "\n", returncode=0)
-        if argv[:2] == ["defaults", "export"] and argv[3] == "-":
-            return types.SimpleNamespace(stdout=plistlib.dumps(live), returncode=0)
-        if argv[:2] == ["defaults", "export"]:  # the backup
-            with open(argv[3], "wb") as f:
-                plistlib.dump(live, f)
-        return types.SimpleNamespace(stdout="", returncode=0)
-
-    real_sub, real_dir = srcp_iterm_prefs.subprocess, srcp_iterm_prefs.BACKUP_DIR
-    srcp_iterm_prefs.subprocess = types.SimpleNamespace(run=run)
-    tmp = tempfile.mkdtemp(prefix="srcp-prefs-")
-    srcp_iterm_prefs.BACKUP_DIR = os.path.join(tmp, "prefs-backups")
-    test.addCleanup(setattr, srcp_iterm_prefs, "subprocess", real_sub)
-    test.addCleanup(setattr, srcp_iterm_prefs, "BACKUP_DIR", real_dir)
-    test.addCleanup(shutil.rmtree, tmp)
-    return calls
-
-
-def defaults_writes(calls):
-    """The calls from fake_defaults that change prefs: (verb, rest of argv, input)."""
-    return [
-        (argv[1], argv[3:], data)
-        for argv, data in calls
-        if argv[0] == "defaults" and argv[1] not in ("export", "read")
-    ]
 
 
 class Stop(Exception):
@@ -456,6 +383,101 @@ class BuildTest(DbTest):
         self.assertEqual(fonts["SFMono-Regular"], (0, 1))  # not installed: the build's doing
         self.assertEqual(fonts["Menlo-Regular"], (0, 0))  # installed yet off: your choice
         self.assertEqual(fonts["Monaco"], (1, 0))
+
+
+class MigrationTest(DbTest):
+    """A rebuild brings a database from every older schema up to date and keeps its data."""
+
+    def db_at_version(self, n):
+        """A DB as a build with only MIGRATIONS[:n] left it, holding some user data.
+
+        Migrations 1-4 shipped together (the first release), so real DBs started at schema 4;
+        1-3 are here so each migration is also checked on its own.
+        """
+        path = os.path.join(self.tmp, f"v{n}", "schemes.db")
+        os.makedirs(os.path.dirname(path))
+        db = sqlite3.connect(path, isolation_level=None)
+        for i, sql in enumerate(build.MIGRATIONS[:n], 1):
+            build.execute_all(db, sql)
+            if i == 1:  # as migrate() seeds it
+                db.executemany(
+                    "INSERT OR IGNORE INTO overrides (name, include) VALUES (?, 1)",
+                    [(name,) for name in build.SEED_INCLUDES],
+                )
+        db.execute("CREATE TABLE schemes (name TEXT PRIMARY KEY, mode TEXT)")  # an older shape
+        db.execute("CREATE VIEW my_view AS SELECT preset, stars FROM favorites")  # the user's
+        db.execute("INSERT INTO config VALUES ('favorite_share', '0.7')")  # no fix_colors yet
+        db.execute("INSERT INTO overrides (name, include) VALUES ('Yellow', 0)")  # Never show
+        # Both disabled; Monaco's file is installed, SF Mono's isn't (see test below).
+        db.execute("INSERT INTO fonts (name, enabled) VALUES ('Monaco', 0), ('SFMono-Regular', 0)")
+        if n >= 2:
+            db.execute("UPDATE fonts SET label = 'Mo' WHERE name = 'Monaco'")  # the user's label
+        if n >= 5:  # migration 5 backfilled it then
+            db.execute("UPDATE fonts SET missing = 1 WHERE name = 'SFMono-Regular'")
+        db.execute(
+            "INSERT INTO favorites VALUES ('Dark One', 'Monaco', 13, 4, '2026-10-01 00:00:00')"
+        )
+        db.execute(
+            "INSERT INTO launches (launched_at, preset, font, size, mode, source, session_id) "
+            "VALUES ('2026-10-01 00:00:00', 'Dark One', 'Monaco', 13, 'dark', 'favorite', 's1')"
+        )
+        if n >= 3:
+            rating = (
+                "INSERT INTO ratings (at, preset, font, action, stars) "
+                "VALUES ('2026-10-01 00:00:00', 'Dark One', ?, 'save', 4)"
+            )
+            copies = 2 if n == 3 else 1  # duplicates only before migration 4's unique index
+            for _ in range(copies):
+                db.execute(rating, ("Monaco",))
+                db.execute(rating, (None,))
+        db.execute(f"PRAGMA user_version = {n}")
+        db.close()
+        return path
+
+    def test_every_old_schema_upgrades_and_keeps_its_data(self):
+        # Every seeded font is installed (DbTest.setUp) but SF Mono, so its backfill shows.
+        os.remove(os.path.join(self.sysfonts, build.SEED_FONTS["SFMono-Regular"][0]))
+        latest = len(build.MIGRATIONS)
+        for n in range(1, latest):
+            with self.subTest(schema=n):
+                path = self.db_at_version(n)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    rows, _ = build.build_rows(PRESETS, self.repo)
+                    build.write_db(path, rows)
+                db = sqlite3.connect(path)
+                self.addCleanup(db.close)
+
+                def one(sql, db=db):
+                    return db.execute(sql).fetchall()
+
+                self.assertEqual(one("PRAGMA user_version"), [(latest,)])
+                config = dict(one("SELECT key, value FROM config"))
+                self.assertEqual(config["favorite_share"], "0.7")  # kept
+                self.assertEqual(config["fix_colors"], "1")  # added later, seeded
+                fonts_now = {
+                    r[0]: r[1:] for r in one("SELECT name, enabled, missing, label FROM fonts")
+                }
+                self.assertEqual(fonts_now["Monaco"], (0, 0, "Mo" if n >= 2 else "Monaco"))
+                self.assertEqual(fonts_now["SFMono-Regular"], (0, 1, "SF Mono"))  # backfilled
+                self.assertEqual(fonts_now["Menlo-Regular"][:2], (1, 0))  # seeded, installed
+                self.assertEqual(one("SELECT preset, stars FROM my_view"), [("Dark One", 4)])
+                self.assertEqual(len(one("SELECT * FROM launches")), 1)
+                self.assertIn(("Yellow", 0), one("SELECT name, include FROM overrides"))
+                indexes = {r[0] for r in one("SELECT name FROM sqlite_master WHERE type='index'")}
+                self.assertLessEqual({"ratings_event", "launches_open"}, indexes)
+                if n >= 3:  # the duplicate pairs collapsed to one row each
+                    self.assertEqual(one("SELECT count(*) FROM ratings"), [(2,)])
+                    # And the unique index keeps them out from now on, NULL font included.
+                    db.execute(
+                        "INSERT OR IGNORE INTO ratings (at, preset, font, action, stars) "
+                        "VALUES ('2026-10-01 00:00:00', 'Dark One', NULL, 'save', 4)"
+                    )
+                    self.assertEqual(one("SELECT count(*) FROM ratings"), [(2,)])
+                # The rebuilt views work: the favorite is in its pool, the hidden one is out.
+                self.assertEqual(one("SELECT preset FROM favorite_pool"), [("Dark One",)])
+                discovery = {r[0] for r in one("SELECT name FROM discovery")}
+                self.assertIn("Dark Two", discovery)
+                self.assertNotIn("Yellow", discovery)
 
 
 class MainScriptTest(DbTest):
@@ -1337,6 +1359,12 @@ class TabTest(DbTest):
         self.assertEqual(self.variables["user.font"], "Monaco")  # from the profile
         self.assertTrue(self.main["is_favorite"](self.db, "Dark One", "Monaco"))
 
+    def test_the_rating_dialog_says_how_many_colors_were_adjusted(self):
+        tab = {"user.color_preset": "Murky", "user.font": "Monaco", "user.adjusted": 1}
+        self.tab(tab, ["Cancel"])
+        self.run_quietly(self.main["save_dialog"](None, self.app, self.store, "s1"))
+        self.assertEqual(self.texts[0].splitlines()[-1], "1 color adjusted.")
+
     def test_cancelling_the_rating_dialog_changes_nothing(self):
         self.tab({"user.color_preset": "Dark One"}, ["Cancel"])
         self.run_quietly(self.main["save_dialog"](None, self.app, self.store, "s1"))
@@ -1568,152 +1596,6 @@ class ReportTest(DbTest):
         self.assertEqual(rows["Dark One"][:2], (1, 1))  # launches, changed
         self.assertIsNone(rows["Dark One"][3])  # avg open leaves the changed look out
         self.assertEqual(rows["Dark Two"][:2], (0, 0))  # no launches: 0, not blank
-
-
-class HelperTest(unittest.TestCase):
-    def test_preset_history_finds_older_versions(self):
-        with tempfile.TemporaryDirectory() as repo:
-            path = os.path.join(repo, "schemes", "A.itermcolors")
-            os.makedirs(os.path.dirname(path))
-            git = ["git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@t"]
-            # Ignore the user's git config (commit signing, hooks), which could fail commits.
-            env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
-            subprocess.run([*git[:3], "init", "-q"], check=True, env=env)
-            for version in (DARK, DARK_2):
-                with open(path, "wb") as f:
-                    plistlib.dump(version, f)
-                subprocess.run([*git, "add", "."], check=True, env=env)
-                subprocess.run([*git, "commit", "-qm", "v"], check=True, env=env)
-            root = srcp_preset_history.repo_root(os.path.dirname(path))
-            self.assertEqual(len(srcp_preset_history.past_versions(root, path)), 2)
-            self.assertTrue(srcp_preset_history.from_repo(DARK, path, root))
-            self.assertFalse(srcp_preset_history.from_repo(LIGHT, path, root))
-
-    def test_uninstall_removes_our_binding_and_restores_default_keymap(self):
-        defaults = {"0xf700-0x300000": {"Action": 10, "Text": ""}}
-        with tempfile.NamedTemporaryFile(suffix=".plist", delete=False) as f:
-            plistlib.dump(defaults, f)
-        self.addCleanup(os.remove, f.name)
-        real = srcp_uninstall_prefs.DEFAULT_MAP
-        srcp_uninstall_prefs.DEFAULT_MAP = f.name
-        self.addCleanup(setattr, srcp_uninstall_prefs, "DEFAULT_MAP", real)
-        ours = {"Action": 60, "Text": "save_profile()"}
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            prefs = {"GlobalKeyMap": {**defaults, "0x73-0x1c0000-0x1-0x1": ours}}
-            self.assertEqual(srcp_uninstall_prefs.remove_key_binding(prefs), ["GlobalKeyMap"])
-            self.assertEqual(prefs["GlobalKeyMap"], defaults)
-            edited = {**defaults, "0x61-0x100000": {"Action": 12, "Text": "x"}}
-            prefs = {"GlobalKeyMap": {**edited, "0x73-0x1c0000-0x1-0x1": ours}}
-            self.assertEqual(srcp_uninstall_prefs.remove_key_binding(prefs), [])
-            self.assertEqual(prefs["GlobalKeyMap"], edited)  # the user's own binding stays
-            self.assertIsNone(srcp_uninstall_prefs.remove_key_binding({"GlobalKeyMap": edited}))
-
-    def test_uninstall_removes_current_and_past_presets_but_keeps_edited(self):
-        with tempfile.TemporaryDirectory() as repo:
-            schemes = os.path.join(repo, "schemes")
-            os.makedirs(schemes)
-            env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
-            git = ["git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@t"]
-            subprocess.run([*git[:3], "init", "-q"], check=True, env=env)
-            for version in (DARK, DARK_2):  # A changes upstream; B never does
-                for name, colors in (("A", version), ("B", LIGHT)):
-                    with open(os.path.join(schemes, f"{name}.itermcolors"), "wb") as f:
-                        plistlib.dump(colors, f)
-                subprocess.run([*git, "add", "."], check=True, env=env)
-                subprocess.run([*git, "commit", "-qm", "v", "--allow-empty"], check=True, env=env)
-            prefs = {"Custom Color Presets": {"A": DARK, "B": YELLOW, "Mine": LIGHT}}
-            with contextlib.redirect_stdout(io.StringIO()):
-                self.assertTrue(srcp_uninstall_prefs.remove_presets(prefs, schemes))
-            # A was imported before upstream changed it: ours. B was edited; Mine isn't the repo's.
-            self.assertEqual(sorted(prefs["Custom Color Presets"]), ["B", "Mine"])
-
-    def test_custom_settings_folder_is_refused_before_writing(self):
-        prefs = {"LoadPrefsFromCustomFolder": True, "PrefsCustomFolder": "/elsewhere"}
-        self.assertEqual(srcp_iterm_prefs.custom_folder(prefs), "/elsewhere")
-        self.assertIsNone(srcp_iterm_prefs.custom_folder({}))
-
-        def no_defaults(*args, **kwargs):  # if the guard ever regressed, never touch real prefs
-            raise AssertionError(f"save_prefs ran {args[0]!r} instead of refusing")
-
-        real = srcp_iterm_prefs.subprocess
-        srcp_iterm_prefs.subprocess = types.SimpleNamespace(run=no_defaults)
-        self.addCleanup(setattr, srcp_iterm_prefs, "subprocess", real)
-        with self.assertRaises(SystemExit):
-            srcp_iterm_prefs.save_prefs(prefs, [])
-
-    def test_save_prefs_writes_only_the_named_keys(self):
-        calls = fake_defaults(self, live={"Other": 1})
-        prefs = {"Custom Color Presets": {"A": DARK}, "Other": 2, "GlobalKeyMap": {}}
-        srcp_iterm_prefs.save_prefs(prefs, ["Custom Color Presets"], delete=["GlobalKeyMap"])
-        writes = defaults_writes(calls)
-        self.assertEqual([w[0] for w in writes], ["import", "delete"])  # deletes come after
-        self.assertEqual(plistlib.loads(writes[0][2]), {"Custom Color Presets": {"A": DARK}})
-        self.assertEqual(writes[1][1], ["GlobalKeyMap"])
-
-    def test_save_prefs_refuses_if_iterm2_started_since_loading(self):
-        calls = fake_defaults(self, running=True)
-        with self.assertRaises(SystemExit) as cm:
-            srcp_iterm_prefs.save_prefs({"K": 1}, ["K"])
-        self.assertEqual(str(cm.exception), srcp_iterm_prefs.QUIT_FIRST)
-        self.assertEqual(defaults_writes(calls), [])
-
-    def test_save_prefs_rechecks_the_custom_folder_on_the_live_prefs(self):
-        live = {"LoadPrefsFromCustomFolder": True, "PrefsCustomFolder": "/elsewhere"}
-        calls = fake_defaults(self, live=live)
-        with self.assertRaises(SystemExit) as cm:
-            srcp_iterm_prefs.save_prefs({"K": 1}, ["K"])  # loaded before the folder was set
-        self.assertIn("/elsewhere", str(cm.exception))
-        self.assertEqual(defaults_writes(calls), [])
-        # Read key by key, not by exporting all of the prefs.
-        self.assertFalse([a for a, _ in calls if a[:2] == ["defaults", "export"] and a[3] == "-"])
-
-    def test_save_prefs_rejects_unknown_or_overlapping_keys(self):
-        calls = fake_defaults(self)
-        with self.assertRaisesRegex(ValueError, r"not in prefs: \['Missing'\]$"):
-            srcp_iterm_prefs.save_prefs({"K": 1}, ["Missing"])
-        with self.assertRaisesRegex(ValueError, r"in both keys and delete: \['K'\]$"):
-            srcp_iterm_prefs.save_prefs({"K": 1}, ["K"], delete=["K"])
-        self.assertEqual(calls, [])
-
-    def test_save_prefs_with_only_deletes_imports_nothing(self):
-        calls = fake_defaults(self)
-        srcp_iterm_prefs.save_prefs({"GlobalKeyMap": {}}, [], delete=["GlobalKeyMap"])
-        self.assertEqual([w[0] for w in defaults_writes(calls)], ["delete"])
-
-    def test_uninstall_prefs_names_the_keys_it_changed(self):
-        keymap, presets = "GlobalKeyMap", "Custom Color Presets"
-        cases = [  # (remove_key_binding's result, presets removed) -> (keys, delete) or None
-            (None, False, None),  # no binding and no presets: nothing written
-            ([], False, ([keymap], [])),
-            ([keymap], False, ([], [keymap])),
-            (None, True, ([presets], [])),
-            ([], True, ([keymap, presets], [])),
-            ([keymap], True, ([presets], [keymap])),
-        ]
-        for binding, removed, expected in cases:
-            with self.subTest(binding=binding, presets=removed):
-                prefs = {keymap: {"0x73": {}}, presets: {"A": DARK}}
-                with (
-                    mock.patch.object(srcp_uninstall_prefs, "iterm_running", return_value=False),
-                    mock.patch.object(srcp_uninstall_prefs, "load_prefs", return_value=prefs),
-                    mock.patch.object(
-                        srcp_uninstall_prefs, "remove_key_binding", return_value=binding
-                    ),
-                    mock.patch.object(srcp_uninstall_prefs, "remove_presets", return_value=removed),
-                    mock.patch.object(srcp_uninstall_prefs, "save_prefs") as save,
-                    mock.patch.object(sys, "argv", ["srcp_uninstall_prefs.py", "--presets", "x"]),
-                    contextlib.redirect_stdout(io.StringIO()),
-                ):
-                    srcp_uninstall_prefs.main()
-                if expected is None:
-                    save.assert_not_called()
-                    continue
-                keys, delete = save.call_args.args[1], list(save.call_args.args[2])
-                self.assertEqual((keys, delete), expected)
-                # What save_prefs itself requires: every named key is there, none in both.
-                self.assertLessEqual(set(keys), set(prefs))
-                self.assertFalse(set(keys) & set(delete))
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@ What changed for someone using iTerm2 Profile Manager, newest first. Releases up
 
 ## Unreleased
 
+- The rating dialog's note about adjusted colors is shorter: "1 color adjusted."
 - The right-click item "Remove from favorites" is now called "Remove profile from favorites".
 - **Never show** in the rating dialog now gives the tab a new look, as the right-click item does, and asks first if the preset is a favorite.
 - After rebuilding the database, new tabs get the new color adjustments without restarting the main script (the docs used to say a restart was needed), and **Profiles → Favorites** is rewritten when a rebuild changes a favorite's colors.

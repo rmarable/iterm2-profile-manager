@@ -1,0 +1,463 @@
+"""Tests for the tools beyond the database: iTerm2 prefs access and writers, preset history,
+the menu scripts' setup, and setup.sh / uninstall.sh dry runs.
+
+Runs under iTerm2's Python, like srcp_test_db.py, against temp folders only.
+"""
+
+import contextlib
+import io
+import os
+import plistlib
+import re
+import shutil
+import sqlite3
+import subprocess
+import sys
+import tempfile
+import time
+import types
+import unittest
+from typing import ClassVar
+from unittest import mock
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, ".tools"))  # before importing the tools
+
+import srcp_iterm_prefs  # noqa: E402
+import srcp_preset_history  # noqa: E402
+import srcp_uninstall_prefs  # noqa: E402
+from srcp_testlib import DARK, DARK_2, LIGHT, YELLOW, defaults_writes, fake_defaults  # noqa: E402
+
+
+class HelperTest(unittest.TestCase):
+    def test_preset_history_finds_older_versions(self):
+        with tempfile.TemporaryDirectory() as repo:
+            path = os.path.join(repo, "schemes", "A.itermcolors")
+            os.makedirs(os.path.dirname(path))
+            git = ["git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@t"]
+            # Ignore the user's git config (commit signing, hooks), which could fail commits.
+            env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+            subprocess.run([*git[:3], "init", "-q"], check=True, env=env)
+            for version in (DARK, DARK_2):
+                with open(path, "wb") as f:
+                    plistlib.dump(version, f)
+                subprocess.run([*git, "add", "."], check=True, env=env)
+                subprocess.run([*git, "commit", "-qm", "v"], check=True, env=env)
+            root = srcp_preset_history.repo_root(os.path.dirname(path))
+            self.assertEqual(len(srcp_preset_history.past_versions(root, path)), 2)
+            self.assertTrue(srcp_preset_history.from_repo(DARK, path, root))
+            self.assertFalse(srcp_preset_history.from_repo(LIGHT, path, root))
+
+    def test_uninstall_removes_our_binding_and_restores_default_keymap(self):
+        defaults = {"0xf700-0x300000": {"Action": 10, "Text": ""}}
+        with tempfile.NamedTemporaryFile(suffix=".plist", delete=False) as f:
+            plistlib.dump(defaults, f)
+        self.addCleanup(os.remove, f.name)
+        real = srcp_uninstall_prefs.DEFAULT_MAP
+        srcp_uninstall_prefs.DEFAULT_MAP = f.name
+        self.addCleanup(setattr, srcp_uninstall_prefs, "DEFAULT_MAP", real)
+        ours = {"Action": 60, "Text": "save_profile()"}
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            prefs = {"GlobalKeyMap": {**defaults, "0x73-0x1c0000-0x1-0x1": ours}}
+            self.assertEqual(srcp_uninstall_prefs.remove_key_binding(prefs), ["GlobalKeyMap"])
+            self.assertEqual(prefs["GlobalKeyMap"], defaults)
+            edited = {**defaults, "0x61-0x100000": {"Action": 12, "Text": "x"}}
+            prefs = {"GlobalKeyMap": {**edited, "0x73-0x1c0000-0x1-0x1": ours}}
+            self.assertEqual(srcp_uninstall_prefs.remove_key_binding(prefs), [])
+            self.assertEqual(prefs["GlobalKeyMap"], edited)  # the user's own binding stays
+            self.assertIsNone(srcp_uninstall_prefs.remove_key_binding({"GlobalKeyMap": edited}))
+
+    def test_uninstall_removes_current_and_past_presets_but_keeps_edited(self):
+        with tempfile.TemporaryDirectory() as repo:
+            schemes = os.path.join(repo, "schemes")
+            os.makedirs(schemes)
+            env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+            git = ["git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@t"]
+            subprocess.run([*git[:3], "init", "-q"], check=True, env=env)
+            for version in (DARK, DARK_2):  # A changes upstream; B never does
+                for name, colors in (("A", version), ("B", LIGHT)):
+                    with open(os.path.join(schemes, f"{name}.itermcolors"), "wb") as f:
+                        plistlib.dump(colors, f)
+                subprocess.run([*git, "add", "."], check=True, env=env)
+                subprocess.run([*git, "commit", "-qm", "v", "--allow-empty"], check=True, env=env)
+            prefs = {"Custom Color Presets": {"A": DARK, "B": YELLOW, "Mine": LIGHT}}
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertTrue(srcp_uninstall_prefs.remove_presets(prefs, schemes))
+            # A was imported before upstream changed it: ours. B was edited; Mine isn't the repo's.
+            self.assertEqual(sorted(prefs["Custom Color Presets"]), ["B", "Mine"])
+
+    def test_custom_settings_folder_is_refused_before_writing(self):
+        prefs = {"LoadPrefsFromCustomFolder": True, "PrefsCustomFolder": "/elsewhere"}
+        self.assertEqual(srcp_iterm_prefs.custom_folder(prefs), "/elsewhere")
+        self.assertIsNone(srcp_iterm_prefs.custom_folder({}))
+
+        def no_defaults(*args, **kwargs):  # if the guard ever regressed, never touch real prefs
+            raise AssertionError(f"save_prefs ran {args[0]!r} instead of refusing")
+
+        real = srcp_iterm_prefs.subprocess
+        srcp_iterm_prefs.subprocess = types.SimpleNamespace(run=no_defaults)
+        self.addCleanup(setattr, srcp_iterm_prefs, "subprocess", real)
+        with self.assertRaises(SystemExit):
+            srcp_iterm_prefs.save_prefs(prefs, [])
+
+    def test_prefs_backups_keep_the_newest_by_name(self):
+        fake_defaults(self)
+        folder = srcp_iterm_prefs.BACKUP_DIR
+        os.makedirs(folder)
+        stem = f"{srcp_iterm_prefs.DOMAIN}-20261101-0000"
+        # One second with many backups: -10 is newer than -9 and -2, though it sorts first as
+        # text, and the cut falls among them.
+        names = [f"{stem}10.plist", f"{stem}11.plist"]
+        names += [f"{stem}11-{n}.plist" for n in range(1, 11)]
+        decoys = ["my-own-backup.plist", f"{srcp_iterm_prefs.DOMAIN}-notes.plist"]
+        for i, name in enumerate([*names, *decoys]):
+            path = os.path.join(folder, name)
+            open(path, "w").close()
+            scrambled = time.time() - 1000 * ((i * 5) % 13)  # mtime says nothing
+            os.utime(path, (scrambled, scrambled))
+        with mock.patch.object(srcp_iterm_prefs.time, "strftime", return_value="20261101-000011"):
+            new = srcp_iterm_prefs.save_prefs({"K": 1}, ["K"])  # that second again: -11
+        self.assertTrue(new.endswith("-000011-11.plist"))
+        ours = [*names, os.path.basename(new)][-srcp_iterm_prefs.BACKUP_KEEP :]
+        self.assertEqual(sorted(os.listdir(folder)), sorted([*ours, *decoys]))
+
+    def test_load_prefs_reads_defaults_export(self):
+        fake_defaults(self, live={"Custom Color Presets": {"A": DARK}, "Flag": True})
+        self.assertEqual(
+            srcp_iterm_prefs.load_prefs(), {"Custom Color Presets": {"A": DARK}, "Flag": True}
+        )
+
+    def test_iterm_running_matches_the_executable_name_only(self):
+        cases = {
+            "/Applications/iTerm.app/Contents/MacOS/iTerm2": True,
+            "iTerm2": True,
+            "/Applications/iTerm.app/Contents/MacOS/iTerm2Helper": False,
+            "/usr/local/bin/iTerm2-foo": False,
+            "/bin/zsh": False,
+        }
+        for comm, expected in cases.items():
+            with self.subTest(comm=comm):
+                out = types.SimpleNamespace(stdout=f"/sbin/launchd\n{comm}\n")
+                fake = types.SimpleNamespace(run=lambda *a, out=out, **k: out)
+                with mock.patch.object(srcp_iterm_prefs, "subprocess", fake):
+                    self.assertEqual(srcp_iterm_prefs.iterm_running(), expected)
+
+    def test_save_prefs_writes_only_the_named_keys(self):
+        calls = fake_defaults(self, live={"Other": 1})
+        prefs = {"Custom Color Presets": {"A": DARK}, "Other": 2, "GlobalKeyMap": {}}
+        srcp_iterm_prefs.save_prefs(prefs, ["Custom Color Presets"], delete=["GlobalKeyMap"])
+        writes = defaults_writes(calls)
+        self.assertEqual([w[0] for w in writes], ["import", "delete"])  # deletes come after
+        self.assertEqual(plistlib.loads(writes[0][2]), {"Custom Color Presets": {"A": DARK}})
+        self.assertEqual(writes[1][1], ["GlobalKeyMap"])
+
+    def test_save_prefs_refuses_if_iterm2_started_since_loading(self):
+        calls = fake_defaults(self, running=True)
+        with self.assertRaises(SystemExit) as cm:
+            srcp_iterm_prefs.save_prefs({"K": 1}, ["K"])
+        self.assertEqual(str(cm.exception), srcp_iterm_prefs.QUIT_FIRST)
+        self.assertEqual(defaults_writes(calls), [])
+
+    def test_save_prefs_rechecks_the_custom_folder_on_the_live_prefs(self):
+        live = {"LoadPrefsFromCustomFolder": True, "PrefsCustomFolder": "/elsewhere"}
+        calls = fake_defaults(self, live=live)
+        with self.assertRaises(SystemExit) as cm:
+            srcp_iterm_prefs.save_prefs({"K": 1}, ["K"])  # loaded before the folder was set
+        self.assertIn("/elsewhere", str(cm.exception))
+        self.assertEqual(defaults_writes(calls), [])
+        # Read key by key, not by exporting all of the prefs.
+        self.assertFalse([a for a, _ in calls if a[:2] == ["defaults", "export"] and a[3] == "-"])
+
+    def test_save_prefs_rejects_unknown_or_overlapping_keys(self):
+        calls = fake_defaults(self)
+        with self.assertRaisesRegex(ValueError, r"not in prefs: \['Missing'\]$"):
+            srcp_iterm_prefs.save_prefs({"K": 1}, ["Missing"])
+        with self.assertRaisesRegex(ValueError, r"in both keys and delete: \['K'\]$"):
+            srcp_iterm_prefs.save_prefs({"K": 1}, ["K"], delete=["K"])
+        self.assertEqual(calls, [])
+
+    def test_save_prefs_with_only_deletes_imports_nothing(self):
+        calls = fake_defaults(self)
+        srcp_iterm_prefs.save_prefs({"GlobalKeyMap": {}}, [], delete=["GlobalKeyMap"])
+        self.assertEqual([w[0] for w in defaults_writes(calls)], ["delete"])
+
+    def test_uninstall_prefs_names_the_keys_it_changed(self):
+        keymap, presets = "GlobalKeyMap", "Custom Color Presets"
+        cases = [  # (remove_key_binding's result, presets removed) -> (keys, delete) or None
+            (None, False, None),  # no binding and no presets: nothing written
+            ([], False, ([keymap], [])),
+            ([keymap], False, ([], [keymap])),
+            (None, True, ([presets], [])),
+            ([], True, ([keymap, presets], [])),
+            ([keymap], True, ([presets], [keymap])),
+        ]
+        for binding, removed, expected in cases:
+            with self.subTest(binding=binding, presets=removed):
+                prefs = {keymap: {"0x73": {}}, presets: {"A": DARK}}
+                with (
+                    mock.patch.object(srcp_uninstall_prefs, "iterm_running", return_value=False),
+                    mock.patch.object(srcp_uninstall_prefs, "load_prefs", return_value=prefs),
+                    mock.patch.object(
+                        srcp_uninstall_prefs, "remove_key_binding", return_value=binding
+                    ),
+                    mock.patch.object(srcp_uninstall_prefs, "remove_presets", return_value=removed),
+                    mock.patch.object(srcp_uninstall_prefs, "save_prefs") as save,
+                    mock.patch.object(sys, "argv", ["srcp_uninstall_prefs.py", "--presets", "x"]),
+                    contextlib.redirect_stdout(io.StringIO()),
+                ):
+                    srcp_uninstall_prefs.main()
+                if expected is None:
+                    save.assert_not_called()
+                    continue
+                keys, delete = save.call_args.args[1], list(save.call_args.args[2])
+                self.assertEqual((keys, delete), expected)
+                # What save_prefs itself requires: every named key is there, none in both.
+                self.assertLessEqual(set(keys), set(prefs))
+                self.assertFalse(set(keys) & set(delete))
+
+
+class ShellDryRunTest(unittest.TestCase):
+    """setup.sh and uninstall.sh --dryrun change nothing.
+
+    They run from a temp copy of this checkout, in a temp HOME that holds a full install,
+    with stand-ins for defaults, brew, ps and git that log every call. A dry run may only
+    make the calls in ALLOWED; anything else (a write, or a new command) fails the test.
+    """
+
+    REPO_URL = "https://github.com/mbadolato/iTerm2-Color-Schemes.git"
+    DOMAIN = "com.googlecode.iterm2"
+    # Every call a dry run is allowed to make, as the stand-ins log it.
+    ALLOWED = re.compile(
+        r"(defaults read com\.googlecode\.iterm2 .+"
+        r"|defaults export com\.googlecode\.iterm2 -"
+        r"|brew list .+"
+        r"|ps -axo comm="
+        r"|git -C \S.*)$"  # the git stand-in itself lets only exact read-only calls through
+    )
+    STUBS: ClassVar[dict[str, str]] = {
+        # Reads of single keys: "not set". The export is $STUB_PREFS; a write fails.
+        "defaults": (
+            'case "$1" in\n'
+            "read) exit 1 ;;\n"
+            'export) [[ "$3" == "-" ]] && exec cat "$STUB_PREFS"; exit 3 ;;\n'
+            "*) exit 3 ;;\n"
+            "esac"
+        ),
+        "brew": "exit 1",  # nothing installed with Homebrew
+        # iTerm2 "is running": a dry run must still go through (its guards skip the check).
+        "ps": "echo /Applications/iTerm.app/Contents/MacOS/iTerm2",
+        # The real git, for exactly the read-only calls the scripts make (after "-C <dir>");
+        # anything else is refused, logged as REFUSED, which ALLOWED doesn't match.
+        "git": (
+            '[[ "$1" == -C ]] && call=("${@:3}") || call=("$@")\n'
+            'case "${call[*]}" in\n'
+            '"status --porcelain --untracked-files=normal" | "rev-list --count --all --not '
+            '--remotes" | "worktree list --porcelain" | "remote get-url origin" | '
+            '"rev-parse --show-toplevel" | "log --format=%H -- "* | "show "[0-9a-f]*:*)\n'
+            '    exec /usr/bin/git "$@" ;;\n'
+            "esac\n"
+            'echo "REFUSED git $*" >> "$STUB_LOG"\n'
+            "exit 3"
+        ),
+    }
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="srcp-shell-")
+        self.addCleanup(shutil.rmtree, self.tmp)
+        # A copy of the checkout, so nothing a regression does can touch the real one.
+        self.checkout = os.path.join(self.tmp, "checkout")
+        shutil.copytree(
+            ROOT,
+            self.checkout,
+            ignore=shutil.ignore_patterns(".git", "__pycache__", ".*_cache", ".tests", "images"),
+        )
+        self.home = os.path.join(self.tmp, "home")
+        stubs = os.path.join(self.tmp, "stubs")
+        os.makedirs(stubs)
+        self.log = os.path.join(self.tmp, "stub.log")
+        for name, body in self.STUBS.items():
+            path = os.path.join(stubs, name)
+            with open(path, "w") as f:
+                f.write(f'#!/bin/bash\necho "{name} $*" >> "$STUB_LOG"\n{body}\n')
+            os.chmod(path, 0o700)  # run by this user only
+        app = os.path.join(self.tmp, "iTerm.app")
+        os.makedirs(os.path.join(app, "Contents", "Resources"))
+        with open(
+            os.path.join(app, "Contents", "Resources", "DefaultGlobalKeyMap.plist"), "wb"
+        ) as f:
+            plistlib.dump({}, f)
+        self.prefs = os.path.join(self.tmp, "prefs.plist")
+        self.env = {
+            "HOME": self.home,
+            "PATH": f"{stubs}:/usr/bin:/bin",
+            "STUB_LOG": self.log,
+            "STUB_PREFS": self.prefs,
+            "ITERM_APP": app,
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_AUTHOR_NAME": "t",
+            "GIT_AUTHOR_EMAIL": "t@example.invalid",
+            "GIT_COMMITTER_NAME": "t",
+            "GIT_COMMITTER_EMAIL": "t@example.invalid",
+        }
+        self.repo, self.git = self.clone()
+        self.install()
+
+    def git_run(self, *args):
+        subprocess.run([*self.git, *args], env=self.env, check=True, capture_output=True)
+
+    def clone(self):
+        """A stand-in schemes clone (origin: the real URL, fully pushed) with two presets."""
+        repo = os.path.join(self.home, "src", "iTerm2-Color-Schemes")
+        os.makedirs(os.path.join(repo, "schemes"))
+        for name, colors in (("Dark One", DARK), ("Light One", LIGHT)):
+            with open(os.path.join(repo, "schemes", f"{name}.itermcolors"), "wb") as f:
+                plistlib.dump(colors, f)
+        git = ["/usr/bin/git", "-C", repo]
+        self.git = git
+        self.git_run("init", "-q")
+        self.git_run("config", "status.showUntrackedFiles", "no")  # uninstall must see past it
+        self.git_run("add", "-A")
+        self.git_run("commit", "-q", "-m", "a")
+        self.git_run("remote", "add", "origin", self.REPO_URL)
+        self.git_run("update-ref", "refs/remotes/origin/main", "HEAD")  # as if fetched
+        return repo, git
+
+    def install(self):
+        """What setup.sh leaves in HOME, so every uninstall step has something to remove."""
+        support = os.path.join(self.home, "Library", "Application Support", "iTerm2")
+        scripts = os.path.join(support, "Scripts")
+        for rel in (
+            "AutoLaunch/srcp_set_random_color_profile.py",
+            "srcp_ratings.py",
+            "srcp_never_show.py",
+            "srcp_score_presets.py",
+            ".tools/srcp_favorites.py",
+            ".tools/srcp_schema.py",
+        ):
+            os.makedirs(os.path.dirname(os.path.join(scripts, rel)), exist_ok=True)
+            shutil.copy(os.path.join(ROOT, rel), os.path.join(scripts, rel))
+        os.makedirs(os.path.join(support, "DynamicProfiles"))
+        with open(
+            os.path.join(support, "DynamicProfiles", "iterm2-profile-manager.plist"), "wb"
+        ) as f:
+            plistlib.dump({"Profiles": []}, f)
+        data = os.path.join(self.home, ".local", "share", "iterm2-color-schemes")
+        os.makedirs(os.path.join(data, "backups"))
+        sqlite3.connect(os.path.join(data, "schemes.db")).close()
+        sqlite3.connect(os.path.join(data, "backups", "schemes-20260101T000000Z.db")).close()
+        fonts = "/System/Applications/Utilities/Terminal.app/Contents/Resources/Fonts"
+        os.makedirs(os.path.join(self.home, "Library", "Fonts"))
+        for name in sorted(os.listdir(fonts))[:1] if os.path.isdir(fonts) else []:
+            shutil.copy(os.path.join(fonts, name), os.path.join(self.home, "Library", "Fonts"))
+
+    def state(self):
+        """What a dry run must leave as it was: HOME, the checkout, iTerm2's prefs."""
+        with open(self.prefs, "rb") as f:
+            return tree(self.home), tree(self.checkout), f.read()
+
+    def set_prefs(self, **prefs):
+        with open(self.prefs, "wb") as f:
+            plistlib.dump(prefs, f)
+
+    def run_script(self, *args):
+        result = subprocess.run(
+            ["/bin/bash", os.path.join(self.checkout, args[0]), *args[1:]],
+            env=self.env,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=120,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return result.stdout
+
+    def assert_only_allowed_calls(self):
+        with open(self.log) as f:
+            calls = f.read().splitlines()
+        self.assertEqual([c for c in calls if not self.ALLOWED.match(c)], [])
+
+    def test_setup_dry_run_changes_nothing(self):
+        self.set_prefs(**{"Custom Color Presets": {"Dark One": DARK}})  # no key binding yet
+        before = self.state()
+        out = self.run_script("setup.sh", "--dryrun")
+        self.assertEqual(self.state(), before)
+        self.assert_only_allowed_calls()
+        # The prefs writers got as far as their own dry run, and said so.
+        self.assertIn("+ Light One", out)  # import: one new preset
+        self.assertIn("Ctrl-Opt-Cmd-S -> Invoke Script Function", out)  # key binding
+        self.assertEqual(out.count("(dry run: nothing written)"), 3)  # import, build, binding
+        self.assertNotIn("key binding skipped", out)
+        self.assertIn("srcp_schema.py", out)  # it would install what the main script needs
+
+    def test_uninstall_dry_run_changes_nothing(self):
+        binding = {"0x73-0x1c0000-0x1-0x1": {"Action": 60, "Text": "save_profile()"}}
+        self.set_prefs(
+            **{"GlobalKeyMap": binding, "Custom Color Presets": {"Dark One": DARK, "Mine": LIGHT}}
+        )
+        before = self.state()
+        out = self.run_script("uninstall.sh", "--dryrun", "--all")
+        self.assertEqual(self.state(), before)
+        self.assert_only_allowed_calls()
+        self.assertIn("(dry run: nothing written)", out)  # the prefs part
+        self.assertIn("- 1 color presets matching", out)  # Dark One; Mine isn't the repo's
+        for step in ("iterm2-profile-manager.plist", "srcp_ratings.py", "srcp-curation-"):
+            self.assertIn(step, out)  # each would be removed (or exported), had this been real
+        self.assertIn("$ rm -rf", out)  # the clean, pushed clone would go
+
+    def test_dry_runs_when_the_checkout_is_the_scripts_folder(self):
+        support = os.path.join(self.home, "Library", "Application Support", "iTerm2")
+        shutil.rmtree(os.path.join(support, "Scripts"))
+        os.symlink(self.checkout, os.path.join(support, "Scripts"))
+        self.set_prefs()
+        before = self.state()
+        setup = self.run_script("setup.sh", "--dryrun")
+        uninstall = self.run_script("uninstall.sh", "--dryrun")
+        self.assertEqual(self.state(), before)
+        self.assert_only_allowed_calls()
+        self.assertNotIn("==> Installing scripts into", setup)
+        self.assertIn("this checkout is the Scripts folder", uninstall)
+        self.assertIn(".py.disabled", uninstall)  # it would disable the script, not delete it
+
+    def test_uninstall_repo_keeps_a_clone_with_work_in_it(self):
+        self.set_prefs()
+
+        def outcome():
+            out = self.run_script("uninstall.sh", "--dryrun", "--repo")
+            return "kept" if "left alone" in out else "deleted" if "$ rm -rf" in out else out
+
+        self.assertEqual(outcome(), "deleted")  # clean and pushed: nothing of yours in it
+        open(os.path.join(self.repo, "mine.itermcolors"), "w").close()
+        self.assertEqual(outcome(), "kept")  # untracked, though git config hides those
+        self.git_run("add", "-A")
+        self.git_run("stash", "-q")
+        self.assertEqual(outcome(), "kept")  # stash
+        self.git_run("stash", "drop", "-q")
+        self.git_run("worktree", "add", "-q", "--detach", os.path.join(self.tmp, "wt"))
+        self.assertEqual(outcome(), "kept")  # a linked worktree
+        self.git_run("worktree", "remove", os.path.join(self.tmp, "wt"))
+        self.assertEqual(outcome(), "deleted")  # back to nothing of yours
+        self.git_run("commit", "-q", "--allow-empty", "-m", "b")
+        self.assertEqual(outcome(), "kept")  # a commit no remote has
+        self.assertTrue(os.path.isdir(self.repo))
+        self.assert_only_allowed_calls()
+
+
+def tree(root, skip=(".git",)):
+    """{relative path: (size, mtime, mode)} of every file and folder under root (links not
+    followed)."""
+    out = {}
+    for folder, dirs, files in os.walk(root):
+        dirs[:] = [d for d in dirs if d not in skip]
+        for name in dirs + files:
+            path = os.path.join(folder, name)
+            st = os.lstat(path)
+            size = 0 if os.path.isdir(path) and not os.path.islink(path) else st.st_size
+            out[os.path.relpath(path, root)] = (size, st.st_mtime_ns, st.st_mode)
+    return out
+
+
+if __name__ == "__main__":
+    unittest.main()
