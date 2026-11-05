@@ -7,6 +7,7 @@ iTerm2 rewrites its prefs when it quits, so writers must run with iTerm2 quit.
 import glob
 import os
 import plistlib
+import re
 import subprocess
 import time
 
@@ -14,6 +15,7 @@ DOMAIN = "com.googlecode.iterm2"
 # Not ~/Library/Preferences: every plist there shows up as a settings domain.
 BACKUP_DIR = os.path.expanduser("~/.local/share/iterm2-profile-manager/prefs-backups")
 BACKUP_KEEP = 10
+BACKUP_RE = re.compile(re.escape(DOMAIN) + r"-(\d{8}-\d{6})(?:-(\d+))?\.plist")
 APP_DIRS = ["/Applications/iTerm.app", os.path.expanduser("~/Applications/iTerm.app")]
 QUIT_FIRST = "iTerm2 is running. Quit it (Cmd-Q) and run this from Terminal.app."
 CUSTOM_FOLDER = (
@@ -58,9 +60,12 @@ def iterm_running():
     return any(os.path.basename(line.strip()) == "iTerm2" for line in out.splitlines())
 
 
-def load_prefs():
+def load_prefs(timeout=None):
+    """iTerm2's prefs as a dict (a fresh export; about 7 MB with every preset installed)."""
     return plistlib.loads(
-        subprocess.run(["defaults", "export", DOMAIN, "-"], capture_output=True, check=True).stdout
+        subprocess.run(
+            ["defaults", "export", DOMAIN, "-"], capture_output=True, check=True, timeout=timeout
+        ).stdout
     )
 
 
@@ -105,7 +110,19 @@ def save_prefs(prefs, keys, delete=()):
         )
     for key in delete:
         subprocess.run(["defaults", "delete", DOMAIN, key], check=True)
-    old = sorted(glob.glob(os.path.join(BACKUP_DIR, f"{DOMAIN}-*.plist")), key=os.path.getmtime)
-    for path in old[:-BACKUP_KEEP]:
+    for path in backup_files()[:-BACKUP_KEEP]:
         os.remove(path)
     return backup
+
+
+def backup_files():
+    """The prefs backups save_prefs made, oldest first by name (local time, then -n).
+
+    By name, not mtime: a copy or touch changes that. Other files in the folder are left alone.
+    """
+    found = []
+    for path in glob.glob(os.path.join(BACKUP_DIR, f"{DOMAIN}-*.plist")):
+        m = BACKUP_RE.fullmatch(os.path.basename(path))
+        if m:
+            found.append((m.group(1), int(m.group(2) or 0), path))
+    return [path for *_, path in sorted(found)]

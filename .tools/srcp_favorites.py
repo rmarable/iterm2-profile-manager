@@ -19,7 +19,9 @@ import sys
 from pathlib import Path
 from typing import NamedTuple
 
-DEFAULT_DB = os.path.expanduser("~/.local/share/iterm2-color-schemes/schemes.db")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # works under python3 -I too
+from srcp_schema import DB_PATH as DEFAULT_DB
+from srcp_schema import FIX_ON_SQL, UNHIDE, is_busy
 
 FAVORITES = """
 SELECT f.stars, f.preset, COALESCE(fo.label, f.font) AS font, e.mode,
@@ -52,21 +54,8 @@ FROM overrides o LEFT JOIN schemes s ON s.name = o.name
 WHERE o.include = 0 ORDER BY o.name
 """
 
-# Whether color adjustments are on (config fix_colors); as in .tools/srcp_build_scheme_db.py.
-FIX_ON_SQL = (
-    "(COALESCE(trim((SELECT value FROM config WHERE key = 'fix_colors')), '1') NOT IN ('0', '0.0'))"
-)
-# Undo Never show. A mode override survives; a preset that fails the readability gate is
-# forced in (include 1), since it was showing before, unless it's a byte-identical twin or
-# adjustments are on (then it's picked anyway). The AutoLaunch script has the same string as
-# UNHIDE (it's installed without .tools/); a test keeps the two equal.
-UNHIDE = (
-    "UPDATE overrides SET include = CASE WHEN "  # noqa: S608  (built from constants only)
-    "(SELECT passes_gate FROM schemes WHERE name = :name) = 0 AND "
-    "(SELECT duplicate_of FROM schemes WHERE name = :name) IS NULL AND NOT "
-    + FIX_ON_SQL
-    + " THEN 1 END WHERE name = :name AND include = 0"
-)
+# FIX_ON_SQL (whether color adjustments are on) and UNHIDE (undo Never show) come from
+# .tools/srcp_schema.py, shared with the build and the main script.
 
 
 def stars(n):
@@ -218,11 +207,6 @@ def shown_again_note(preset, result):
             "but it's allowed anyway since you had it before."
         )
     return f"{preset} is back."
-
-
-def is_busy(error):
-    """The DB was locked past the timeout (e.g. the main script was writing)."""
-    return "locked" in str(error) or "busy" in str(error)
 
 
 def show_again(db, preset):

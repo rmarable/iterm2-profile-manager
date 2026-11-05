@@ -10,12 +10,12 @@ Right-click a session → **Save/update this profile**, or press ⌃⌥⌘S. The
 |---|---|
 | **1 ★** … **5 ★★★★★** | Saves preset + font as a favorite with that many stars. Rate again to change. |
 | **Remove favorite** | Favorites only. Deletes this favorite. The preset returns to discovery once no font of it is a favorite. |
-| **Never show** | Excludes the preset from all picks and deletes its favorites. Undo: rate it again, **Scripts → srcp_never_show.py** → **Show again**, or `srcp_favorites.py --show-again`. |
+| **Never show** | Excludes the preset from all picks and deletes its favorites, then re-rolls the session. For a favorite it first lists the fonts and stars it will delete. Undo: rate it again, **Scripts → srcp_never_show.py** → **Show again**, or `srcp_favorites.py --show-again`. |
 | **Cancel** | Closes the dialog. |
 
-Right-click → **Never show this profile** does the same as **Never show**, without the rating dialog, then re-rolls the session as in [Change to another profile](#change-to-another-profile). For a favorite it first lists the fonts and stars it will delete (**Cancel** or Escape keeps everything). Like the other items, iTerm2 3.7.6 shows it on every session; on one the script didn't color, it says so.
+Right-click → **Never show this profile** does the same as **Never show**, without the rating dialog: both re-roll the session as in [Change to another profile](#change-to-another-profile), and for a favorite both first list the fonts and stars they will delete (**Cancel** or Escape keeps everything). Like the other items, iTerm2 3.7.6 shows it on every session; on one the script didn't color, it says so.
 
-Right-click → **Remove from favorites** does the same as **Remove favorite**, without the dialog. iTerm2 3.7.6 shows it on every session and, on a non-favorite, says so and changes nothing. iTerm2 with Python API protocol 1.23+ hides it on non-favorites; the script uses that when available.
+Right-click → **Remove profile from favorites** does the same as **Remove favorite**, without the dialog. iTerm2 3.7.6 shows it on every session and, on a non-favorite, says so and changes nothing; if the database is busy or missing it says that instead. iTerm2 with Python API protocol 1.23+ hides it on non-favorites; the script uses that when available.
 
 ## Change to another profile
 
@@ -105,7 +105,7 @@ Monochrome presets (one hue, or near-grey) need only the Text check. `overrides.
 - Not adjusted: the background, ANSI 0, 7 and 15, cursor, bold, selection, and the separate `(Light)`/`(Dark)` colors a few presets carry for iTerm2's "separate colors for light and dark mode".
 - The math treats every color's components as sRGB, as the readability checks do; an adjusted color keeps its own color space (many presets use Calibrated or P3).
 - Adjustments are tied to the preset's colors at build time (`schemes.color_hash`, over 32-bit-rounded components, as iTerm2's API sends them). If a preset changes in iTerm2 after a build, its adjustments are skipped, with a Console warning, until the next rebuild.
-- After a rebuild, restart the main script so new sessions get the new adjustments.
+- A rebuild needs no restart: it rewrites the database in place, the main script reads each new tab's adjustments as it opens, and favorites' profiles update when the next tab opens.
 - `fix_colors = 0` turns all of this off: original colors, and only presets that pass the readability checks. Failing presets you showed again or rated while it was on then drop out too.
 
 A few installed presets are byte-identical copies under an older name (`base16 icy` = `base16-icy`), and the repo has a few identical twins of its own (`Zenbones` = `Zenbones Light`). Discovery uses only one name for each: the repo's, and the first in sort order.
@@ -250,7 +250,9 @@ mkdir -p ~/Library/Application\ Support/iTerm2/Scripts/AutoLaunch
 cp AutoLaunch/srcp_set_random_color_profile.py ~/Library/Application\ Support/iTerm2/Scripts/AutoLaunch/
 cp srcp_ratings.py srcp_never_show.py srcp_score_presets.py ~/Library/Application\ Support/iTerm2/Scripts/
 mkdir -p ~/Library/Application\ Support/iTerm2/Scripts/.tools
-cp .tools/srcp_favorites.py .tools/srcp_popup.py .tools/srcp_popup.js ~/Library/Application\ Support/iTerm2/Scripts/.tools/
+cp .tools/srcp_favorites.py .tools/srcp_popup.py .tools/srcp_popup.js \
+   .tools/srcp_schema.py .tools/srcp_db_backup.py .tools/srcp_iterm_prefs.py \
+   ~/Library/Application\ Support/iTerm2/Scripts/.tools/                  # the main script needs the last three
 ```
 
 Every tool that writes takes `--dryrun`. Manual key binding: Settings → Keys → Key Bindings → **+**, shortcut ⌃⌥⌘S, action **Invoke Script Function**, function `save_profile()`.
@@ -288,7 +290,7 @@ Double-clicking an `.itermcolors` file also imports it, with one dialog per file
 | `.tools/srcp_popup.js`, `.tools/srcp_popup.py` | The window for `srcp_ratings.py` and `srcp_never_show.py` (JXA `NSAlert`, optional dropdown), and the Python side that runs it. |
 | `.tools/srcp_export_curation.py` | Exports ratings and settings as SQL. |
 | `.tools/srcp_uninstall_prefs.py` | Removes the key binding and presets from iTerm2's settings (used by `uninstall.sh`). |
-| `.tools/srcp_iterm_prefs.py`, `.tools/srcp_db_backup.py`, `.tools/srcp_preset_history.py` | Shared helpers: iTerm2 settings access, snapshots, past versions of the repo's presets. |
+| `.tools/srcp_schema.py`, `.tools/srcp_iterm_prefs.py`, `.tools/srcp_db_backup.py`, `.tools/srcp_preset_history.py` | Shared helpers: what the DB's readers and writers agree on (color hash, `fix_colors` rule, seeds), iTerm2 settings access, snapshots, past versions of the repo's presets. The main script imports the first three, so they're installed with it. |
 | `.tools/srcp_enable_claude_integration.py` | See [Claude Code integration](#claude-code-integration-optional). |
 | `lint.sh`, `pyproject.toml`, `AutoLaunch/ruff.toml` | Lint and type checks. |
 
@@ -301,7 +303,7 @@ Double-clicking an `.itermcolors` file also imports it, with one dialog per file
 | `config` | Settings (see [Configuration](#configuration)). |
 | `fonts` | `name` (PostScript name), `enabled`, `label`, `missing` (1: disabled only because its file wasn't found; a rebuild enables it once it is). |
 | `favorites` | `preset`, `font`, `size`, `stars`, `saved_at`. One row per preset and font. |
-| `ratings` | Every save, removal and Never show: `at`, `preset`, `font`, `action`, `stars`, `previous_stars`. Never cleared. Older databases have none from before it existed. |
+| `ratings` | Every save, removal and Never show: `at`, `preset`, `font`, `action`, `stars`, `previous_stars`. The scripts never delete rows; migration 4 removed exact duplicates once, and `uninstall.sh --data` deletes the database. Older databases have none from before it existed. |
 | `launches` | One row per look shown in a session: `launched_at`, `preset`, `font`, `size`, `mode`, `source` (favorite or discovery), `stars`, `ended_at`, `duration_s`, `end_reason` (`closed`, `changed` or `unknown`). |
 | `effective` (view) | `schemes` with `overrides` applied. |
 | `discovery` (view) | Presets eligible for discovery, with `colorful` (1 = colored background). |

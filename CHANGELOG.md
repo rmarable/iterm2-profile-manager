@@ -4,6 +4,16 @@ What changed for someone using iTerm2 Profile Manager, newest first. Releases up
 
 ## Unreleased
 
+- The right-click item "Remove from favorites" is now called "Remove profile from favorites".
+- **Never show** in the rating dialog now gives the tab a new look, as the right-click item does, and asks first if the preset is a favorite.
+- After rebuilding the database, new tabs get the new color adjustments without restarting the main script (the docs used to say a restart was needed), and **Profiles → Favorites** is rewritten when a rebuild changes a favorite's colors.
+- New tabs color a little faster: the script asks iTerm2 for several things at once instead of one after another, and refreshes your favorite profiles in the background instead of making the tab wait.
+- Fixes: a tab re-rolled without a font of its own no longer keeps the old font and favorite mark; "Remove profile from favorites" says when the database was busy instead of "isn't a favorite"; saving a tab whose font the script didn't set now marks it as a favorite.
+- When the main script is restarted, it waits up to 5 seconds for the old copy to exit instead of quitting at once.
+- The Console says to rebuild the database when several presets it picks in a row are no longer installed.
+- A hand-edited preset with a color value out of range no longer stops the database build.
+- If you installed by hand (not with `setup.sh`), also copy `.tools/srcp_schema.py`, `.tools/srcp_db_backup.py` and `.tools/srcp_iterm_prefs.py` into the Scripts folder's `.tools/`: the main script now needs them, and says so in the Console if they're missing.
+- Old database snapshots are cleaned up by the date in their names, so copying or touching a snapshot can no longer get a newer one deleted.
 - Setup, uninstall and the other tools that change iTerm2's settings now write only the settings they change, and stop if iTerm2 was opened while they ran.
 - The database is backed up once a day even when iTerm2 stays open for days; before, the backup was taken only when iTerm2 started.
 - `./uninstall.sh --repo` keeps the iTerm2-Color-Schemes clone if it has changes, commits or stashes of yours.

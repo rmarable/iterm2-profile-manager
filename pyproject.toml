@@ -3,7 +3,6 @@
 [tool.ruff]
 line-length = 100
 target-version = "py39" # .tools/ run under /usr/bin/python3 3.9; AutoLaunch/ruff.toml raises it
-extend-exclude = ["archive"]
 
 [tool.ruff.per-file-target-version]
 "srcp_score_presets.py" = "py312" # these run under iTerm2's Python, like AutoLaunch/
@@ -27,9 +26,8 @@ ignore = [
 [tool.pyright]
 # .tools/ is checked by lint.sh from a temp copy: pyright skips dot-folders.
 include = ["AutoLaunch", "srcp_score_presets.py", "srcp_ratings.py", "srcp_never_show.py"]
-exclude = ["archive"]
 typeCheckingMode = "standard"
 executionEnvironments = [
-    { root = "AutoLaunch", pythonVersion = "3.12" },
+    { root = "AutoLaunch", pythonVersion = "3.12", extraPaths = [".tools"] }, # imports .tools/
     { root = ".", pythonVersion = "3.12", extraPaths = [".tools"] }, # menu scripts import .tools/
 ]

@@ -22,7 +22,9 @@ TOOLS = os.path.join(HERE, ".tools")
 POPUP = os.path.join(TOOLS, "srcp_popup.js")
 sys.path.insert(0, TOOLS)
 # Imported where used, after main() has checked they're installed (as in srcp_ratings.py).
-HAVE_TOOLS = all(importlib.util.find_spec(m) for m in ("srcp_favorites", "srcp_popup"))
+HAVE_TOOLS = all(
+    importlib.util.find_spec(m) for m in ("srcp_favorites", "srcp_schema", "srcp_popup")
+)  # srcp_favorites imports srcp_schema
 
 TITLE = "srcp never show"
 DONE, SHOW = "Done", "Show again"

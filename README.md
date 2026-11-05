@@ -1,12 +1,6 @@
-# About This Toolkit
+# iTerm2 Profile Manager
 
-- Are you new to this AI concept of "living in the terminal"?
-- Do you now find yourself running Claude Code, Codex or another AI agent in multiple tabs at once?
-- Do you hate how limited Terminal's colors are?
-- If you made the move from Terminal to iTerm2, are you bored with the iTerm2 default color scheme?
-- Wouldn't it be great to have something you can control in your life (like the colors and font of your terminal session)?
-
-If you answered "yes" to any of the above questions, meet your new best friend, the iTerm2 Profile Manager. It gives every iTerm2 tab and window its own look and fixed-width font, so you can easily tell your sessions apart at a glance. Rate and save your favorite combinations, review your past choices, and more.
+iTerm2 Profile Manager gives every new iTerm2 tab and window its own color scheme and fixed-width font, so you can tell your sessions apart at a glance. Rate the looks you like and they come up more often; hide the ones you don't.
 
 The presets come from [iTerm2-Color-Schemes](https://github.com/mbadolato/iTerm2-Color-Schemes) (800+). Light presets are used when macOS is in Light Mode and dark ones in Dark Mode. Colors that are hard to see against their background are adjusted a little, so most presets are readable. (You can turn that off; see [docs/REFERENCE.md](docs/REFERENCE.md#color-adjustments).)
 
@@ -33,7 +27,7 @@ Agents run in long-lived sessions, and it's easy to lose track of which tab is w
 | Software | Notes |
 |---|---|
 | macOS | Required. `setup.sh` exits on other systems. |
-| [iTerm2](https://iterm2.com) | Tested on 3.7.6. Install in `/Applications`, or set `ITERM_APP` to its path. |
+| [iTerm2](https://iterm2.com) | Tested on 3.7.6. Install in `/Applications` or `~/Applications`, or set `ITERM_APP` to its path. |
 | Xcode Command Line Tools | `xcode-select --install`. Provides `git` and `/usr/bin/python3` (3.9+). |
 | [Homebrew](https://brew.sh) | Optional. Installs MesloLGS Nerd Font for prompt icons. |
 
@@ -136,15 +130,20 @@ Kept: this repo, iTerm2 settings backups, shell config, and the Claude Code inte
 | Tabs don't change color | Check **Scripts → Manage → Console** for errors, and that the Python API is enabled. |
 | Console: `no scheme DB at ...` | Run `python3 .tools/srcp_build_scheme_db.py`. No restart needed. |
 | Console: `preset not found: X` | Preset renamed or deleted in iTerm2. Run `python3 .tools/srcp_build_scheme_db.py`. |
-| Console: `X changed since the DB was built; its color adjustments are skipped` | You edited or re-imported the preset after the last build, so its colors show unadjusted. Run `python3 .tools/srcp_build_scheme_db.py`, then restart the main script from the Scripts menu. |
+| Console: `3 picks in a row weren't installed presets` | Same cause, for many presets at once (presets were removed). Run `python3 .tools/srcp_build_scheme_db.py`. |
+| Console: `no dark presets to pick from; sessions left as is` (or `light`) | Every preset of that mode is hidden or left out. Show some again with **Scripts → srcp_never_show.py**. |
+| Console: `discovery has no colorful column; rebuild the DB` | The database is from before 0.6.0. Run `python3 .tools/srcp_build_scheme_db.py`. |
+| Console: `MesloLGSNFM-Regular isn't installed; icon font left as is` | Prompt icons (Powerlevel10k and the like) need MesloLGS Nerd Font: `brew install --cask font-meslo-lg-nerd-font`, or turn the icon font off ([Configuration](docs/REFERENCE.md#configuration)). Tabs are colored either way. |
+| Console: `favorite profiles not updated: ...` | Reading iTerm2's settings failed or took over 30 s, so **Profiles → Favorites** wasn't refreshed. Tabs are still colored; it's retried when the next tab opens. |
+| Console: `X changed since the DB was built; its color adjustments are skipped` | You edited or re-imported the preset after the last build, so its colors show unadjusted. Run `python3 .tools/srcp_build_scheme_db.py`. No restart needed. |
 | A preset looks a little different from its screenshots | Colors that were hard to see are adjusted. To see the originals, turn that off: [docs/REFERENCE.md](docs/REFERENCE.md#color-adjustments). |
 | Most presets show your default profile's colors | Settings → Profiles → Colors: turn off **Use separate colors for light and dark mode** (few presets define both). |
 | Always light, or always dark | Settings → Appearance → Theme: **Regular**, **Minimal** or **Compact**, not Light, Dark or High Contrast. |
-| Console: `another copy is already running; exiting` | Expected after a restart; a lock allows one copy. But if new tabs stopped changing color after you relaunched iTerm2, a copy from before is stuck (fixed in 0.6.9). Quit iTerm2, run `pkill -f srcp_set_random_color_profile` in Terminal.app, and relaunch. |
+| Console: `another copy is still running after 5 s; exiting` | A lock allows one copy, and a restart waits 5 s for the old one to exit. If new tabs stopped changing color, a copy from before is stuck: quit iTerm2, run `pkill -f srcp_set_random_color_profile` in Terminal.app, and relaunch. |
 | A font never appears | Disabled or not installed: `select name, enabled from fonts`. If you installed it after setup, run `python3 .tools/srcp_build_scheme_db.py`. No restart needed. |
 | A favorite is missing from the Profiles menu | Preset not installed, or marked **Never show**. |
 | ⌃⌥⌘S does nothing | Check Settings → Keys → Key Bindings for `save_profile()`, and the Console for the main script's startup line. |
-| Console: `database is locked` | A rebuild or open `sqlite3` transaction held the lock over 5 s. A session opened then keeps the profile's colors, or isn't logged; a rating made then shows a "didn't take" alert: rate again. |
+| Console: `[warn] DB pick_look: database is locked` (or another name after `DB`), then `couldn't read the DB; session left as is` | A rebuild or open `sqlite3` transaction held the lock over 5 s. A session opened then keeps the profile's colors, or isn't logged; a rating made then shows a "didn't take" alert: rate again. |
 | `srcp_build_scheme_db.py`: `schemes.db is missing but its -wal/-shm files are still there` | Delete `schemes.db-wal` and `schemes.db-shm`, or restore a snapshot. |
 | A tool says iTerm2 is running | Quit iTerm2 (⌘Q) and run the tool from Terminal.app. |
 | Setup says iTerm2 loads its settings from a custom folder | iTerm2 would overwrite the changes. Turn off Settings → General → Settings → **Load settings from a custom folder or URL**, run setup, then turn it back on and save the current settings to the folder. |

@@ -21,8 +21,8 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # works under python3 -I too
 from srcp_build_scheme_db import SEED_CONFIG
+from srcp_schema import DB_PATH as DEFAULT_DB
 
-DEFAULT_DB = os.path.expanduser("~/.local/share/iterm2-color-schemes/schemes.db")
 NUMERIC = ("favorite_share", "favorite_target", "recent_window", "colorful_weight")
 BAR = 30
 

@@ -24,7 +24,9 @@ sys.path.insert(0, TOOLS)
 # .tools/srcp_favorites.py supplies the report's own tables, so both views agree, and
 # .tools/srcp_popup.py shows the window. They're imported where used (pyright resolves them
 # via extraPaths, so lint.sh checks the calls), after main() has checked they're installed.
-HAVE_TOOLS = all(importlib.util.find_spec(m) for m in ("srcp_favorites", "srcp_popup"))
+HAVE_TOOLS = all(
+    importlib.util.find_spec(m) for m in ("srcp_favorites", "srcp_schema", "srcp_popup")
+)  # srcp_favorites imports srcp_schema
 
 HISTORY_ROWS = 50
 DONE = "Done"

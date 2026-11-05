@@ -125,7 +125,9 @@ if [[ "$HERE" == "$SCRIPTS_REAL" ]]; then
 else
 	run rm -f "$SCRIPTS_DIR/srcp_score_presets.py" "$SCRIPTS_DIR/srcp_ratings.py" \
 		"$SCRIPTS_DIR/srcp_never_show.py" "$SCRIPTS_DIR/.tools/srcp_favorites.py" \
-		"$SCRIPTS_DIR/.tools/srcp_popup.py" "$SCRIPTS_DIR/.tools/srcp_popup.js"
+		"$SCRIPTS_DIR/.tools/srcp_popup.py" "$SCRIPTS_DIR/.tools/srcp_popup.js" \
+		"$SCRIPTS_DIR/.tools/srcp_schema.py" "$SCRIPTS_DIR/.tools/srcp_db_backup.py" \
+		"$SCRIPTS_DIR/.tools/srcp_iterm_prefs.py"
 	if [[ -d "$SCRIPTS_DIR/.tools" ]] && ! $DRYRUN; then
 		rm -rf "$SCRIPTS_DIR/.tools/__pycache__" # left by the menu scripts importing .tools/
 		rmdir "$SCRIPTS_DIR/.tools" 2>/dev/null || true # only if now empty
@@ -155,10 +157,16 @@ python3 "$HERE/.tools/srcp_uninstall_prefs.py" "${PREFS_ARGS[@]+"${PREFS_ARGS[@]
 if $DATA; then
 	echo "==> Scheme DB, backups and launch history: $DATA_DIR"
 	export_file="$HOME/srcp-curation-$(date +%Y%m%d-%H%M%S).sql"
-	newest_backup=""
+	# Newest by the UTC time in the name (as .tools/srcp_db_backup.py prunes), not mtime; a
+	# name dated in the future (wrong clock, copied from another Mac) doesn't count.
+	newest_backup="" newest_key="" now_utc="$(date -u +%Y%m%dT%H%M%SZ)"
 	for f in "$DATA_DIR"/backups/schemes-*.db; do
-		[[ -e "$f" ]] || continue
-		if [[ -z "$newest_backup" || "$f" -nt "$newest_backup" ]]; then newest_backup="$f"; fi
+		[[ "$(basename "$f")" =~ ^schemes-([0-9]{8}T[0-9]{6}Z)(-([0-9]+))?\.db$ ]] || continue
+		[[ "${BASH_REMATCH[1]}" > "$now_utc" ]] && continue
+		key="${BASH_REMATCH[1]}-$(printf '%09d' "$((10#${BASH_REMATCH[3]:-0}))")"
+		if [[ -z "$newest_key" || "$key" > "$newest_key" ]]; then
+			newest_backup="$f" newest_key="$key"
+		fi
 	done
 	if [[ -e "$DATA_DIR/schemes.db" ]]; then
 		run python3 "$HERE/.tools/srcp_export_curation.py" -o "$export_file"

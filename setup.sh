@@ -131,9 +131,11 @@ if [[ "$HERE" != "$(cd "$SCRIPTS_DIR" 2>/dev/null && pwd -P || echo "$SCRIPTS_DI
 	run mkdir -p "$SCRIPTS_DIR/AutoLaunch"
 	run mkdir -p "$SCRIPTS_DIR/.tools"
 	run cp "$HERE/srcp_score_presets.py" "$HERE/srcp_ratings.py" "$HERE/srcp_never_show.py" "$SCRIPTS_DIR/"
-	# used by srcp_ratings.py and srcp_never_show.py
+	# used by srcp_ratings.py and srcp_never_show.py, and (schema, db_backup, iterm_prefs) by
+	# the AutoLaunch script, which won't start without them
 	run cp "$HERE/.tools/srcp_favorites.py" "$HERE/.tools/srcp_popup.py" "$HERE/.tools/srcp_popup.js" \
-		"$SCRIPTS_DIR/.tools/"
+		"$HERE/.tools/srcp_schema.py" "$HERE/.tools/srcp_db_backup.py" \
+		"$HERE/.tools/srcp_iterm_prefs.py" "$SCRIPTS_DIR/.tools/"
 	run cp "$HERE/AutoLaunch/srcp_set_random_color_profile.py" "$SCRIPTS_DIR/AutoLaunch/"
 fi
 # uninstall.sh disables the script this way when this checkout is the Scripts folder.
@@ -150,7 +152,7 @@ run rm -f "$SCRIPTS_DIR/AutoLaunch/random_profile_color.py" \
 $DRYRUN && exit 0
 cat <<'EOF'
 
-Done. Next, in iTerm2:
+Done. If you haven't already, in iTerm2:
   - Settings > General > Magic > Enable Python API
   - Scripts > Manage > Install Python Runtime (first time only)
   - Relaunch iTerm2 so the new fonts appear and the AutoLaunch script starts.

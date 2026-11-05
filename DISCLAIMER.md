@@ -8,17 +8,18 @@ There is no warranty, no support commitment, and no guarantee it works on your M
 
 ## What it changes on your Mac
 
-| What | Changed by | Backed up first |
-|---|---|---|
-| iTerm2 settings (`com.googlecode.iterm2`): color presets, a key binding | `setup.sh` | Yes, in `~/.local/share/iterm2-profile-manager/prefs-backups/` (newest 10 kept) |
-| iTerm2's Scripts folder and Dynamic Profiles | `setup.sh`, the main script | No (regenerated) |
-| `~/Library/Fonts`: copies of fonts already on your Mac | `setup.sh` | No |
-| Homebrew: MesloLGS Nerd Font | `setup.sh`, if Homebrew is installed | No |
-| `~/src/iTerm2-Color-Schemes` (or `$SRC_DIR`) | `setup.sh` | No |
-| `~/.local/share/iterm2-color-schemes/` (database) | the scripts | Yes, rolling snapshots |
-| `~/.claude/settings.json`, every iTerm2 profile's triggers | `.tools/srcp_enable_claude_integration.py`, only if you run it | Yes |
+| What | Changed by | Backed up first | Undone by |
+|---|---|---|---|
+| iTerm2 settings (`com.googlecode.iterm2`): a key binding | `setup.sh` | Yes, in `~/.local/share/iterm2-profile-manager/prefs-backups/` (newest 10 kept) | `./uninstall.sh` |
+| iTerm2 settings: color presets | `setup.sh` | Yes, as above | `./uninstall.sh --presets` (presets you edited are kept) |
+| iTerm2's Scripts folder and Dynamic Profiles | `setup.sh`, the main script | No (regenerated) | `./uninstall.sh` (if this repo is the Scripts folder, its files stay and the main script is renamed `.py.disabled`) |
+| `~/Library/Fonts`: copies of fonts already on your Mac | `setup.sh` | No | `./uninstall.sh --fonts` (only copies still identical to Terminal's) |
+| Homebrew: MesloLGS Nerd Font | `setup.sh`, if Homebrew is installed | No | `./uninstall.sh --fonts` |
+| `~/src/iTerm2-Color-Schemes` (or `$SRC_DIR`) | `setup.sh` | No | `./uninstall.sh --repo` (kept if it has changes, commits or stashes of yours) |
+| `~/.local/share/iterm2-color-schemes/` (database) | the scripts | Yes, rolling snapshots | `./uninstall.sh --data` (exports your ratings first) |
+| `~/.claude/settings.json`, every iTerm2 profile's triggers | `.tools/srcp_enable_claude_integration.py`, only if you run it | Yes | By hand: [docs/REFERENCE.md](docs/REFERENCE.md#claude-code-integration-optional) |
 
-`./uninstall.sh` undoes all of these except the last row; [docs/REFERENCE.md](docs/REFERENCE.md#claude-code-integration-optional) says how to undo that by hand. Keep your own backup of anything you care about.
+`./uninstall.sh --all` runs every option above; prefs backups are always kept. Keep your own backup of anything you care about.
 
 ## Third-party software and content
 

@@ -16,30 +16,36 @@ from __future__ import annotations
 
 import argparse
 import glob
-import hashlib
 import itertools
 import json
 import math
 import os
 import re
 import sqlite3
-import struct
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # works under python3 -I too
 from srcp_db_backup import snapshot
 from srcp_iterm_prefs import load_prefs
+from srcp_schema import (  # shared with the main script and srcp_favorites.py
+    COMPONENTS,
+    FIX_ON_SQL,
+    FONT_DIRS,
+    HASH_KEYS,
+    SEED_CONFIG,
+    SEED_FONTS,
+    colors_hash,
+)
+from srcp_schema import (
+    DB_PATH as DEFAULT_DB,
+)
 
 KEY = "Custom Color Presets"
 DEFAULT_REPO = os.path.expanduser(
     os.path.join(os.environ.get("SRC_DIR", "~/src"), "iTerm2-Color-Schemes")
 )
-DEFAULT_DB = os.path.expanduser("~/.local/share/iterm2-color-schemes/schemes.db")
 
-ANSI_KEYS = [f"Ansi {i} Color" for i in range(16)]
 ACCENT_KEYS = [f"Ansi {i} Color" for i in range(1, 7)]
-HASH_KEYS = [*ANSI_KEYS, "Foreground Color", "Background Color"]
-COMPONENTS = ("Red Component", "Green Component", "Blue Component")
 
 # Readability gate.
 MIN_TEXT_CONTRAST = 4.5  # fg/bg, WCAG AA
@@ -64,15 +70,9 @@ FIX_TARGETS = {
 FIX_STEP = 0.005  # OKLCH lightness (and chroma) per step
 FIX_MAX_STEPS = 200  # enough to cross the whole 0-1 lightness range
 DISTINCT_STEP = 2 * FIX_STEP  # lightness per move when separating look-alike accents
-DISTINCT_MAX_STEPS = 40  # moves per accent, in all
+DISTINCT_MAX_STEPS = 40  # times the 6 accents: the moves all of them share, in all
 GAMUT_EPS = 1e-6
 GAMUT_FLOOR_MARGIN = 0.001  # last-resort chroma floor above CHROMA_MIN: still counts as colored
-# Whether adjustments are on: config fix_colors, anything but '0' / '0.0' (missing = on). The
-# views embed it, so changing the setting needs no rebuild. Copies, kept equal by a test:
-# FIX_ON_SQL in AutoLaunch/srcp_set_random_color_profile.py and .tools/srcp_favorites.py.
-FIX_ON_SQL = (
-    "(COALESCE(trim((SELECT value FROM config WHERE key = 'fix_colors')), '1') NOT IN ('0', '0.0'))"
-)
 
 # Old-rotation presets just under the gate, included on the first build.
 SEED_INCLUDES = [
@@ -83,14 +83,6 @@ SEED_INCLUDES = [
     "Aura",
     "Aura Dark",
 ]
-SEED_CONFIG = {
-    "favorite_share": "0.5",
-    "favorite_target": "10",
-    "recent_window": "20",
-    "colorful_weight": "3",  # colorful-background presets picked this many times as often
-    "nonascii_font": "MesloLGSNFM-Regular",  # prompt icons; '' turns it off
-    "fix_colors": "1",  # adjust hard-to-see colors; 0 turns it off
-}
 # PostScript name -> readable label, used in favorite profile names ("Kibble - Menlo").
 SEED_FONT_LABELS = {
     "SFMono-Regular": "SF Mono",
@@ -98,19 +90,6 @@ SEED_FONT_LABELS = {
     "Monaco": "Monaco",
     "MesloLGSNFM-Regular": "MesloLGS Nerd Font Mono",
 }
-# PostScript name -> font file names (any one present counts as installed).
-SEED_FONTS = {
-    "SFMono-Regular": ["SF-Mono-Regular.otf"],
-    "Menlo-Regular": ["Menlo.ttc"],
-    "Monaco": ["Monaco.ttf"],
-    "MesloLGSNFM-Regular": ["MesloLGSNerdFontMono-Regular.ttf"],
-}
-FONT_DIRS = [
-    "~/Library/Fonts",
-    "/Library/Fonts",
-    "/System/Library/Fonts",
-    "/System/Library/Fonts/Supplemental",
-]
 
 
 # What the build learns about each preset (color math: WCAG contrast, OKLab; the readability
@@ -126,6 +105,9 @@ def has_colors(colors):
 
 
 def linear(v):
+    # Clamped: a hand-edited preset with a component below 0 or above 1 would otherwise give
+    # a complex cube root in oklab() and stop the whole build. Hashes use the raw values.
+    v = min(1.0, max(0.0, v))
     return v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4
 
 
@@ -264,8 +246,10 @@ def adjust_one(c, bg, target, is_ansi):
     margin above CHROMA_MIN; if that misses the target, just above it (still colored, so the
     gate's monochrome check can't flip). Text may go grey. None if nothing beat c."""
     chroma = math.hypot(*oklab(c)[1:])
-    if not is_ansi or chroma <= CHROMA_MIN:  # text, or an ANSI grey: may lose its tint
-        floors = [min(chroma, CHROMA_MIN + FIX_STEP) if is_ansi else 0.0, 0.0]
+    if not is_ansi:  # text may go grey: one pass, no floor
+        floors = [0.0]
+    elif chroma <= CHROMA_MIN:  # an ANSI grey: keep its faint tint if that's enough, else lose it
+        floors = [min(chroma, CHROMA_MIN + FIX_STEP), 0.0]
     else:
         floors = [CHROMA_MIN + FIX_STEP, CHROMA_MIN + GAMUT_FLOOR_MARGIN]
     best = None
@@ -283,9 +267,10 @@ def adjust_one(c, bg, target, is_ansi):
 def separate_accents(palette, bg):
     """Nudge look-alike accents (ANSI 1-6) apart until 5 are distinct; None if it can't.
 
-    Deterministic, at most DISTINCT_MAX_STEPS moves per accent in all: each move takes one of
-    the closest pair DISTINCT_STEP in lightness away from the other, preferring a move that
-    also raises its contrast, and never below its contrast target.
+    Deterministic, at most DISTINCT_MAX_STEPS * 6 moves shared by all the accents (one accent
+    can take most of them): each move takes one of the closest pair DISTINCT_STEP in lightness
+    away from the other, preferring a move that also raises its contrast, and never below its
+    contrast target.
     """
     work = dict(palette)
     bg_lightness = oklab(bg)[0]
@@ -359,14 +344,10 @@ def apply_fixes(colors, fixes):
     return out
 
 
-def float32(v):
-    """v as iTerm2's API sends it (32-bit), so the script's hash of a live preset matches."""
-    return struct.unpack("f", struct.pack("f", v))[0]
-
-
 def color_hash(colors):
-    parts = [",".join(f"{float32(v):.4f}" for v in rgb(colors[k])) for k in HASH_KEYS]
-    return hashlib.sha1("|".join(parts).encode(), usedforsecurity=False).hexdigest()
+    """srcp_schema.colors_hash of a prefs preset dict: its raw components, as stored."""
+    # The stored components, not rgb(): that may convert them for the color math.
+    return colors_hash({k: tuple(colors[k][c] for c in COMPONENTS) for k in HASH_KEYS})
 
 
 def yaml_variants(repo):
@@ -458,6 +439,12 @@ MIGRATIONS = [
     # Backfilled in migrate().
     """
     ALTER TABLE fonts ADD COLUMN missing INTEGER NOT NULL DEFAULT 0;
+    """,
+    # 6: launches still open (close_stale's query at script start). Small now; also marks the
+    # DBs this version built, which every current column and view exists in.
+    """
+    CREATE INDEX launches_open ON launches (launched_at)
+        WHERE ended_at IS NULL AND end_reason IS NULL;
     """,
 ]
 
@@ -707,10 +694,7 @@ def report_changed_favorites(before, after):
     changed = sorted(p for p in after if before is not None and before.get(p) != after[p])
     if changed:
         print(f"color adjustments changed for favorites: {', '.join(changed)}")
-    print(
-        "Restart srcp_set_random_color_profile.py (Scripts menu, or relaunch iTerm2) "
-        "so new tabs get these adjustments."
-    )
+    print("New tabs get these adjustments; favorites' profiles update when the next tab opens.")
 
 
 def warn_included_duplicates(path):

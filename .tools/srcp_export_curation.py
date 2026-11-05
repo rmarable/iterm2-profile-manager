@@ -17,7 +17,9 @@ import sys
 import time
 from pathlib import Path
 
-DEFAULT_DB = os.path.expanduser("~/.local/share/iterm2-color-schemes/schemes.db")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # works under python3 -I too
+from srcp_schema import DB_PATH as DEFAULT_DB
+
 TABLES = ["favorites", "ratings", "overrides", "config", "fonts"]
 
 
@@ -75,7 +77,8 @@ def export(db, out):
     out.write(".bail on\n")
     out.write(
         f"-- A 'CHECK constraint failed' here means the DB is older than schema {version}:\n"
-        "-- rebuild it first (python3 .tools/srcp_build_scheme_db.py), then restore again.\n"
+        "-- rebuild it first (python3 .tools/srcp_build_scheme_db.py), then restore again. If the\n"
+        "-- rebuild doesn't raise it to that, update that checkout first (git pull).\n"
     )
     out.write(f"CREATE TEMP TABLE srcp_schema_check (v INTEGER CHECK (v >= {version}));\n")
     out.write("INSERT INTO srcp_schema_check SELECT user_version FROM pragma_user_version;\n")

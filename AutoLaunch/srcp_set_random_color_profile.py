@@ -9,7 +9,7 @@ Colors the build found hard to see get its adjustments applied (config fix_color
 that off). Records every launch and when it ended, and snapshots the DB once a day (checked every 15
 minutes while it runs).
 "Save/update this profile" (right-click) or the save_profile() key binding stars the
-current look; "Remove from favorites" (right-click; hidden on non-favorites only where
+current look; "Remove profile from favorites" (right-click; hidden on non-favorites only where
 iTerm2 supports API protocol 1.23+) un-stars it; "Change to another profile" (right-click)
 re-rolls the session's look; "Never show this profile" (right-click) hides the preset and
 re-rolls (Scripts > srcp_never_show.py undoes it). Every favorite is also an
@@ -22,53 +22,63 @@ import asyncio
 import calendar
 import contextlib
 import fcntl
-import glob
-import hashlib
 import json
 import os
 import plistlib
 import random
 import sqlite3
-import struct
-import subprocess
 import sys
 import threading
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Coroutine
 from pathlib import Path
-from typing import IO, Any, TypeVar
+from typing import IO, Any, NamedTuple, TypeVar
 
 import iterm2
+from iterm2 import api_pb2
 from iterm2.capabilities import supports_context_menu_submenus_and_visibility
 
-VERSION = "0.9.1"  # bump on every change, so the Console shows which code is running
-DATA_DIR = os.path.expanduser("~/.local/share/iterm2-color-schemes")
-DB_PATH = os.path.join(DATA_DIR, "schemes.db")
+# What this script shares with the build and the other tools; setup.sh installs them in the
+# Scripts folder's .tools/, next to AutoLaunch/ (a checkout that is the Scripts folder has them).
+TOOLS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".tools")
+sys.path.insert(0, TOOLS)
+try:
+    import srcp_db_backup
+    import srcp_iterm_prefs
+    from srcp_schema import (
+        COMPONENTS,
+        DATA_DIR,
+        DB_PATH,
+        FIX_ON_SQL,
+        FONT_DIRS,
+        SEED_CONFIG,
+        SEED_FONTS,
+        UNHIDE,
+        colors_hash,
+    )
+except ImportError as e:
+    print(
+        f"[error] missing {TOOLS}/srcp_schema.py, srcp_db_backup.py or srcp_iterm_prefs.py "
+        f"({e}); run ./setup.sh again",
+        flush=True,
+    )
+    sys.exit(1)
+
+VERSION = "0.10.0"  # bump on every change, so the Console shows which code is running
 LOCK_PATH = os.path.join(DATA_DIR, ".lock")
-BACKUP_KEEP = 14
-BACKUP_EVERY_S = 24 * 3600
 # How often the running script checks whether a snapshot is due. asyncio's clock stops while
 # the Mac sleeps, so check often (it's a few file stats) to keep it close to daily.
 SNAPSHOT_CHECK_S = 15 * 60
 DEFAULT_SIZE = 13
+# The numeric settings pick() reads, with the build's seed values when config lacks one.
 DEFAULT_CONFIG = {
-    "favorite_share": 0.5,
-    "favorite_target": 10,
-    "recent_window": 20,
-    "colorful_weight": 3,
+    k: float(SEED_CONFIG[k])
+    for k in ("favorite_share", "favorite_target", "recent_window", "colorful_weight")
 }
 # Font for characters the main font lacks, e.g. Powerlevel10k prompt icons; config overrides.
-DEFAULT_NONASCII_FONT = "MesloLGSNFM-Regular"
-# Its file, and where fonts live: as SEED_FONTS and FONT_DIRS in .tools/srcp_build_scheme_db.py
-# (setup.sh installs this script without .tools/, so they're copied; a test keeps them equal).
-NONASCII_FONT_FILES = ["MesloLGSNerdFontMono-Regular.ttf"]
-FONT_DIRS = [
-    "~/Library/Fonts",
-    "/Library/Fonts",
-    "/System/Library/Fonts",
-    "/System/Library/Fonts/Supplemental",
-]
+DEFAULT_NONASCII_FONT = SEED_CONFIG["nonascii_font"]
+NONASCII_FONT_FILES = SEED_FONTS[DEFAULT_NONASCII_FONT]
 MENU_ID = "com.rmarable.set-random-color-profile.save"
 REMOVE_MENU_ID = "com.rmarable.set-random-color-profile.remove"
 CHANGE_MENU_ID = "com.rmarable.set-random-color-profile.change"
@@ -82,28 +92,9 @@ GUID_NAMESPACE = uuid.UUID("468579c8-bf93-425d-9e25-ff5f7ddebd11")  # fixed: GUI
 STAR_BUTTONS = [f"{n} {'★' * n}" for n in range(1, 6)]  # "3 ★★★"
 REMOVE, NEVER, CANCEL = "Remove favorite", "Never show", "Cancel"
 PRESET_ERRORS = (iterm2.GetPresetException, iterm2.ListPresetsException)
-# Copies of .tools/srcp_build_scheme_db.py constants (this script is installed without
-# .tools/; a test keeps them equal). FIX_ON_SQL: whether color adjustments are on (config
-# fix_colors, anything but '0' / '0.0'); HASH_KEYS and COMPONENTS: what color_hash covers.
-FIX_ON_SQL = (
-    "(COALESCE(trim((SELECT value FROM config WHERE key = 'fix_colors')), '1') NOT IN ('0', '0.0'))"
-)
-HASH_KEYS = [*(f"Ansi {i} Color" for i in range(16)), "Foreground Color", "Background Color"]
-COMPONENTS = ("Red Component", "Green Component", "Blue Component")
-# Undo Never show: same string as UNHIDE in .tools/srcp_favorites.py (kept equal by a test).
-# A mode override survives. A preset that fails the gate is forced in (include 1), since it
-# was wanted, unless it's a byte-identical twin or adjustments are on (it's picked anyway, and
-# turning them off then puts things back as they were).
-UNHIDE = (
-    "UPDATE overrides SET include = CASE WHEN "  # noqa: S608  (constants only)
-    "(SELECT passes_gate FROM schemes WHERE name = :name) = 0 AND "
-    "(SELECT duplicate_of FROM schemes WHERE name = :name) IS NULL AND NOT "
-    + FIX_ON_SQL
-    + " THEN 1 END WHERE name = :name AND include = 0"
-)
 
 T = TypeVar("T")
-Pick = tuple[str, str | None, str, int | None]  # preset, font, source, stars
+Pick = tuple[str, str | None, str, int | None]  # preset, font (saved favorite's), source, stars
 
 _warned: set[str] = set()
 
@@ -122,16 +113,24 @@ def now() -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
 
 
-def acquire_lock() -> IO[str] | None:
-    """Hold an exclusive lock for the life of the process, so restarts can't stack copies."""
+async def acquire_lock(wait_s: float = 5.0, every_s: float = 0.25) -> IO[str] | None:
+    """Hold an exclusive lock for the life of the process, so restarts can't stack copies.
+
+    Waits up to wait_s for it: a restart from the Scripts menu can start this copy while the
+    old one is still exiting. Sessions opened meanwhile are colored by startup().
+    """
     os.makedirs(DATA_DIR, exist_ok=True)
     f = open(LOCK_PATH, "w")  # noqa: SIM115 - held open until the process exits
-    try:
-        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        f.close()
-        return None
-    return f
+    deadline = time.monotonic() + wait_s
+    while True:
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return f
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                f.close()
+                return None
+            await asyncio.sleep(every_s)
 
 
 class Store:
@@ -142,6 +141,19 @@ class Store:
         self.db: sqlite3.Connection | None = None
         self.inode: int | None = None
         self.lock = threading.Lock()
+        self._sync_lock: asyncio.Lock | None = None
+        self._sync_loop: asyncio.AbstractEventLoop | None = None
+
+    @property
+    def sync_lock(self) -> asyncio.Lock:
+        """Favorite profile syncs, one at a time: each reads the DB, then writes the file.
+
+        Made in the running loop (one per loop: an asyncio.Lock can't move between them).
+        """
+        loop = asyncio.get_running_loop()
+        if self._sync_lock is None or self._sync_loop is not loop:
+            self._sync_lock, self._sync_loop = asyncio.Lock(), loop
+        return self._sync_lock
 
     def _connect(self) -> sqlite3.Connection | None:
         try:
@@ -171,8 +183,17 @@ class Store:
         return self.db
 
     def _rollback(self) -> None:
-        if self.db is not None and self.db.in_transaction:
+        """Undo an open transaction. If even that fails (the file vanished, say), drop the
+        connection so the next call reconnects, and keep the error that got us here."""
+        if self.db is None or not self.db.in_transaction:
+            return
+        try:
             self.db.execute("ROLLBACK")
+        except sqlite3.Error as e:
+            log("warn", f"DB rollback failed ({e}); reconnecting on the next call")
+            with contextlib.suppress(sqlite3.Error):
+                self.db.close()
+            self.db = None
 
     async def call(self, fn: Callable[..., T], *args: Any) -> T | None:
         """Run fn(db, *args) in a worker thread; None if there's no DB or it failed."""
@@ -270,28 +291,35 @@ def look_fixes(db: sqlite3.Connection, preset: str) -> tuple[str | None, str | N
     return (row[0], row[1]) if row else (None, None)
 
 
-def pick_look(
-    db: sqlite3.Connection, mode: str, exclude: set[str]
-) -> tuple[Pick, str | None, str | None] | tuple[()]:
-    """pick(), plus the chosen preset's adjustments, in one Store.call."""
+class Look(NamedTuple):
+    """Everything color_session needs from the DB for one session, from one Store.call."""
+
+    preset: str
+    font: str | None  # the favorite's font, else a random enabled one; None if there's none
+    source: str  # 'favorite' or 'discovery'
+    stars: int | None
+    fixes_json: str | None
+    built_hash: str | None
+    nonascii: str | None  # the icon font to set, if any
+    is_favorite: bool  # this (preset, font) is a favorite
+
+
+def pick_look(db: sqlite3.Connection, mode: str, exclude: set[str]) -> Look | tuple[()]:
+    """pick(), plus its font, adjustments and icon font; () if nothing fits."""
     choice = pick(db, mode, exclude)
     if not choice:
         return ()
-    return (choice, *look_fixes(db, choice[0]))
-
-
-def float32(v: float) -> float:
-    """As in the build: iTerm2's API sends colors as 32-bit floats, prefs hold 64-bit ones."""
-    return struct.unpack("f", struct.pack("f", v))[0]
-
-
-def colors_hash(colors: dict[str, tuple[float, float, float]]) -> str | None:
-    """The build's color_hash, from {key: (r, g, b)} with components 0-1."""
-    try:
-        parts = [",".join(f"{float32(v):.4f}" for v in colors[k]) for k in HASH_KEYS]
-    except KeyError:
-        return None
-    return hashlib.sha1("|".join(parts).encode(), usedforsecurity=False).hexdigest()
+    preset, font, source, stars = choice
+    font = font or random_font(db)
+    return Look(
+        preset,
+        font,
+        source,
+        stars,
+        *look_fixes(db, preset),
+        nonascii_font(db),
+        bool(font) and is_favorite(db, preset, font),
+    )
 
 
 def usable_fixes(
@@ -334,27 +362,21 @@ def adjust_preset(
     return len(fixes)
 
 
-_profile_adjusted: dict[str, int] = {}  # preset -> colors adjusted in its favorite profiles
-
-
 def adjust_colors(
     name: str, colors: dict[str, Any], fixes_json: str | None, built_hash: str | None
-) -> dict[str, Any]:
-    """A copy of a prefs preset dict with the adjustments (color space and alpha kept).
-
-    Notes how many were applied, so a session opened from the profile reports what it shows.
-    """
+) -> tuple[dict[str, Any], int]:
+    """(a copy of a prefs preset dict with the adjustments, how many): color space and alpha
+    kept. The count is noted, so a session opened from the profile reports what it shows."""
     live = {
         k: tuple(float(v[c]) for c in COMPONENTS)
         for k, v in colors.items()
         if isinstance(v, dict) and all(c in v for c in COMPONENTS)
     }
     fixes = usable_fixes(name, fixes_json, built_hash, live)  # pyright: ignore[reportArgumentType]  # 3-tuples by construction
-    _profile_adjusted[name] = len(fixes)
     adjusted = {
         k: {**colors[k], **dict(zip(COMPONENTS, rgb, strict=True))} for k, rgb in fixes.items()
     }
-    return {**colors, **adjusted}
+    return {**colors, **adjusted}, len(fixes)
 
 
 def nonascii_font(db: sqlite3.Connection) -> str | None:
@@ -384,13 +406,33 @@ def random_font(db: sqlite3.Connection) -> str | None:
     return row[0] if row else None
 
 
-def record_launch(db: sqlite3.Connection, *values: Any) -> None:
-    """values: preset, font, size, mode, source, stars, iterm_profile, session_id."""
+class Launch(NamedTuple):
+    """A launches row, as the script writes it (launched_at is added)."""
+
+    preset: str
+    font: str | None
+    size: float
+    mode: str | None
+    source: str  # 'favorite' or 'discovery'
+    stars: int | None
+    iterm_profile: str | None
+    session_id: str
+
+
+def record_launch(db: sqlite3.Connection, launch: Launch) -> None:
     db.execute(
         "INSERT INTO launches (launched_at, preset, font, size, mode, source, stars, "
         "iterm_profile, session_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (now(), *values),
+        (now(), *launch),
     )
+
+
+def record_change(db: sqlite3.Connection, launch: Launch) -> None:
+    """End the session's open launch as 'changed' and add its new one, both or neither."""
+    db.execute("BEGIN IMMEDIATE")  # Store.call rolls back if anything below fails
+    record_end(db, launch.session_id, "changed")
+    record_launch(db, launch)
+    db.execute("COMMIT")
 
 
 def record_end(db: sqlite3.Connection, session_id: str, reason: str = "closed") -> None:
@@ -427,7 +469,8 @@ def preset_info(
     db: sqlite3.Connection, preset: str, font: str
 ) -> tuple[tuple[int, str, int] | None, int | None]:
     """((launches, last launched, changed away from) or None, stars or None)."""
-    # From launches, not the launch_stats view, so a DB not rebuilt since 0.7.1 still works.
+    # From launches directly (the same counts as the launch_stats view, which is kept for
+    # users' own queries): one query on the launches_preset index, not a whole-table GROUP BY.
     stats = db.execute(
         "SELECT count(*), max(launched_at), sum(end_reason = 'changed') FROM launches "
         "WHERE preset = ? GROUP BY preset",
@@ -515,10 +558,12 @@ def favorite_guid(preset: str, font: str) -> str:
     return str(uuid.uuid5(GUID_NAMESPACE, f"{preset}\0{font}")).upper()
 
 
-def favorite_by_guid(db: sqlite3.Connection, guid: str) -> tuple[str, str, int, str, int] | None:
-    """(preset, font, stars, mode, colors adjusted) of the favorite whose profile has this GUID."""
+def favorite_by_guid(
+    db: sqlite3.Connection, guid: str
+) -> tuple[str, str, int, str | None, int] | None:
+    """(preset, font, stars, mode or None, colors adjusted) of the favorite with this GUID."""
     query = (
-        "SELECT f.preset, f.font, f.stars, COALESCE(e.mode, '?'), {adjusted} "
+        "SELECT f.preset, f.font, f.stars, e.mode, {adjusted} "
         "FROM favorites f LEFT JOIN effective e ON e.name = f.preset"
     )
     try:
@@ -541,25 +586,71 @@ def font_label(db: sqlite3.Connection, font: str) -> str:
     return row[0] if row and row[0] else font.removesuffix("-Regular")
 
 
-def sync_profiles(db: sqlite3.Connection) -> int | None:
-    """Write one iTerm2 profile per favorite; return the count, or None if unchanged."""
-    prefs = plistlib.loads(
-        subprocess.run(
-            ["defaults", "export", "com.googlecode.iterm2", "-"],
-            capture_output=True,
-            check=True,
-            timeout=30,
-        ).stdout
+# Favorites' iTerm2 profiles (Profiles > Favorites). sync_and_log reads what they're made of
+# under Store.lock (read_favorites), then reads iTerm2's prefs and writes the file outside it
+# (write_favorite_profiles), so a slow `defaults export` never holds up other DB calls.
+
+
+class FavoriteRow(NamedTuple):
+    preset: str
+    font: str
+    size: float | None
+    fixes_json: str | None
+    built_hash: str | None
+    label: str
+
+
+class FavoritesSnapshot(NamedTuple):
+    state: str  # changes whenever the profiles would
+    rows: list[FavoriteRow]
+    fallback: str | None  # the icon font, as applied
+
+
+_profiles_state: list[str | None] = [None]  # the FavoritesSnapshot.state last written from
+_profile_adjusted: dict[str, int] = {}  # preset -> colors adjusted in its favorite profiles
+
+
+def favorites_state(db: sqlite3.Connection, fallback: str | None) -> str:
+    """A fingerprint of what the profiles are made of: favorites, Never show, fonts, and the
+    favorites' adjustments and color hashes (a rebuild that changes either rewrites them).
+
+    Cheap, so edits made in sqlite3 or by restoring an export show up without a restart.
+    """
+    fonts = "name || ':' || enabled || ':' || ifnull(label, '')"
+    query = (
+        "SELECT (SELECT group_concat(preset || ':' || font || ':' || stars || ':' || "
+        "ifnull(size, ''), ';') FROM (SELECT * FROM favorites ORDER BY preset, font)), "
+        "(SELECT group_concat(name, ';') FROM "
+        "(SELECT name FROM overrides WHERE include = 0 ORDER BY name)), "
+        "(SELECT group_concat({}, ';') FROM (SELECT * FROM fonts ORDER BY name))"
     )
-    presets = prefs.get("Custom Color Presets", {})
-    default_guid = prefs.get("Default Bookmark Guid")
-    parent = next(
-        (b.get("Name") for b in prefs.get("New Bookmarks", []) if b.get("Guid") == default_guid),
-        "Default",
-    )
+    try:
+        row = db.execute(query.format(fonts)).fetchone()
+    except sqlite3.OperationalError:  # DB built before fonts.label existed
+        row = db.execute(query.format("name || ':' || enabled")).fetchone()
+    try:
+        fixes = db.execute(
+            "SELECT " + FIX_ON_SQL + ", (SELECT group_concat(n || ':' || ifnull(fx, '') || ':' "  # noqa: S608  (constants only)
+            "|| ifnull(h, ''), ';') FROM (SELECT DISTINCT f.preset AS n, s.fixes AS fx, "
+            "s.color_hash AS h FROM favorites f LEFT JOIN schemes s ON s.name = f.preset "
+            "ORDER BY f.preset))"
+        ).fetchone()
+    except sqlite3.OperationalError:  # DB built before 0.9.0
+        fixes = ()
+    return "|".join(str(v) for v in (*row, *fixes, fallback))
+
+
+def read_favorites(db: sqlite3.Connection) -> FavoritesSnapshot:
+    """What the favorites' profiles are made of, from the DB (Never show ones left out).
+
+    One read transaction, so the fingerprint and the rows agree even if another tool (an
+    export restore, srcp_never_show.py) commits meanwhile.
+    """
+    db.execute("BEGIN")  # Store.call rolls back if anything below fails
     fallback = nonascii_font(db)
-    profiles = []
+    state = favorites_state(db, fallback)
     where = "WHERE f.preset NOT IN (SELECT name FROM overrides WHERE include = 0) "
+    rows: list[tuple[Any, ...]]
     try:
         rows = db.execute(
             "SELECT f.preset, f.font, f.size, CASE WHEN " + FIX_ON_SQL + " THEN s.fixes END, "  # noqa: S608  (constants only)
@@ -574,19 +665,38 @@ def sync_profiles(db: sqlite3.Connection) -> int | None:
                 "SELECT f.preset, f.font, f.size FROM favorites f " + where + "ORDER BY 1, 2"  # noqa: S608  (constants only)
             )
         ]
-    for preset, font, size, fixes_json, built_hash in rows:
-        if preset not in presets:
-            warn_once(f"profile-{preset}", f"favorite {preset!r} isn't an installed preset")
+    favorites = [
+        FavoriteRow(preset, font, size, fixes_json, built_hash, font_label(db, font))
+        for preset, font, size, fixes_json, built_hash in rows
+    ]
+    db.execute("COMMIT")
+    return FavoritesSnapshot(state, favorites, fallback)
+
+
+def favorite_profiles(
+    rows: list[FavoriteRow],
+    presets: dict[str, Any],
+    parent: str,
+    fallback: str | None,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """(one profile dict per favorite whose preset is installed, colors adjusted by preset)."""
+    profiles, adjusted = [], {}
+    for row in rows:
+        if row.preset not in presets:
+            warn_once(f"profile-{row.preset}", f"favorite {row.preset!r} isn't an installed preset")
             continue
-        pt = float(size or DEFAULT_SIZE)
+        colors, adjusted[row.preset] = adjust_colors(
+            row.preset, presets[row.preset], row.fixes_json, row.built_hash
+        )
+        pt = float(row.size or DEFAULT_SIZE)
         size_text = str(int(pt)) if pt.is_integer() else str(pt)
         profiles.append(
             {
-                **adjust_colors(preset, presets[preset], fixes_json, built_hash),
-                "Name": f"{preset} - {font_label(db, font)}",
-                "Guid": favorite_guid(preset, font),
+                **colors,
+                "Name": f"{row.preset} - {row.label}",
+                "Guid": favorite_guid(row.preset, row.font),
                 "Dynamic Profile Parent Name": parent,
-                "Normal Font": f"{font} {size_text}",
+                "Normal Font": f"{row.font} {size_text}",
                 **(
                     {"Use Non-ASCII Font": True, "Non Ascii Font": f"{fallback} {size_text}"}
                     if fallback
@@ -595,10 +705,29 @@ def sync_profiles(db: sqlite3.Connection) -> int | None:
                 "Tags": [PROFILE_TAG],  # each tag is a Profiles submenu: one, so listed once
             }
         )
+    return profiles, adjusted
+
+
+def write_favorite_profiles(snap: FavoritesSnapshot) -> int | None:
+    """Write one iTerm2 profile per favorite; return the count, or None if the file is current.
+
+    Reads iTerm2's prefs (the presets, and the default profile as the parent), so it runs
+    outside Store.lock.
+    """
+    prefs = srcp_iterm_prefs.load_prefs(timeout=30)
+    default_guid = prefs.get("Default Bookmark Guid")
+    parent = next(
+        (b.get("Name") for b in prefs.get("New Bookmarks", []) if b.get("Guid") == default_guid),
+        "Default",
+    )
+    profiles, adjusted = favorite_profiles(
+        snap.rows, prefs.get("Custom Color Presets", {}), parent, snap.fallback
+    )
     data = plistlib.dumps({"Profiles": profiles})
     try:
         with open(DYNAMIC_PATH, "rb") as f:
             if f.read() == data:
+                _profile_adjusted.update(adjusted)
                 return None
     except FileNotFoundError:
         pass
@@ -611,46 +740,8 @@ def sync_profiles(db: sqlite3.Connection) -> int | None:
     with open(partial, "wb") as f:
         f.write(data)
     os.replace(partial, DYNAMIC_PATH)
+    _profile_adjusted.update(adjusted)  # only what the file now holds
     return len(profiles)
-
-
-_profiles_state: list[str | None] = [None]  # what sync_profiles last wrote from
-
-
-def sync_if_changed(db: sqlite3.Connection) -> int | None:
-    """sync_profiles, but only when favorites, Never show, the icon font, fonts or the
-    favorites' color adjustments changed.
-
-    Cheap enough to call for every new session, so restoring an export or editing
-    favorites in sqlite3 shows up in the Profiles menu without a restart.
-    """
-    fonts = "name || ':' || enabled || ':' || ifnull(label, '')"
-    query = (
-        "SELECT (SELECT group_concat(preset || ':' || font || ':' || stars || ':' || "
-        "ifnull(size, ''), ';') FROM (SELECT * FROM favorites ORDER BY preset, font)), "
-        "(SELECT group_concat(name, ';') FROM "
-        "(SELECT name FROM overrides WHERE include = 0 ORDER BY name)), "
-        "(SELECT group_concat({}, ';') FROM (SELECT * FROM fonts ORDER BY name))"
-    )
-    try:
-        row = db.execute(query.format(fonts)).fetchone()
-    except sqlite3.OperationalError:  # DB built before fonts.label existed
-        row = db.execute(query.format("name || ':' || enabled")).fetchone()
-    try:  # the favorites' adjustments, so a rebuild that changes them rewrites the profiles
-        fixes = db.execute(
-            "SELECT " + FIX_ON_SQL + ", (SELECT group_concat(n || ':' || ifnull(fx, ''), ';') "  # noqa: S608  (constants only)
-            "FROM (SELECT DISTINCT f.preset AS n, s.fixes AS fx FROM favorites f "
-            "LEFT JOIN schemes s ON s.name = f.preset ORDER BY f.preset))"
-        ).fetchone()
-    except sqlite3.OperationalError:  # DB built before 0.9.0
-        fixes = ()
-    # The icon font as applied (it depends on the font file being installed, too).
-    state = "|".join(str(v) for v in (*row, *fixes, nonascii_font(db)))
-    if state == _profiles_state[0]:
-        return None
-    count = sync_profiles(db)
-    _profiles_state[0] = state
-    return count
 
 
 def never_show(db: sqlite3.Connection, preset: str) -> bool:
@@ -677,42 +768,16 @@ def never_show(db: sqlite3.Connection, preset: str) -> bool:
     return True
 
 
-def remove_stale_partials(folder: str, older_than_s: float = 3600) -> None:
-    """Same as .tools/srcp_db_backup.remove_stale_partials(): delete copies a killed run left.
-    Only old ones: the build may be writing its own snapshot right now."""
-    for path in glob.glob(os.path.join(folder, "schemes-*.db.partial")):
-        with contextlib.suppress(FileNotFoundError):
-            if time.time() - os.path.getmtime(path) > older_than_s:
-                os.remove(path)
-
-
 def daily_snapshot(db: sqlite3.Connection) -> str | None:
-    """Same as .tools/srcp_db_backup.snapshot(), when the newest snapshot is a day old."""
-    folder = os.path.join(DATA_DIR, "backups")
-    existing = [os.path.getmtime(p) for p in glob.glob(os.path.join(folder, "schemes-*.db"))]
-    if existing and time.time() - max(existing) < BACKUP_EVERY_S:
-        return None
-    os.makedirs(folder, exist_ok=True)
-    remove_stale_partials(folder)
-    stem = os.path.join(folder, "schemes-" + time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()))
-    dest, n = stem + ".db", 1
-    while os.path.exists(dest):
-        dest, n = f"{stem}-{n}.db", n + 1
-    out = sqlite3.connect(dest + ".partial")
-    try:
-        db.backup(out)
-    except BaseException:
-        out.close()
-        os.remove(dest + ".partial")
-        raise
-    finally:
-        out.close()
-    os.replace(dest + ".partial", dest)
-    # By mtime: a same-second "-1" suffix sorts before the plain name.
-    snapshots = sorted(glob.glob(os.path.join(folder, "schemes-*.db")), key=os.path.getmtime)
-    for old in snapshots[:-BACKUP_KEEP]:
-        os.remove(old)
-    return dest
+    """Snapshot the DB through this connection if the newest snapshot is a day old."""
+    folder = os.path.join(os.path.dirname(DB_PATH), "backups")
+    if srcp_db_backup.future_snapshots(folder):
+        warn_once(
+            "snapshot-future",
+            f"snapshots in {folder} are named with a time in the future (a wrong clock, or "
+            "copied from another Mac); they're kept but don't count as the newest",
+        )
+    return srcp_db_backup.snapshot_if_due(DB_PATH, src=db)
 
 
 async def snapshot_periodically(
@@ -763,12 +828,17 @@ async def get_preset(connection: iterm2.Connection, name: str) -> iterm2.ColorPr
 
 
 async def set_variables(session: iterm2.Session, **values: Any) -> None:
-    for name, value in values.items():
-        await session.async_set_variable(f"user.{name}", value)
+    """Set user.<name> for each value in one round trip (session.async_set_variable takes
+    one per variable; this is the call it makes, with all of them)."""
+    sets = [(f"user.{name}", json.dumps(value)) for name, value in values.items()]
+    result = await iterm2.rpc.async_variable(session.connection, session.session_id, sets, [])
+    status = result.variable_response.status
+    if status != api_pb2.VariableResponse.Status.Value("OK"):
+        raise iterm2.RPCException(api_pb2.VariableResponse.Status.Name(status))
 
 
 async def keep_favorite_profile(
-    store: Store, session: iterm2.Session, profile: iterm2.Profile
+    store: Store, session: iterm2.Session, profile: iterm2.Profile, theme_mode: str
 ) -> bool:
     """A session opened from a favorite's profile keeps its look; True if this is one."""
     guid = profile.original_guid or profile.guid
@@ -776,33 +846,26 @@ async def keep_favorite_profile(
     if not fav:
         return False
     preset, font, stars, preset_mode, adjusted = fav
+    # The preset's own mode, not the current theme: a dark favorite can be opened in light
+    # mode. The theme's only if the preset is gone from the DB (not rebuilt since).
+    mode = preset_mode or theme_mode
     # What its profile file got (none if the preset changed since the build), when known.
     adjusted = _profile_adjusted.get(preset, adjusted)
     _, size = split_font(profile.normal_font)
-    # The preset's own mode, not the current theme: a dark favorite can be opened in light mode.
-    # Its profile file already holds the adjusted colors (sync_profiles).
+    # Its profile file already holds the adjusted colors (write_favorite_profiles).
     note = f", {colors_adjusted(adjusted)}" if adjusted else ""
-    log("info", f"{preset_mode} favorite profile {stars} ★: {preset} | {font} {size}{note}")
+    log("info", f"{mode} favorite profile {stars} ★: {preset} | {font} {size}{note}")
     await set_variables(
         session,
         color_preset=preset,
         font=font,
         font_size=size,
-        mode=preset_mode,
+        mode=mode,
         is_favorite=1,  # 1/0, not True/False: the menu's visible_when compares with 1
         adjusted=adjusted,
     )
-    await store.call(
-        record_launch,
-        preset,
-        font,
-        size,
-        preset_mode,
-        "favorite",
-        stars,
-        profile.name,
-        session.session_id,
-    )
+    launch = Launch(preset, font, size, mode, "favorite", stars, profile.name, session.session_id)
+    await store.call(record_launch, launch)
     return True
 
 
@@ -819,11 +882,12 @@ async def color_session(
     # queued as new. Coloring again would change it and log a second launch.
     if current and not reroll:
         return
-    theme = await app.async_get_theme()
+    # Picks up favorites changed outside the dialog, without holding up this tab: rewriting
+    # the profiles reads all of iTerm2's settings (about 0.3 s, or up to 30 s if stuck).
+    in_background(sync_and_log(store), "favorite profiles")
+    theme, profile = await asyncio.gather(app.async_get_theme(), session.async_get_profile())
     mode = "dark" if "dark" in theme else "light"
-    await sync_and_log(store)  # picks up favorites changed outside the dialog
-    profile = await session.async_get_profile()
-    if not reroll and await keep_favorite_profile(store, session, profile):
+    if not reroll and await keep_favorite_profile(store, session, profile, mode):
         return
     exclude: set[str] = {current} if current else set()  # a re-roll never gives the same back
     for _ in range(3):
@@ -834,81 +898,113 @@ async def color_session(
         if not look:
             warn_once(f"empty-{mode}", f"no {mode} presets to pick from; sessions left as is")
             return
-        (preset_name, font, source, stars), fixes_json, built_hash = look
-        preset = await get_preset(connection, preset_name)
+        preset = await get_preset(connection, look.preset)
         if preset:
             break
-        log("warn", f"preset not found: {preset_name} (removed from iTerm2? rebuild the DB)")
-        exclude.add(preset_name)
+        log("warn", f"preset not found: {look.preset} (removed from iTerm2? rebuild the DB)")
+        exclude.add(look.preset)
     else:
+        warn_once(
+            "presets-missing",
+            "3 picks in a row weren't installed presets, so this session was left as is; "
+            "rebuild the DB (.tools/srcp_build_scheme_db.py) after adding or removing presets",
+        )
         return
 
-    adjusted = adjust_preset(preset_name, preset, fixes_json, built_hash)
-    await profile.async_set_color_preset(preset)
+    adjusted = adjust_preset(look.preset, preset, look.fixes_json, look.built_hash)
     _, size = split_font(profile.normal_font)
-    font = font or await store.call(random_font)
-    if font:
-        await profile.async_set_normal_font(f"{font} {size}")
-    fallback = await store.call(nonascii_font)
-    if fallback:  # set the font before switching it on, so the old one never shows
-        await profile.async_set_non_ascii_font(f"{fallback} {size}")
+
+    async def icon_font(name: str) -> None:  # set the font before switching it on
+        await profile.async_set_non_ascii_font(f"{name} {size}")
         await profile.async_set_use_non_ascii_font(True)
 
-    label = f"favorite {stars} ★" if source == "favorite" else "discovery"
+    await asyncio.gather(
+        profile.async_set_color_preset(preset),
+        *([profile.async_set_normal_font(f"{look.font} {size}")] if look.font else []),
+        *([icon_font(look.nonascii)] if look.nonascii else []),
+    )
+
+    label = f"favorite {look.stars} ★" if look.source == "favorite" else "discovery"
     note = f", {colors_adjusted(adjusted)}" if adjusted else ""
-    log("info", f"{mode} {label}: {preset_name} | {font or '(profile font)'} {size}{note}")
-    variables: dict[str, Any] = {
-        "color_preset": preset_name,
-        "font_size": size,
-        "mode": mode,
-        "adjusted": adjusted,  # for the rating dialog
-    }
-    if font:
-        variables["font"] = font
-        variables["is_favorite"] = int(bool(await store.call(is_favorite, preset_name, font)))
-    await set_variables(session, **variables)
-    if reroll:
-        await store.call(record_end, session.session_id, "changed")
-    await store.call(
-        record_launch,
-        preset_name,
-        font,
+    font_text = look.font or "(profile font)"
+    log("info", f"{mode} {label}: {look.preset} | {font_text} {size}{note}")
+    # After the profile writes, so a tab that closed meanwhile never names a look it didn't
+    # get. font "" on a tab with no font of ours, so a re-roll doesn't keep the old one's.
+    await set_variables(
+        session,
+        color_preset=look.preset,
+        font=look.font or "",
+        font_size=size,
+        mode=mode,
+        is_favorite=int(look.is_favorite),  # 1/0: the menu's visible_when compares with 1
+        adjusted=adjusted,  # for the rating dialog
+    )
+    launch = Launch(
+        look.preset,
+        look.font,
         size,
         mode,
-        source,
-        stars,
+        look.source,
+        look.stars,
         profile.name,
         session.session_id,
     )
+    await store.call(record_change if reroll else record_launch, launch)
 
 
 def colors_adjusted(n: int) -> str:
     return "1 color adjusted" if n == 1 else f"{n} colors adjusted"
 
 
-async def sync_and_log(store: Store) -> None:
-    try:
-        count = await store.call(sync_if_changed)
-    except Exception as e:  # e.g. defaults export failed: profiles are optional, coloring isn't
-        log("warn", f"favorite profiles not updated: {e!r}")
-        return
+_background: set[asyncio.Task[Any]] = set()  # kept so they aren't collected mid-run
+
+
+def in_background(coro: Coroutine[Any, Any, Any], what: str) -> None:
+    """Run coro without waiting for it; log if it fails."""
+    task = asyncio.create_task(coro)
+    _background.add(task)
+
+    def done(t: asyncio.Task[Any]) -> None:
+        _background.discard(t)
+        if not t.cancelled() and t.exception():
+            log("warn", f"{what} failed: {t.exception()!r}")
+
+    task.add_done_callback(done)
+
+
+async def sync_and_log(store: Store) -> int | None:
+    """Rewrite the favorites' profiles if what they're made of changed; the count, or None."""
+    async with store.sync_lock:  # the read and the write, so two syncs can't interleave
+        snap = await store.call(read_favorites)
+        if snap is None or snap.state == _profiles_state[0]:
+            return None
+        try:
+            count = await asyncio.to_thread(write_favorite_profiles, snap)
+        except Exception as e:  # e.g. defaults export failed: profiles are optional, coloring isn't
+            log("warn", f"favorite profiles not updated: {e!r}")
+            return None
+        _profiles_state[0] = snap.state  # only once written, so a failed write is retried
     if count is not None:
         log("info", f"favorite profiles: {count} in {DYNAMIC_PATH}")
+    return count
 
 
 async def favorites_changed(app: iterm2.App, store: Store, preset: str) -> None:
     """Update user.is_favorite on open sessions showing preset, and the profiles file."""
+
+    async def update(session: iterm2.Session) -> None:
+        try:
+            if await session.async_get_variable("user.color_preset") != preset:
+                return
+            font = await session.async_get_variable("user.font")
+            fav = bool(font) and bool(await store.call(is_favorite, preset, font))
+            await session.async_set_variable("user.is_favorite", int(fav))
+        except iterm2.RPCException:
+            pass  # closed while we were looking
+
     try:
         sessions = [s for w in app.windows for t in w.tabs for s in t.all_sessions]
-        for session in sessions:
-            try:
-                if await session.async_get_variable("user.color_preset") != preset:
-                    continue
-                font = await session.async_get_variable("user.font")
-                fav = bool(font) and bool(await store.call(is_favorite, preset, font))
-                await session.async_set_variable("user.is_favorite", int(fav))
-            except iterm2.RPCException:
-                continue  # closed while we were looking
+        await asyncio.gather(*(update(s) for s in sessions))
     finally:
         await sync_and_log(store)
 
@@ -939,36 +1035,19 @@ async def apply_choice(
     return result is not None
 
 
-async def save_dialog(
-    connection: iterm2.Connection, app: iterm2.App, store: Store, session_id: str
-) -> None:
-    session = app.get_session_by_id(session_id)
-    if not session:
-        log("warn", f"save: session {session_id} not found")
-        return
-    window, _ = app.get_window_and_tab_for_session(session)
-    window_id = window.window_id if window else None
-    preset = await session.async_get_variable("user.color_preset")
-    if not preset:
-        await iterm2.Alert(
-            "Save/update this profile", not_colored("there's nothing to save"), window_id
-        ).async_run(connection)
-        return
-    # The font the script applied. Reading it back from the session gave the wrong face
-    # once (Monaco launched, Menlo-Regular read back; 2026-10-17), so that's the fallback.
-    profile = await session.async_get_profile()
-    live_font, size = split_font(profile.normal_font)
-    font = await session.async_get_variable("user.font") or live_font
-    if not font:
-        log("warn", f"save: no font known for {preset}")
-        return
-    mode = await session.async_get_variable("user.mode")
+SAVE_TITLE = "Save/update this profile"
 
-    info = await store.call(preset_info, preset, font)
-    if info is None:
-        await db_failed_alert(connection, "Save/update this profile", window_id)
-        return
+
+async def save_dialog_text(
+    store: Store,
+    session: iterm2.Session,
+    look: tuple[str, str, float],
+    info: tuple[tuple[int, str, int] | None, int | None],
+) -> tuple[str, int | None]:
+    """(the rating dialog's text, current stars) for look = (preset, font, size)."""
+    preset, font, size = look
     stats, stars = info
+    mode = await session.async_get_variable("user.mode")
     lines = [f"{preset} ({mode})", f"{await store.call(font_label, font) or font} {size}"]
     if stats:
         times = "1 time" if stats[0] == 1 else f"{stats[0]} times"
@@ -981,7 +1060,39 @@ async def save_dialog(
     adjusted = await session.async_get_variable("user.adjusted")
     if adjusted:
         lines.append(f"{colors_adjusted(int(adjusted))} so they're easier to see.")
-    alert = iterm2.Alert("Save/update this profile", "\n".join(lines), window_id)
+    return "\n".join(lines), stars
+
+
+async def save_dialog(
+    connection: iterm2.Connection, app: iterm2.App, store: Store, session_id: str
+) -> None:
+    session = app.get_session_by_id(session_id)
+    if not session:
+        log("warn", f"save: session {session_id} not found")
+        return
+    window, _ = app.get_window_and_tab_for_session(session)
+    window_id = window.window_id if window else None
+    preset = await session.async_get_variable("user.color_preset")
+    if not preset:
+        await iterm2.Alert(SAVE_TITLE, not_colored("there's nothing to save"), window_id).async_run(
+            connection
+        )
+        return
+    # The font the script applied. Reading it back from the session gave the wrong face
+    # once (Monaco launched, Menlo-Regular read back; 2026-10-17), so that's the fallback.
+    profile = await session.async_get_profile()
+    live_font, size = split_font(profile.normal_font)
+    applied_font = await session.async_get_variable("user.font")
+    font = applied_font or live_font
+    if not font:
+        log("warn", f"save: no font known for {preset}")
+        return
+    info = await store.call(preset_info, preset, font)
+    if info is None:
+        await db_failed_alert(connection, SAVE_TITLE, window_id)
+        return
+    text, stars = await save_dialog_text(store, session, (preset, font, size), info)
+    alert = iterm2.Alert(SAVE_TITLE, text, window_id)
     # Remove favorite only appears when this (preset, font) is a favorite. Cancel goes first so
     # Return can't save 1 star: NSAlert gives Return to the first button and Escape to one
     # titled Cancel, so here Escape cancels and Return only beeps (checked in iTerm2 3.7.6).
@@ -990,8 +1101,23 @@ async def save_dialog(
         alert.add_button(b)
     index = await alert.async_run(connection) - 1000
     choice = buttons[index] if 0 <= index < len(buttons) else CANCEL
+    # Never show on a favorite asks first, as the right-click item does.
+    go = choice != CANCEL and (
+        choice != NEVER or await confirm_never_show(connection, store, preset, window_id)
+    )
+    if not go:
+        if go is None:
+            await db_failed_alert(connection, SAVE_TITLE, window_id)
+        return
+    if not applied_font:
+        # The save uses the profile's font; record it as this tab's, or favorites_changed would
+        # find no user.font here and mark the tab as not a favorite.
+        await session.async_set_variable("user.font", font)
     if not await apply_choice(app, store, choice, (preset, font, size)):
-        await db_failed_alert(connection, "Save/update this profile", window_id)
+        await db_failed_alert(connection, SAVE_TITLE, window_id)
+        return
+    if choice == NEVER:  # hidden now (or already was): give the tab another look, as the menu does
+        await reroll_after_hide(connection, app, store, session)
 
 
 def not_colored(consequence: str) -> str:
@@ -1020,17 +1146,24 @@ async def remove_from_menu(
     size = await session.async_get_variable("user.font_size") or DEFAULT_SIZE
     window, _ = app.get_window_and_tab_for_session(session)
     window_id = window.window_id if window else None
-    if preset and font and await store.call(is_favorite, preset, font):
+    title = "Remove profile from favorites"
+    fav = await store.call(is_favorite, preset, font) if preset and font else False
+    if fav is None:  # the DB failed, which isn't the same as "not a favorite"
+        await db_failed_alert(connection, title, window_id)
+        return
+    if fav:
         if not await apply_choice(app, store, REMOVE, (preset, font, size)):
-            await db_failed_alert(connection, "Remove from favorites", window_id)
+            await db_failed_alert(connection, title, window_id)
         return
     # iTerm2 before API protocol 1.23 shows the item on every tab, so say why nothing happens.
     if preset and font:
         label = await store.call(font_label, font) or font
         text = f"{preset} with {label} isn't a favorite, so there's nothing to remove."
+    elif preset:  # colored, but no font of ours was set (none enabled), so none was saved
+        text = f"This tab's {preset} has no font of its own, so it isn't a favorite."
     else:
         text = not_colored("it has no favorite")
-    await iterm2.Alert("Remove from favorites", text, window_id).async_run(connection)
+    await iterm2.Alert(title, text, window_id).async_run(connection)
 
 
 async def change_from_menu(
@@ -1043,48 +1176,37 @@ async def change_from_menu(
     await color_session(connection, app, store, session, reroll=True)
 
 
-async def never_show_from_menu(
-    connection: iterm2.Connection, app: iterm2.App, store: Store, session_id: str
-) -> None:
-    """Hide the tab's preset (asking first if it's a favorite), then give the tab a new look."""
-    title = "Never show this profile"
-    session = app.get_session_by_id(session_id)
-    if not session:
-        log("warn", f"never show: session {session_id} not found")
-        return
-    window, _ = app.get_window_and_tab_for_session(session)
-    window_id = window.window_id if window else None
-    preset = await session.async_get_variable("user.color_preset")
-    if not preset:
-        await iterm2.Alert(title, not_colored("there's nothing to hide"), window_id).async_run(
-            connection
-        )
-        return
+NEVER_TITLE = "Never show this profile"
+
+
+async def confirm_never_show(
+    connection: iterm2.Connection, store: Store, preset: str, window_id: str | None
+) -> bool | None:
+    """If preset is a favorite, ask before Never show drops it: True to go ahead, False if
+    cancelled, None if the DB failed. True straight away for a preset with no favorites."""
     favs = await store.call(favorite_fonts, preset)
     if favs is None:
-        await db_failed_alert(connection, title, window_id)
-        return
-    if favs:
-        lines = [f"{preset} is a favorite:"]
-        lines += [f"  {label} {STAR_BUTTONS[stars - 1]}" for label, stars in favs]
-        lines.append("Never show removes it from your favorites and from Profiles > Favorites.")
-        alert = iterm2.Alert(title, "\n".join(lines), window_id)
-        buttons = [CANCEL, NEVER]  # Cancel first: Escape cancels and Return can't hide it
-        for b in buttons:
-            alert.add_button(b)
-        index = await alert.async_run(connection) - 1000
-        if not (0 <= index < len(buttons)) or buttons[index] != NEVER:
-            return
-    # Not apply_choice: that needs the tab's font, which a tab without one doesn't have.
-    hidden = await store.call(never_show, preset)
-    if hidden is None:
-        await db_failed_alert(connection, title, window_id)
-        return  # nothing hidden, so keep the look rather than re-roll into confusion
-    if hidden:
-        log("info", f"never show: {preset}")
-        await favorites_changed(app, store, preset)
-    else:
-        log("info", f"never show: {preset} was already hidden")
+        return None
+    if not favs:
+        return True
+    lines = [f"{preset} is a favorite:"]
+    lines += [f"  {label} {STAR_BUTTONS[stars - 1]}" for label, stars in favs]
+    lines.append("Never show removes it from your favorites and from Profiles > Favorites.")
+    alert = iterm2.Alert(NEVER_TITLE, "\n".join(lines), window_id)
+    buttons = [CANCEL, NEVER]  # Cancel first: Escape cancels and Return can't hide it
+    for b in buttons:
+        alert.add_button(b)
+    index = await alert.async_run(connection) - 1000
+    return 0 <= index < len(buttons) and buttons[index] == NEVER
+
+
+async def reroll_after_hide(
+    connection: iterm2.Connection, app: iterm2.App, store: Store, session: iterm2.Session
+) -> None:
+    """Give a tab whose preset was just hidden another look, or say why it can't have one."""
+    preset = await session.async_get_variable("user.color_preset")
+    window, _ = app.get_window_and_tab_for_session(session)
+    window_id = window.window_id if window else None
     try:
         await color_session(connection, app, store, session, reroll=True)
         new = await session.async_get_variable("user.color_preset")
@@ -1097,21 +1219,57 @@ async def never_show_from_menu(
             "this one until you close it. Scripts > Manage > Console says why (usually: "
             "no other preset of this light/dark mode is left)."
         )
-        await iterm2.Alert(title, text, window_id).async_run(connection)
+        await iterm2.Alert(NEVER_TITLE, text, window_id).async_run(connection)
+
+
+async def never_show_from_menu(
+    connection: iterm2.Connection, app: iterm2.App, store: Store, session_id: str
+) -> None:
+    """Hide the tab's preset (asking first if it's a favorite), then give the tab a new look."""
+    session = app.get_session_by_id(session_id)
+    if not session:
+        log("warn", f"never show: session {session_id} not found")
+        return
+    window, _ = app.get_window_and_tab_for_session(session)
+    window_id = window.window_id if window else None
+    preset = await session.async_get_variable("user.color_preset")
+    if not preset:
+        await iterm2.Alert(
+            NEVER_TITLE, not_colored("there's nothing to hide"), window_id
+        ).async_run(connection)
+        return
+    confirmed = await confirm_never_show(connection, store, preset, window_id)
+    if confirmed is None:
+        await db_failed_alert(connection, NEVER_TITLE, window_id)
+        return
+    if not confirmed:
+        return
+    # Not apply_choice: that needs the tab's font, which a tab without one doesn't have.
+    hidden = await store.call(never_show, preset)
+    if hidden is None:
+        await db_failed_alert(connection, NEVER_TITLE, window_id)
+        return  # nothing hidden, so keep the look rather than re-roll into confusion
+    if hidden:
+        log("info", f"never show: {preset}")
+        await favorites_changed(app, store, preset)
+    else:
+        log("info", f"never show: {preset} was already hidden")
+    await reroll_after_hide(connection, app, store, session)
 
 
 async def register_save_handlers(
     connection: iterm2.Connection, app: iterm2.App, store: Store
 ) -> None:
-    """Save (right-click and save_profile() key), and the right-click Remove from favorites,
+    """Save (right-click and save_profile() key), and the right-click Remove profile from favorites,
     Change to another profile and Never show this profile."""
     running: dict[str, asyncio.Task[None]] = {}
 
     def start(key: str, coro: Coroutine[Any, Any, None]) -> None:
-        session_id = key.split(":", maxsplit=1)[1]
+        action, session_id = key.split(":", maxsplit=1)
         if session_id in running:
-            coro.close()
-            return  # one dialog or removal per session at a time, so they can't race
+            coro.close()  # one dialog or removal per session at a time, so they can't race
+            log("info", f"{action}: another action is still running on this session; ignored")
+            return
         # Run outside the RPC so iTerm2's RPC timeout can't cut a dialog off.
         task = asyncio.create_task(coro)
         running[session_id] = task
@@ -1119,7 +1277,7 @@ async def register_save_handlers(
         def done(t: asyncio.Task[None]) -> None:
             running.pop(session_id, None)
             if not t.cancelled() and t.exception():
-                log("warn", f"{key.split(':', maxsplit=1)[0]} failed: {t.exception()!r}")
+                log("warn", f"{action} failed: {t.exception()!r}")
 
         task.add_done_callback(done)
 
@@ -1147,18 +1305,18 @@ async def register_save_handlers(
         start(f"never:{session_id}", never_show_from_menu(connection, app, store, session_id))
 
     await save_profile.async_register(connection)
-    await save_profile_menu.async_register(connection, "Save/update this profile", MENU_ID)
+    await save_profile_menu.async_register(connection, SAVE_TITLE, MENU_ID)
     await change_profile_menu.async_register(
         connection, "Change to another profile", CHANGE_MENU_ID
     )
-    await never_show_menu.async_register(connection, "Never show this profile", NEVER_MENU_ID)
+    await never_show_menu.async_register(connection, NEVER_TITLE, NEVER_MENU_ID)
     # Hide the item on non-favorites where iTerm2 can (API protocol 1.23+, newer than 3.7.6);
     # elsewhere it shows on every tab and remove_from_menu explains. Passing visible_when to
     # an older iTerm2 only adds a warning to the Console.
     hide = supports_context_menu_submenus_and_visibility(connection)
     await remove_favorite_menu.async_register(
         connection,
-        "Remove from favorites",
+        "Remove profile from favorites",
         REMOVE_MENU_ID,
         visible_when="user.is_favorite == 1" if hide else None,
     )
@@ -1170,9 +1328,9 @@ async def main(connection: iterm2.Connection) -> None:
         "info",
         f"srcp_set_random_color_profile {VERSION} (file modified {modified}), pid {os.getpid()}",
     )
-    lock = acquire_lock()
+    lock = await acquire_lock()
     if lock is None:
-        log("info", "another copy is already running; exiting")
+        log("info", "another copy is still running after 5 s; exiting")
         sys.exit(0)  # returning would leave run_forever's process alive
     app = await iterm2.async_get_app(connection)
     if app is None:

@@ -7,15 +7,16 @@ touches the real database or iTerm2's settings. lint.sh runs it with
 The dot keeps this folder out of iTerm2's Scripts menu, like .tools/.
 """
 
-import ast
 import asyncio
 import contextlib
+import fcntl
 import glob
 import io
 import json
 import math
 import os
 import plistlib
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -37,6 +38,7 @@ import srcp_favorites  # noqa: E402
 import srcp_iterm_prefs  # noqa: E402
 import srcp_odds  # noqa: E402
 import srcp_preset_history  # noqa: E402
+import srcp_schema  # noqa: E402
 import srcp_uninstall_prefs  # noqa: E402
 
 MAIN = os.path.join(ROOT, "AutoLaunch", "srcp_set_random_color_profile.py")
@@ -44,18 +46,6 @@ MAIN = os.path.join(ROOT, "AutoLaunch", "srcp_set_random_color_profile.py")
 
 BUILD = os.path.join(ROOT, ".tools", "srcp_build_scheme_db.py")
 RUN_FOREVER = "iterm2.run_forever(main)"
-
-
-def module_literal(path, name):
-    """The value of a top-level `name = <literal>` in the file at path."""
-    with open(path) as f:
-        tree = ast.parse(f.read())
-    for node in tree.body:
-        if isinstance(node, ast.Assign) and [getattr(t, "id", None) for t in node.targets] == [
-            name
-        ]:
-            return ast.literal_eval(node.value)
-    raise AssertionError(f"no {name} = ... in {path}")
 
 
 # The main script's own paths; load_main points every one of them into the temp folder.
@@ -199,6 +189,22 @@ class DbTest(unittest.TestCase):
         self.addCleanup(patch.stop)
         self.build()
         self.main = load_main(self.data, self.sysfonts)
+        # set_variables sends one RPC for all of a session's variables; pass each to the
+        # session's async_set_variable, which the tests fake.
+        self.sessions = {}
+        ok = self.main["api_pb2"].VariableResponse.Status.Value("OK")
+
+        self.variable_rpcs = []  # the number of variables each call set
+
+        async def one_call(_connection, session_id, sets, _gets):
+            self.variable_rpcs.append(len(sets))
+            for name, value in sets:
+                await self.sessions[session_id].async_set_variable(name, json.loads(value))
+            return types.SimpleNamespace(variable_response=types.SimpleNamespace(status=ok))
+
+        patch = mock.patch.object(self.main["iterm2"].rpc, "async_variable", one_call)
+        patch.start()
+        self.addCleanup(patch.stop)
         self.db = sqlite3.connect(self.db_path, isolation_level=None)
         self.addCleanup(self.db.close)
 
@@ -214,6 +220,78 @@ class DbTest(unittest.TestCase):
 
     def discovery(self, mode):
         return {n for (n,) in self.db.execute("SELECT name FROM discovery WHERE mode = ?", (mode,))}
+
+    def tab(self, variables, buttons=(), db_path=None, normal_font="Monaco 13"):
+        """Fake a tab showing `variables`; each dialog answers with the next of `buttons`.
+
+        Sets self.session, self.profile, self.app, self.store; dialog texts go to self.texts.
+        Replaces the main script's sync_and_log (profiles aren't refreshed) and get_preset (a
+        FakePreset, with no colors), and turns the icon font off.
+        """
+        self.main["FONT_DIRS"] = []  # no icon font
+        self.main["sync_and_log"] = mock.AsyncMock()
+        self.main["get_preset"] = mock.AsyncMock(side_effect=lambda _c, name: FakePreset(name))
+        self.variables = variables
+
+        async def set_variable(name, value):
+            variables[name] = value
+
+        self.profile = mock.AsyncMock(normal_font=normal_font, original_guid=None, guid=None)
+        self.profile.name = "Default"
+        self.session = mock.AsyncMock(session_id="s1", async_set_variable=set_variable)
+        self.sessions["s1"] = self.session
+        self.session.async_get_variable.side_effect = variables.get
+        self.session.async_get_profile.return_value = self.profile
+        self.app = mock.MagicMock(windows=[])
+        self.app.get_session_by_id.return_value = self.session
+        self.app.get_window_and_tab_for_session.return_value = (None, None)
+        self.app.async_get_theme = mock.AsyncMock(return_value=["dark"])
+        self.store = self.main["Store"](db_path or self.db_path)
+        self.texts = []
+        answers, texts = iter(buttons), self.texts
+
+        class Alert:
+            def __init__(self, title, text, window_id=None):
+                texts.append(text)
+                self.buttons = []
+
+            def add_button(self, title):
+                self.buttons.append(title)
+
+            async def async_run(self, connection):
+                return 1000 + self.buttons.index(next(answers)) if self.buttons else 1000
+
+        patch = mock.patch.object(self.main["iterm2"], "Alert", Alert)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def run_quietly(self, coro):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            asyncio.run(coro)
+        return out.getvalue()
+
+    def record(self, *values):
+        """Add a launches row: values as the fields of the main script's Launch."""
+        self.main["record_launch"](self.db, self.main["Launch"](*values))
+
+    def write_profiles(self):
+        """Write the favorites' profiles file now; the count, or None if it was current."""
+        return self.main["write_favorite_profiles"](self.main["read_favorites"](self.db))
+
+    def sync_now(self):
+        """The main script's sync_and_log: rewrite the profiles if they changed."""
+        with contextlib.redirect_stdout(io.StringIO()):
+            return asyncio.run(self.main["sync_and_log"](self.main["Store"](self.db_path)))
+
+    def export_prefs(self, prefs):
+        """Make the main script's prefs read (srcp_iterm_prefs.load_prefs) return prefs."""
+        data = plistlib.dumps(prefs)
+        result = types.SimpleNamespace(stdout=data, returncode=0)
+        fake = types.SimpleNamespace(run=lambda *a, **k: result)
+        patch = mock.patch.object(srcp_iterm_prefs, "subprocess", fake)
+        patch.start()
+        self.addCleanup(patch.stop)
 
     def fixing(self, value):
         """Set config fix_colors (None deletes it)."""
@@ -247,6 +325,16 @@ class BuildTest(DbTest):
         self.fixing("0")
         self.assertEqual(self.discovery("dark"), {"Dark One", "Dark Two"})
 
+    def test_open_launches_use_their_index(self):
+        version = self.db.execute("PRAGMA user_version").fetchone()[0]
+        self.assertGreaterEqual(version, 6)
+        plan = self.db.execute(
+            "EXPLAIN QUERY PLAN SELECT id, session_id FROM launches "
+            "WHERE ended_at IS NULL AND end_reason IS NULL AND launched_at < ?",
+            ("2026-11-05 00:00:00",),
+        ).fetchall()
+        self.assertIn("launches_open", str(plan))
+
     def test_newer_schema_is_refused(self):
         self.db.execute("PRAGMA user_version = 99")
         result = subprocess.run(
@@ -258,18 +346,6 @@ class BuildTest(DbTest):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("newer than this script", result.stderr)
 
-    def test_duplicated_constants_agree(self):
-        seeded = {
-            k: float(v) for k, v in build.SEED_CONFIG.items() if k in self.main["DEFAULT_CONFIG"]
-        }
-        self.assertEqual(seeded, {k: float(v) for k, v in self.main["DEFAULT_CONFIG"].items()})
-        self.assertEqual(build.SEED_CONFIG["nonascii_font"], self.main["DEFAULT_NONASCII_FONT"])
-        self.assertEqual(self.main["BACKUP_KEEP"], srcp_db_backup.KEEP)
-        # Both are patched to temp folders here, so compare the values written in the files.
-        self.assertEqual(module_literal(MAIN, "FONT_DIRS"), module_literal(BUILD, "FONT_DIRS"))
-        nonascii = self.main["DEFAULT_NONASCII_FONT"]
-        self.assertEqual(self.main["NONASCII_FONT_FILES"], build.SEED_FONTS[nonascii])
-
     def test_load_main_paths_stay_in_the_temp_folder(self):
         for name in MAIN_PATHS:
             value = self.main[name]
@@ -279,7 +355,7 @@ class BuildTest(DbTest):
         # home: HOME pointed into the temp folder while its source ran.
         home = os.path.expanduser("~")
         for name, value in self.main.items():
-            if name.startswith("__"):  # __file__ is the real checkout, on purpose
+            if name.startswith("__") or name == "TOOLS":  # the real checkout, on purpose
                 continue
             for item in value if isinstance(value, (list, tuple)) else [value]:
                 if isinstance(item, str):
@@ -291,6 +367,45 @@ class BuildTest(DbTest):
         fake_open = mock.mock_open(read_data=reworded)
         with mock.patch("builtins.open", fake_open), self.assertRaises(AssertionError):
             load_main(self.data, self.sysfonts)
+
+    def test_shared_values_come_from_one_place(self):
+        # The main script imports these; it doesn't keep copies.
+        for name in ("FIX_ON_SQL", "UNHIDE", "COMPONENTS", "SEED_CONFIG", "SEED_FONTS"):
+            self.assertIs(self.main[name], getattr(srcp_schema, name), name)
+        self.assertIs(srcp_favorites.FIX_ON_SQL, srcp_schema.FIX_ON_SQL)
+        self.assertIs(srcp_favorites.UNHIDE, srcp_schema.UNHIDE)
+        self.assertIs(build.FIX_ON_SQL, srcp_schema.FIX_ON_SQL)
+        self.assertIs(self.main["colors_hash"], srcp_schema.colors_hash)
+        seeded = {k: float(build.SEED_CONFIG[k]) for k in self.main["DEFAULT_CONFIG"]}
+        self.assertEqual(seeded, self.main["DEFAULT_CONFIG"])
+        nonascii = self.main["DEFAULT_NONASCII_FONT"]
+        self.assertEqual(nonascii, build.SEED_CONFIG["nonascii_font"])
+        self.assertEqual(self.main["NONASCII_FONT_FILES"], build.SEED_FONTS[nonascii])
+
+    def test_no_hand_copies_left(self):
+        names = "FIX_ON_SQL|UNHIDE|HASH_KEYS|COMPONENTS|FONT_DIRS|SEED_FONTS|SEED_CONFIG"
+        copies = re.compile(rf'^({names}) =|"schemes-\*\.db"', re.M)
+        for path in (MAIN, BUILD, os.path.join(ROOT, ".tools", "srcp_favorites.py")):
+            with open(path) as f, self.subTest(path=os.path.basename(path)):
+                self.assertEqual(copies.findall(f.read()), [])
+
+    def test_a_missing_tools_folder_exits_with_a_clear_line(self):
+        real_import = __import__
+
+        def no_schema(name, *args, **kwargs):
+            if name == "srcp_schema":
+                raise ImportError("No module named 'srcp_schema'")
+            return real_import(name, *args, **kwargs)
+
+        out = io.StringIO()
+        with (
+            mock.patch("builtins.__import__", no_schema),
+            contextlib.redirect_stdout(out),
+            self.assertRaises(SystemExit),
+        ):
+            load_main(self.data, self.sysfonts)
+        self.assertIn("[error] missing", out.getvalue())
+        self.assertIn("run ./setup.sh again", out.getvalue())
 
     def fonts(self):
         return {
@@ -331,6 +446,7 @@ class BuildTest(DbTest):
 
     def test_schema_5_marks_disabled_fonts_that_are_still_missing(self):
         self.db.execute("ALTER TABLE fonts DROP COLUMN missing")
+        self.db.execute("DROP INDEX launches_open")  # migration 6's, so this is a version 4 DB
         self.db.execute("PRAGMA user_version = 4")
         self.db.execute("UPDATE fonts SET enabled = 0")
         self.db.execute("UPDATE fonts SET enabled = 1 WHERE name = 'Monaco'")
@@ -376,10 +492,11 @@ class MainScriptTest(DbTest):
         self.assertEqual(cm.exception.code, 0)
 
     def test_change_ends_the_old_launch_and_close_ends_the_new(self):
+        self.main["now"] = lambda: "2026-11-05 12:00:00"  # no second boundary mid-test
         launch = ("Dark One", "Monaco", 13, "dark", "discovery", None, "Default", "s1")
-        self.main["record_launch"](self.db, *launch)
+        self.record(*launch)
         self.main["record_end"](self.db, "s1", "changed")
-        self.main["record_launch"](self.db, "Dark Two", *launch[1:])
+        self.record("Dark Two", *launch[1:])
         self.main["record_end"](self.db, "s1")
         rows = self.db.execute("SELECT preset, end_reason, duration_s FROM launches ORDER BY id")
         self.assertEqual(rows.fetchall(), [("Dark One", "changed", 0), ("Dark Two", "closed", 0)])
@@ -402,55 +519,33 @@ class MainScriptTest(DbTest):
         self.assertIsNone(self.main["preset_info"](self.db, "Dark Two", "Monaco")[0])
 
     def test_reroll_replaces_the_look_and_never_repeats_it(self):
-        self.main["FONT_DIRS"] = []  # no icon font
-        self.main["sync_and_log"] = mock.AsyncMock()
-        self.main["get_preset"] = mock.AsyncMock(side_effect=lambda _c, name: FakePreset(name))
         self.fixing("0")  # Murky (unreadable) stays out of the re-roll
-        variables = {"user.color_preset": "Dark One"}
-
-        async def set_variable(name, value):
-            variables[name] = value
-
-        profile = mock.AsyncMock(normal_font="Monaco 13")
-        profile.name = "Default"  # not a constructor argument: name= names the mock
-        session = mock.AsyncMock(session_id="s1", async_set_variable=set_variable)
-        session.async_get_variable.side_effect = variables.get
-        session.async_get_profile.return_value = profile
-        app = mock.AsyncMock()
-        app.async_get_theme.return_value = ["dark"]
-        store = self.main["Store"](self.db_path)
+        self.tab({"user.color_preset": "Dark One"})
         color = self.main["color_session"]
-        launch = ("Dark One", "Monaco", 13, "dark", "discovery", None, "Default", "s1")
-        self.main["record_launch"](self.db, *launch)
-        with contextlib.redirect_stdout(io.StringIO()):
-            asyncio.run(color(None, app, store, session))  # has a look: left alone
-            profile.async_set_color_preset.assert_not_called()
-            asyncio.run(color(None, app, store, session, reroll=True))
-        profile.async_set_color_preset.assert_called_once_with("Dark Two")
-        self.assertEqual(variables["user.color_preset"], "Dark Two")
+        self.record("Dark One", "Monaco", 13, "dark", "discovery", None, "Default", "s1")
+        self.run_quietly(color(None, self.app, self.store, self.session))  # has a look: left alone
+        self.profile.async_set_color_preset.assert_not_called()
+        self.run_quietly(color(None, self.app, self.store, self.session, reroll=True))
+        self.profile.async_set_color_preset.assert_called_once_with("Dark Two")
+        self.assertEqual(self.variables["user.color_preset"], "Dark Two")
         rows = self.db.execute("SELECT preset, end_reason FROM launches ORDER BY id")
         self.assertEqual(rows.fetchall(), [("Dark One", "changed"), ("Dark Two", None)])
 
     def test_profiles_sync_on_a_db_without_font_labels(self):
-        self.main["subprocess"] = types.SimpleNamespace(
-            run=lambda *a, **k: types.SimpleNamespace(stdout=plistlib.dumps({}))
-        )
+        self.export_prefs({})
         self.main["_profiles_state"][0] = None
         self.db.execute("ALTER TABLE fonts DROP COLUMN label")  # as in a schema-1 DB
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertIsNotNone(self.main["sync_if_changed"](self.db))
+            self.assertIsNotNone(self.sync_now())
 
     def test_font_label_edits_trigger_a_profiles_rewrite(self):
-        self.main["subprocess"] = types.SimpleNamespace(
-            run=lambda *a, **k: types.SimpleNamespace(stdout=stdout)
-        )
-        stdout = plistlib.dumps({"Custom Color Presets": {"Dark One": DARK}})
+        self.export_prefs({"Custom Color Presets": {"Dark One": DARK}})
         self.main["save_favorite"](self.db, "Dark One", "Monaco", 13, 4)
         self.main["_profiles_state"][0] = None
-        self.assertIsNotNone(self.main["sync_if_changed"](self.db))
-        self.assertIsNone(self.main["sync_if_changed"](self.db))
+        self.assertIsNotNone(self.sync_now())
+        self.assertIsNone(self.sync_now())
         self.db.execute("UPDATE fonts SET label = 'Mo' WHERE name = 'Monaco'")
-        self.assertIsNotNone(self.main["sync_if_changed"](self.db))
+        self.assertIsNotNone(self.sync_now())
 
     def test_never_show_hides_and_rating_unhides_keeping_mode(self):
         self.db.execute("INSERT INTO overrides (name, mode) VALUES ('Dark One', 'light')")
@@ -480,10 +575,7 @@ class MainScriptTest(DbTest):
             "Default Bookmark Guid": "BASE",
             "New Bookmarks": [{"Guid": "OTHER", "Name": "Other"}, {"Guid": "BASE", "Name": "Base"}],
         }
-        stdout = plistlib.dumps(prefs)
-        self.main["subprocess"] = types.SimpleNamespace(
-            run=lambda *a, **k: types.SimpleNamespace(stdout=stdout)
-        )
+        self.export_prefs(prefs)
         self.main["save_favorite"](self.db, "Dark One", "Monaco", 13, 4)
         self.main["save_favorite"](self.db, "Light One", "Menlo-Regular", 12.5, 2)
         self.main["save_favorite"](self.db, "Yellow", "Monaco", 13, 3)
@@ -493,7 +585,7 @@ class MainScriptTest(DbTest):
             "VALUES ('Gone', 'Monaco', 13, 5, '2026-10-21 00:00:00')"
         )
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(self.main["sync_profiles"](self.db), 2)
+            self.assertEqual(self.write_profiles(), 2)
         with open(self.main["DYNAMIC_PATH"], "rb") as f:
             profiles = {p["Name"]: p for p in plistlib.load(f)["Profiles"]}
         self.assertEqual(set(profiles), {"Dark One - Monaco", "Light One - Menlo"})
@@ -506,7 +598,7 @@ class MainScriptTest(DbTest):
         self.assertEqual(dark["Tags"], ["Favorites"])
         self.assertEqual(dark["Background Color"], DARK["Background Color"])
         self.assertEqual(profiles["Light One - Menlo"]["Normal Font"], "Menlo-Regular 12.5")
-        self.assertIsNone(self.main["sync_profiles"](self.db))  # unchanged: no rewrite
+        self.assertIsNone(self.write_profiles())  # unchanged: no rewrite
         visible = [n for n in os.listdir(self.data) if not n.startswith(".")]
         self.assertNotIn("dynamic.plist.partial", visible)
 
@@ -553,21 +645,78 @@ class SnapshotTest(DbTest):
         self.assertEqual(len(self.snapshots()), before + 2)
 
     def test_only_old_partial_copies_are_cleaned_up(self):
-        copies = {
-            "main": self.main["remove_stale_partials"],
-            "db_backup": srcp_db_backup.remove_stale_partials,
-        }
-        for name, remove in copies.items():  # each in its own folder, so each is tested
-            with self.subTest(copy=name):
-                folder = os.path.join(self.tmp, f"partials-{name}")
-                os.makedirs(folder)
-                old, fresh = (os.path.join(folder, f"schemes-{n}.db.partial") for n in "ab")
-                for path in (old, fresh):
-                    open(path, "w").close()
-                two_hours_ago = time.time() - 7200
-                os.utime(old, (two_hours_ago, two_hours_ago))
-                remove(folder)
-                self.assertEqual(os.listdir(folder), [os.path.basename(fresh)])  # in progress?
+        folder = os.path.join(self.tmp, "partials")
+        os.makedirs(folder)
+        old, fresh = (os.path.join(folder, f"schemes-{n}.db.partial") for n in "ab")
+        for path in (old, fresh):
+            open(path, "w").close()
+        two_hours_ago = time.time() - 7200
+        os.utime(old, (two_hours_ago, two_hours_ago))
+        srcp_db_backup.remove_stale_partials(folder)
+        self.assertEqual(os.listdir(folder), [os.path.basename(fresh)])  # may be in progress
+
+    def make_snapshots(self, names):
+        folder = os.path.join(self.tmp, "rotation")
+        os.makedirs(folder)
+        for i, name in enumerate(names):
+            path = os.path.join(folder, name)
+            open(path, "w").close()
+            scrambled = time.time() - 1000 * ((i * 7) % len(names))  # mtime says nothing
+            os.utime(path, (scrambled, scrambled))
+        return folder
+
+    def test_rotation_goes_by_the_name_not_the_file_time(self):
+        names = ["schemes-20261101T000000Z.db"]
+        names += [f"schemes-20261102T000000Z{s}.db" for s in ("", "-1", "-2", "-10")]
+        future = "schemes-29990101T000000Z.db"
+        others = ["manual-before-upgrade.db", "schemes-old.db", "schemes-20261399T000000Z.db"]
+        folder = self.make_snapshots([*names, future, *others])
+        srcp_db_backup.prune(folder, keep=3)
+        kept = sorted(os.listdir(folder))
+        # The 3 newest by name (-2 and -10 after -1: numbers, not text), plus what isn't ours.
+        expected = [*names[-3:], future, *others]
+        self.assertEqual(kept, sorted(expected))
+
+    def test_pruning_never_takes_every_snapshot_and_tolerates_a_race(self):
+        folder = self.make_snapshots([f"schemes-202610{d:02d}T000000Z.db" for d in (1, 2, 3)])
+        with self.assertRaises(ValueError):
+            srcp_db_backup.prune(folder, keep=0)
+        self.assertEqual(len(os.listdir(folder)), 3)
+        real_remove = os.remove
+
+        def already_gone(path):  # the other pruner got there first
+            real_remove(path)
+            raise FileNotFoundError(path)
+
+        with mock.patch.object(srcp_db_backup.os, "remove", already_gone):
+            srcp_db_backup.prune(folder, keep=1)
+        self.assertEqual(os.listdir(folder), ["schemes-20261003T000000Z.db"])
+
+    def test_a_future_dated_snapshot_neither_counts_nor_gets_hourly_ones_pruned(self):
+        real = [f"schemes-202610{d:02d}T000000Z.db" for d in range(1, 15)]  # 14 real ones
+        folder = self.make_snapshots([*real, "schemes-29990101T000000Z.db"])
+        db_path = os.path.join(os.path.dirname(folder), "rotation.db")
+        sqlite3.connect(db_path).close()
+        backups = os.path.join(os.path.dirname(db_path), "backups")
+        shutil.copytree(folder, backups)
+        with contextlib.redirect_stdout(io.StringIO()):
+            made = srcp_db_backup.snapshot_if_due(db_path)  # the future one isn't "newest"
+        self.assertIsNotNone(made)
+        left = sorted(os.listdir(backups))
+        self.assertIn("schemes-29990101T000000Z.db", left)
+        self.assertEqual(len([n for n in left if n.startswith("schemes-2026")]), 14)
+        self.assertNotIn(real[0], left)  # the oldest real one made room for the new one
+        self.assertIsNone(srcp_db_backup.snapshot_if_due(db_path))  # now fresh: none due
+
+    def test_the_main_script_warns_once_about_future_dated_snapshots(self):
+        backups = os.path.join(self.data, "backups")
+        os.makedirs(backups, exist_ok=True)
+        open(os.path.join(backups, "schemes-29990101T000000Z.db"), "w").close()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.main["daily_snapshot"](self.db)
+            self.main["daily_snapshot"](self.db)
+        self.assertEqual(out.getvalue().count("time in the future"), 1)
 
     def test_a_failed_check_does_not_stop_later_ones(self):
         calls = []
@@ -592,6 +741,55 @@ class SnapshotTest(DbTest):
         out = self.run_ticks(Store(), [lambda: None] * 4)
         # Two failures in a row: one line; a success re-arms it, so the next failure shows.
         self.assertEqual(out.count("snapshot check failed"), 2)
+
+
+class AsyncHelpersTest(DbTest):
+    def test_the_lock_waits_for_an_exiting_copy_then_gives_up(self):
+        os.makedirs(self.data, exist_ok=True)
+        held = open(self.main["LOCK_PATH"], "w")  # noqa: SIM115  (released below)
+        self.addCleanup(held.close)
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        acquire = self.main["acquire_lock"]
+        self.assertIsNone(asyncio.run(acquire(wait_s=0.3, every_s=0.05)))
+
+        async def release_then_acquire():
+            asyncio.get_running_loop().call_later(0.1, held.close)  # the old copy exits
+            return await acquire(wait_s=2, every_s=0.05)
+
+        got = asyncio.run(release_then_acquire())
+        self.assertIsNotNone(got)
+        got.close()
+
+    def test_a_failed_rollback_keeps_the_error_and_reconnects(self):
+        store = self.main["Store"](self.db_path)
+
+        def boom(db):
+            db.execute("BEGIN IMMEDIATE")
+            store.db = FailingRollback(db)  # ROLLBACK itself fails now
+            raise sqlite3.OperationalError("disk I/O error")
+
+        class FailingRollback:
+            in_transaction = True
+
+            def __init__(self, real):
+                self.real = real
+
+            def execute(self, sql, *args):
+                if sql == "ROLLBACK":
+                    self.real.execute("ROLLBACK")  # leave the real DB clean for the next call
+                    raise sqlite3.OperationalError("database disk image is malformed")
+                return self.real.execute(sql, *args)
+
+            def close(self):
+                self.real.close()
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertIsNone(asyncio.run(store.call(boom)))
+        self.assertIn("disk I/O error", out.getvalue())  # the original error, not the rollback's
+        self.assertIn("rollback failed", out.getvalue())
+        self.assertIsNone(store.db)  # the next call reconnects
+        self.assertEqual(asyncio.run(store.call(lambda db: 1)), 1)
 
 
 class PickOddsTest(DbTest):
@@ -660,9 +858,7 @@ class PickOddsTest(DbTest):
 
     def test_recent_discovery_picks_are_skipped_until_all_are_recent(self):
         def launch(preset):
-            self.main["record_launch"](
-                self.db, preset, None, 13, "dark", "discovery", None, "p", preset
-            )
+            self.record(preset, None, 13, "dark", "discovery", None, "p", preset)
 
         self.fixing("0")  # Murky (unreadable) stays out
         launch("Dark One")
@@ -678,9 +874,7 @@ class PickOddsTest(DbTest):
         self.main["save_favorite"](self.db, "Dark One", "Monaco", 13, 1)
         self.main["save_favorite"](self.db, "Dark One", "Menlo-Regular", 13, 4)
         self.main["save_favorite"](self.db, "Light One", "Monaco", 13, 3)
-        self.main["record_launch"](
-            self.db, "Dark Two", None, 13, "dark", "discovery", None, "p", "s"
-        )
+        self.record("Dark Two", None, 13, "dark", "discovery", None, "p", "s")
         for mode in ("light", "dark"):
             expected = srcp_odds.odds(self.db, mode)
             picks = self.picks(mode)
@@ -870,7 +1064,8 @@ class ColorFixTest(DbTest):
         self.assertIn("colors adjusted for readability", text)
         self.assertIn("changed for favorites: Murky", text)
         self.assertEqual(text.count("changed for favorites"), 1)
-        self.assertIn("Restart srcp_set_random_color_profile.py", text)
+        self.assertIn("New tabs get these adjustments", text)
+        self.assertNotIn("Restart", text)  # a rebuild needs no restart
         self.assertEqual(build.favorite_fixes(os.path.join(self.tmp, "none.db")), None)
         self.main["save_favorite"](self.db, "Murky", "Monaco", 13, 3)
         self.assertIn("Foreground Color", build.favorite_fixes(self.db_path)["Murky"])
@@ -891,10 +1086,6 @@ class ColorFixTest(DbTest):
         )
 
     def test_the_setting_means_the_same_everywhere(self):
-        self.assertEqual(self.main["FIX_ON_SQL"], build.FIX_ON_SQL)
-        self.assertEqual(srcp_favorites.FIX_ON_SQL, build.FIX_ON_SQL)
-        self.assertEqual(self.main["HASH_KEYS"], build.HASH_KEYS)
-        self.assertEqual(self.main["COMPONENTS"], build.COMPONENTS)
         on = [None, "1", "1.0", " 1 ", "off", "", "nan", "yes"]
         for value in [*on, "0", "0.0", " 0 "]:
             with self.subTest(value=value):
@@ -903,6 +1094,16 @@ class ColorFixTest(DbTest):
                 self.assertEqual("Murky" in self.discovery("dark"), expected)
                 fixes, _ = self.main["look_fixes"](self.db, "Murky")
                 self.assertEqual(fixes is not None, expected)
+
+    def test_out_of_range_components_dont_stop_the_build(self):
+        # A hand-edited preset. All three below 0: unclamped, OKLab's cube root goes complex.
+        odd = with_colors(DARK, Ansi_1_Color=(-0.01, -0.01, -0.01), Ansi_2_Color=(0.2, 1.02, 0.2))
+        with contextlib.redirect_stdout(io.StringIO()):
+            rows, _ = build.build_rows({"Odd": odd}, self.repo)
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(all(math.isfinite(v) for v in build.oklab(build.rgb(odd["Ansi 1 Color"]))))
+        self.assertEqual(build.rgb(odd["Ansi 1 Color"])[0], -0.01)  # the preset isn't changed
+        self.assertNotEqual(build.color_hash(odd), build.color_hash(DARK))  # raw values hashed
 
     def test_colors_hash_matches_the_build(self):
         live = {k: build.rgb(UNREADABLE[k]) for k in build.HASH_KEYS}
@@ -943,13 +1144,11 @@ class ColorFixTest(DbTest):
         murky["Foreground Color"]["Color Space"] = "P3"
         prefs = {"Custom Color Presets": {"Murky": murky}}
         before = plistlib.dumps(prefs)
-        self.main["subprocess"] = types.SimpleNamespace(
-            run=lambda *a, **k: types.SimpleNamespace(stdout=plistlib.dumps(prefs))
-        )
+        self.export_prefs(prefs)
         # The build hashes components only, so the added Color Space doesn't change the hash.
         self.main["save_favorite"](self.db, "Murky", "Monaco", 13, 3)
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(self.main["sync_profiles"](self.db), 1)
+            self.assertEqual(self.write_profiles(), 1)
         with open(self.main["DYNAMIC_PATH"], "rb") as f:
             fg = plistlib.load(f)["Profiles"][0]["Foreground Color"]
         expected = json.loads(self.scheme_fixes("Murky"))["Foreground Color"][:3]
@@ -959,10 +1158,10 @@ class ColorFixTest(DbTest):
         state = self.main["_profiles_state"]
         state[0] = None
         with contextlib.redirect_stdout(io.StringIO()):
-            self.main["sync_if_changed"](self.db)
+            self.sync_now()
             first = state[0]
             self.db.execute("UPDATE schemes SET fixes = '{}' WHERE name = 'Murky'")
-            self.main["sync_if_changed"](self.db)
+            self.sync_now()
         self.assertNotEqual(state[0], first)  # changed adjustments rewrite the profiles
 
     def scheme_fixes(self, name):
@@ -971,32 +1170,15 @@ class ColorFixTest(DbTest):
     def test_a_tab_with_an_adjusted_preset_says_so(self):
         for name in ("Dark One", "Dark Two"):  # leave only Murky to pick
             self.main["never_show"](self.db, name)
-        self.main["FONT_DIRS"] = []
-        self.main["sync_and_log"] = mock.AsyncMock()
+        self.tab({})
         preset = self.fake_preset(UNREADABLE)
         self.main["get_preset"] = mock.AsyncMock(return_value=preset)
-        variables = {}
-
-        async def set_variable(name, value):
-            variables[name] = value
-
-        profile = mock.AsyncMock(normal_font="Monaco 13")
-        profile.name = "Default"
-        session = mock.AsyncMock(session_id="s1", async_set_variable=set_variable)
-        session.async_get_variable.side_effect = variables.get
-        session.async_get_profile.return_value = profile
-        app = mock.AsyncMock()
-        app.async_get_theme.return_value = ["dark"]
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            asyncio.run(
-                self.main["color_session"](None, app, self.main["Store"](self.db_path), session)
-            )
+        out = self.run_quietly(self.main["color_session"](None, self.app, self.store, self.session))
         n = len(json.loads(self.scheme_fixes("Murky")))
-        line = next(x for x in out.getvalue().splitlines() if "Murky |" in x)  # random font
+        line = next(x for x in out.splitlines() if "Murky |" in x)  # random font
         self.assertTrue(line.endswith(f" 13, {self.main['colors_adjusted'](n)}"), line)
-        self.assertEqual(variables["user.adjusted"], n)
-        profile.async_set_color_preset.assert_called_once_with(preset)
+        self.assertEqual(self.variables["user.adjusted"], n)
+        self.profile.async_set_color_preset.assert_called_once_with(preset)
         fg = next(v for v in preset.values if v.key == "Foreground Color")
         self.assertNotEqual(round(fg.red / 255, 4), UNREADABLE["Foreground Color"]["Red Component"])
 
@@ -1007,8 +1189,9 @@ class ColorFixTest(DbTest):
         self.assertEqual(fav[4], len(json.loads(self.scheme_fixes("Murky"))))
         # Its profile got none (the preset changed since the build): the session says none.
         changed = with_colors(UNREADABLE, Ansi_1_Color=(0.5, 0.1, 0.1))
+        self.export_prefs({"Custom Color Presets": {"Murky": changed}})
         with contextlib.redirect_stdout(io.StringIO()):
-            self.main["adjust_colors"]("Murky", changed, self.scheme_fixes("Murky"), "x")
+            self.write_profiles()
         self.assertEqual(self.main["_profile_adjusted"]["Murky"], 0)
         self.fixing("0")
         self.assertEqual(self.main["favorite_by_guid"](self.db, guid)[4], 0)
@@ -1018,7 +1201,7 @@ class ColorFixTest(DbTest):
         # floats unless both sides round to 32 bits first.
         colors = with_colors(UNREADABLE, Ansi_1_Color=(0.02745098039215686, 0.5, 0.5))
         live = {
-            k: tuple(build.float32(c) * 255 / 255 for c in build.rgb(colors[k]))
+            k: tuple(srcp_schema.float32(c) * 255 / 255 for c in build.rgb(colors[k]))
             for k in build.HASH_KEYS
         }
         self.assertEqual(self.main["colors_hash"](live), build.color_hash(colors))
@@ -1041,16 +1224,166 @@ class ColorFixTest(DbTest):
     def test_a_db_from_before_adjustments_still_works(self):
         self.db.execute("ALTER TABLE schemes DROP COLUMN fixes")
         self.main["save_favorite"](self.db, "Dark One", "Monaco", 13, 3)
-        self.main["subprocess"] = types.SimpleNamespace(
-            run=lambda *a, **k: types.SimpleNamespace(
-                stdout=plistlib.dumps({"Custom Color Presets": {"Dark One": DARK}})
-            )
-        )
+        self.export_prefs({"Custom Color Presets": {"Dark One": DARK}})
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(self.main["look_fixes"](self.db, "Dark One"), (None, None))
-            self.assertEqual(self.main["sync_profiles"](self.db), 1)
+            self.assertEqual(self.write_profiles(), 1)
             self.main["_profiles_state"][0] = None
-            self.assertEqual(self.main["sync_if_changed"](self.db), None)  # file already current
+            self.assertEqual(self.sync_now(), None)  # file already current
+
+
+class TabTest(DbTest):
+    """The main script's per-tab paths, with a fake iTerm2 session, app and dialogs."""
+
+    def test_a_new_tab_sets_all_its_variables_in_one_call(self):
+        self.fixing("0")
+        self.tab({})
+        self.run_quietly(self.main["color_session"](None, self.app, self.store, self.session))
+        self.assertEqual(self.variable_rpcs, [6])
+        self.assertEqual(self.variables["user.mode"], "dark")
+
+    def test_a_new_tab_does_not_wait_for_the_profiles_refresh(self):
+        self.fixing("0")
+        self.tab({})
+        started = []
+
+        async def stuck_sync(store):  # e.g. defaults export hanging
+            started.append(store)
+            await asyncio.sleep(3600)
+
+        self.main["sync_and_log"] = stuck_sync
+        color = self.main["color_session"](None, self.app, self.store, self.session)
+        self.run_quietly(asyncio.wait_for(color, 5))  # TimeoutError if the tab waited
+        self.assertEqual(started, [self.store])
+        self.assertEqual(self.variables["user.mode"], "dark")
+
+    def test_the_sync_lock_works_in_each_event_loop(self):
+        store = self.main["Store"](self.db_path)
+
+        async def second_sync_waits():
+            async with store.sync_lock:
+                try:  # while one sync holds it, another can't get in
+                    await asyncio.wait_for(store.sync_lock.acquire(), 0.05)
+                except TimeoutError:
+                    return True
+                return False
+
+        for _ in range(2):  # a lock bound to the first loop would fail in the second
+            self.assertTrue(asyncio.run(second_sync_waits()))
+
+    def test_a_reroll_with_no_font_of_ours_clears_the_old_font_and_favorite(self):
+        self.fixing("0")
+        self.db.execute("UPDATE fonts SET enabled = 0")  # no random font to give
+        self.tab({"user.color_preset": "Dark One", "user.font": "Monaco", "user.is_favorite": 1})
+        self.run_quietly(
+            self.main["color_session"](None, self.app, self.store, self.session, reroll=True)
+        )
+        self.assertEqual(self.variables["user.color_preset"], "Dark Two")
+        self.assertEqual((self.variables["user.font"], self.variables["user.is_favorite"]), ("", 0))
+
+    def test_a_reroll_ends_the_old_launch_and_adds_the_new_one_together(self):
+        self.record("Dark One", "Monaco", 13, "dark", "discovery", None, "Default", "s1")
+        launch = self.main["Launch"]("Dark Two", "Monaco", 13, "dark", "discovery", None, "D", "s1")
+
+        def broken_insert(db, launch):
+            raise sqlite3.IntegrityError("simulated")
+
+        self.main["record_launch"] = broken_insert
+        store = self.main["Store"](self.db_path)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertIsNone(asyncio.run(store.call(self.main["record_change"], launch)))
+        rows = self.db.execute("SELECT preset, end_reason FROM launches").fetchall()
+        self.assertEqual(rows, [("Dark One", None)])  # still open: neither change happened
+
+    def test_three_missing_presets_in_a_row_say_rebuild_once(self):
+        self.tab({})
+        self.main["get_preset"] = mock.AsyncMock(return_value=None)
+        color = self.main["color_session"]
+        out = self.run_quietly(color(None, self.app, self.store, self.session))
+        out += self.run_quietly(color(None, self.app, self.store, self.session))
+        self.assertEqual(out.count("3 picks in a row"), 1)
+        self.assertNotIn("user.color_preset", self.variables)
+
+    def test_a_favorite_profile_whose_preset_is_gone_logs_the_theme_mode(self):
+        self.db.execute(
+            "INSERT INTO favorites (preset, font, size, stars, saved_at) "
+            "VALUES ('Gone', 'Monaco', 13, 4, '2026-11-05 00:00:00')"
+        )
+        self.tab({})
+        self.profile.original_guid = self.main["favorite_guid"]("Gone", "Monaco")
+        self.run_quietly(self.main["color_session"](None, self.app, self.store, self.session))
+        self.assertEqual(self.db.execute("SELECT mode FROM launches").fetchall(), [("dark",)])
+
+    def test_never_show_from_the_rating_dialog_rerolls_the_tab(self):
+        self.fixing("0")
+        self.tab({"user.color_preset": "Dark One", "user.font": "Monaco"}, ["Never show"])
+        self.record("Dark One", "Monaco", 13, "dark", "discovery", None, "Default", "s1")
+        self.run_quietly(self.main["save_dialog"](None, self.app, self.store, "s1"))
+        self.assertNotIn("Dark One", self.discovery("dark"))
+        self.profile.async_set_color_preset.assert_called_once_with("Dark Two")
+
+    def test_never_show_from_the_rating_dialog_asks_first_for_a_favorite(self):
+        self.main["save_favorite"](self.db, "Dark One", "Monaco", 13, 4)
+        self.tab({"user.color_preset": "Dark One", "user.font": "Monaco"}, ["Never show", "Cancel"])
+        self.run_quietly(self.main["save_dialog"](None, self.app, self.store, "s1"))
+        self.assertEqual(len(self.texts), 2)  # the rating dialog, then the question
+        self.assertIn("is a favorite", self.texts[1])
+        self.assertTrue(self.main["is_favorite"](self.db, "Dark One", "Monaco"))
+        self.profile.async_set_color_preset.assert_not_called()
+
+    def test_saving_a_tab_with_no_font_of_ours_records_the_font_it_saved(self):
+        self.tab({"user.color_preset": "Dark One"}, ["3 ★★★"])
+        self.run_quietly(self.main["save_dialog"](None, self.app, self.store, "s1"))
+        self.assertEqual(self.variables["user.font"], "Monaco")  # from the profile
+        self.assertTrue(self.main["is_favorite"](self.db, "Dark One", "Monaco"))
+
+    def test_cancelling_the_rating_dialog_changes_nothing(self):
+        self.tab({"user.color_preset": "Dark One"}, ["Cancel"])
+        self.run_quietly(self.main["save_dialog"](None, self.app, self.store, "s1"))
+        self.assertNotIn("user.font", self.variables)
+        self.assertFalse(self.main["is_favorite"](self.db, "Dark One", "Monaco"))
+
+    def test_remove_when_the_db_fails_says_so_instead_of_not_a_favorite(self):
+        missing = os.path.join(self.tmp, "none.db")
+        self.tab({"user.color_preset": "Dark One", "user.font": "Monaco"}, db_path=missing)
+        self.run_quietly(self.main["remove_from_menu"](None, self.app, self.store, "s1"))
+        self.assertEqual(len(self.texts), 1)
+        self.assertIn("didn't take", self.texts[0])
+
+    def test_remove_on_a_tab_with_no_font_of_ours_says_why(self):
+        self.tab({"user.color_preset": "Dark One", "user.font": ""})
+        self.run_quietly(self.main["remove_from_menu"](None, self.app, self.store, "s1"))
+        self.assertIn("has no font of its own", self.texts[0])
+
+    def test_a_rebuild_reaches_an_open_store_without_a_restart(self):
+        store = self.main["Store"](self.db_path)
+        look_fixes = self.main["look_fixes"]
+        before = asyncio.run(store.call(look_fixes, "Murky"))
+        darker = with_colors(UNREADABLE, Foreground_Color=(0.2, 0.2, 0.2))
+        with contextlib.redirect_stdout(io.StringIO()):
+            rows, _ = build.build_rows({**PRESETS, "Murky": darker}, self.repo)
+            build.write_db(self.db_path, rows)
+        after = asyncio.run(store.call(look_fixes, "Murky"))
+        self.assertNotEqual(after, before)
+        self.assertEqual(after[1], build.color_hash(darker))
+
+    def test_a_failed_profiles_write_leaves_the_adjusted_counts_alone(self):
+        self.export_prefs({"Custom Color Presets": {"Murky": UNREADABLE}})
+        self.main["save_favorite"](self.db, "Murky", "Monaco", 13, 3)
+        blocker = os.path.join(self.tmp, "a-file")
+        open(blocker, "w").close()
+        self.main["DYNAMIC_PATH"] = os.path.join(blocker, "profiles.plist")  # can't be written
+        with self.assertRaises(OSError), contextlib.redirect_stdout(io.StringIO()):
+            self.write_profiles()
+        self.assertNotIn("Murky", self.main["_profile_adjusted"])  # the file never held it
+
+    def test_a_new_color_hash_rewrites_the_favorite_profiles(self):
+        self.export_prefs({"Custom Color Presets": {"Murky": UNREADABLE}})
+        self.main["save_favorite"](self.db, "Murky", "Monaco", 13, 3)
+        self.assertIsNotNone(self.sync_now())
+        self.assertIsNone(self.sync_now())  # nothing changed
+        self.db.execute("UPDATE schemes SET color_hash = 'other' WHERE name = 'Murky'")
+        self.assertIsNotNone(self.sync_now())  # its adjustments no longer apply: rewritten
 
 
 class NeverShowTest(DbTest):
@@ -1062,9 +1395,6 @@ class NeverShowTest(DbTest):
     def include(self, name):
         row = self.db.execute("SELECT include FROM overrides WHERE name = ?", (name,)).fetchone()
         return row[0] if row else "no row"
-
-    def test_unhide_rule_is_the_same_in_both_scripts(self):
-        self.assertEqual(self.main["UNHIDE"], srcp_favorites.UNHIDE)
 
     def test_show_again_brings_it_back_keeping_its_mode_override(self):
         self.db.execute("INSERT INTO overrides (name, mode) VALUES ('Dark One', 'light')")
@@ -1121,48 +1451,12 @@ class NeverShowTest(DbTest):
         """
         if never_show is not None:
             self.main["never_show"] = never_show
-        self.main["FONT_DIRS"] = []  # no icon font
-        self.main["sync_and_log"] = mock.AsyncMock()
-        self.main["get_preset"] = mock.AsyncMock(side_effect=lambda _c, name: FakePreset(name))
         self.fixing("0")  # Murky (unreadable) stays out of the re-roll
-        variables = {"user.color_preset": preset, "user.font": "Monaco"}
-
-        async def set_variable(name, value):
-            variables[name] = value
-
-        profile = mock.AsyncMock(normal_font="Monaco 13")
-        profile.name = "Default"
-        session = mock.AsyncMock(session_id="s1", async_set_variable=set_variable)
-        session.async_get_variable.side_effect = variables.get
-        session.async_get_profile.return_value = profile
-        app = mock.MagicMock(windows=[])
-        app.get_session_by_id.return_value = session
-        app.get_window_and_tab_for_session.return_value = (None, None)
-        app.async_get_theme = mock.AsyncMock(return_value=["dark"])
-        store = self.main["Store"](self.db_path if not fail else os.path.join(self.tmp, "none"))
-        self.main["record_launch"](
-            self.db, preset, "Monaco", 13, "dark", "discovery", None, "Default", "s1"
-        )
-        texts = []
-
-        class Alert:
-            def __init__(self, title, text, window_id=None):
-                texts.append(text)
-                self.buttons = []
-
-            def add_button(self, title):
-                self.buttons.append(title)
-
-            async def async_run(self, connection):
-                return 1000 + self.buttons.index(button) if self.buttons else 1000
-
-        with (
-            mock.patch.object(self.main["iterm2"], "Alert", Alert),
-            contextlib.redirect_stdout(io.StringIO()),
-        ):
-            asyncio.run(self.main["never_show_from_menu"](None, app, store, "s1"))
-        self.variables, self.profile = variables, profile
-        return texts
+        missing = os.path.join(self.tmp, "none") if fail else None
+        self.tab({"user.color_preset": preset, "user.font": "Monaco"}, [button] * 3, missing)
+        self.record(preset, "Monaco", 13, "dark", "discovery", None, "Default", "s1")
+        self.run_quietly(self.main["never_show_from_menu"](None, self.app, self.store, "s1"))
+        return self.texts
 
     def test_menu_hides_the_preset_and_rerolls_the_tab(self):
         self.assertEqual(self.menu("Dark One"), [])  # not a favorite: no question asked
