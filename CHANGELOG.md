@@ -2,7 +2,7 @@
 
 What changed for someone using iTerm2 Profile Manager, newest first. Releases up to v0.7.1 are described on [GitHub releases](https://github.com/rmarable/iterm2-profile-manager/releases).
 
-## Unreleased
+## v0.13.1 (2026-11-06)
 
 - The restore steps (docs/REFERENCE.md, Restore) now set the old database and its `-wal` changes aside in a dated folder instead of deleting them, so you can go back if the restore goes wrong.
 - `uninstall.sh --data` leaves database snapshots dated in the future (a clock set ahead, or copied from another Mac) in place and says so, instead of deleting them.
