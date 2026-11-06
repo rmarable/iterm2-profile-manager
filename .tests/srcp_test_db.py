@@ -145,11 +145,12 @@ class DbTest(unittest.TestCase):
 
         self.profile = mock.AsyncMock(normal_font=normal_font, original_guid=None, guid=None)
         self.profile.name = "Default"
+        self.profile.use_separate_colors_for_light_and_dark_mode = None  # off, as by default
         self.session = mock.AsyncMock(session_id="s1", async_set_variable=set_variable)
         self.sessions["s1"] = self.session
         self.session.async_get_variable.side_effect = variables.get
         self.session.async_get_profile.return_value = self.profile
-        self.app = mock.MagicMock(windows=[])
+        self.app = mock.MagicMock(windows=[], buried_sessions=[])
         self.app.get_session_by_id.return_value = self.session
         self.app.get_window_and_tab_for_session.return_value = (None, None)
         self.app.async_get_theme = mock.AsyncMock(return_value=["dark"])
@@ -792,6 +793,21 @@ class OldSchemaTest(DbTest):
 
 
 class MainScriptTest(DbTest):
+    def test_a_favorite_of_an_excluded_preset_is_never_picked(self):
+        self.main["save_favorite"](self.db, "Dark One", "Monaco", 13, 5)
+        self.db.execute(
+            "UPDATE config SET value = '1' WHERE key IN ('favorite_share', 'favorite_target')"
+        )  # a favorite whenever there is one
+        for _ in range(50):
+            name, _font, _source, _stars = self.main["pick"](self.db, "dark", {"Dark One"})
+            self.assertNotEqual(name, "Dark One")
+
+    def test_favorite_profiles_turn_separate_light_and_dark_colors_off(self):
+        self.main["save_favorite"](self.db, "Dark One", "Monaco", 13, 4)
+        rows = self.main["read_favorites"](self.db).rows
+        profiles, _ = self.main["favorite_profiles"](rows, {"Dark One": DARK}, "Default", None)
+        self.assertIs(profiles[0]["Use Separate Colors for Light and Dark Mode"], False)
+
     def test_pick_respects_mode_and_exclude(self):
         self.fixing("0")  # Murky (unreadable) stays out
         for _ in range(50):
@@ -852,12 +868,23 @@ class MainScriptTest(DbTest):
         self.record(*launch, "gone")
         self.main["now"] = lambda: "2026-11-05 12:30:00"
         self.record(*launch, "new")  # colored since this run started, so not in live_ids
+        self.db.execute(  # a row with no session id (added by hand): gone too
+            "INSERT INTO launches (launched_at, preset, font, size, mode, source) "
+            "VALUES ('2026-11-05 11:00:00', 'Dark One', 'Monaco', 13, 'dark', 'discovery')"
+        )
         ended = self.main["close_stale"](self.db, {"still-open"}, "2026-11-05 12:00:00")
-        self.assertEqual(ended, 1)
+        self.assertEqual(ended, 2)
         rows = self.db.execute("SELECT session_id, end_reason FROM launches ORDER BY id")
         self.assertEqual(
-            rows.fetchall(), [("still-open", None), ("gone", "unknown"), ("new", None)]
+            rows.fetchall(),
+            [("still-open", None), ("gone", "unknown"), ("new", None), (None, "unknown")],
         )
+        self.assertEqual(self.main["close_stale"](self.db, set(), "2026-11-05 12:00:00"), 1)
+        self.record(*launch, "gone-too")
+        # A None among the live ids (none today) mustn't make NOT IN match nothing: "new"
+        # (12:30) and "gone-too" are from before 13:00 and not live.
+        ended = self.main["close_stale"](self.db, {None, "x"}, "2026-11-05 13:00:00")  # pyright: ignore[reportArgumentType]  # a None on purpose
+        self.assertEqual(ended, 2)
 
     def test_changed_looks_count_apart_and_stay_out_of_the_average(self):
         for duration, reason in ((60, "closed"), (120, "closed"), (2, "changed")):
@@ -2186,6 +2213,14 @@ class TabTest(DbTest):
         self.assertEqual(
             (look.font, look.is_favorite, look.font_off), ("Menlo-Regular", True, True)
         )
+        self.assertEqual(look.stars, 2)  # Menlo's own stars, not Monaco's 4
+
+    def test_a_favorite_in_a_random_font_that_isnt_saved_keeps_the_picked_stars(self):
+        self.main["save_favorite"](self.db, "Dark One", "Monaco", 13, 4)
+        self.db.execute("UPDATE fonts SET enabled = (name = 'Menlo-Regular')")  # Monaco off
+        self.main["pick"] = lambda db, mode, exclude: ("Dark One", None, "favorite", 4)
+        look = self.main["pick_look"](self.db, "dark", set())
+        self.assertEqual((look.font, look.is_favorite, look.stars), ("Menlo-Regular", False, 4))
 
     def test_a_favorite_in_its_saved_font_has_no_note_even_with_others_off(self):
         self.fixing("0")
@@ -2211,6 +2246,64 @@ class TabTest(DbTest):
         out = self.run_quietly(self.main["favorites_changed"](self.app, self.store, "Dark One"))
         self.assertEqual(self.variables["user.is_favorite"], 1)  # unknown, so not changed
         self.assertEqual(out.count("database is locked"), 1)
+
+    def test_a_profile_with_separate_light_and_dark_colors_is_left_alone(self):
+        self.fixing("0")
+        self.tab({})
+        self.profile.use_separate_colors_for_light_and_dark_mode = True
+        color = self.main["color_one_at_a_time"]
+        out = self.run_quietly(color(None, self.app, self.store, self.session))
+        out += self.run_quietly(color(None, self.app, self.store, self.session))
+        self.assertEqual(out.count("Use separate colors for light and dark mode"), 1)
+        self.profile.async_set_color_preset.assert_not_called()
+        self.assertEqual(self.variables, {})
+        self.assertEqual(self.db.execute("SELECT count(*) FROM launches").fetchone(), (0,))
+        out = self.run_quietly(color(None, self.app, self.store, self.session, reroll=True))
+        self.assertIn("Use separate colors for light and dark mode", out)  # by hand: every time
+        self.profile.use_separate_colors_for_light_and_dark_mode = None  # turned off: colored
+        self.run_quietly(color(None, self.app, self.store, self.session))
+        self.assertIn("user.color_preset", self.variables)
+        self.profile.use_separate_colors_for_light_and_dark_mode = True  # and on again: said again
+        self.variables.clear()
+        out = self.run_quietly(color(None, self.app, self.store, self.session))
+        self.assertIn("Use separate colors for light and dark mode", out)
+
+    def test_a_favorites_profile_is_kept_even_if_it_inherits_separate_colors(self):
+        # Before startup rewrites the profiles file, a favorite's profile can inherit the
+        # setting from its parent; it's still the favorite's look.
+        self.main["save_favorite"](self.db, "Dark One", "Monaco", 13, 4)
+        self.tab({})
+        self.profile.original_guid = self.main["favorite_guid"]("Dark One", "Monaco")
+        self.profile.use_separate_colors_for_light_and_dark_mode = True
+        color = self.main["color_one_at_a_time"]
+        out = self.run_quietly(color(None, self.app, self.store, self.session))
+        self.assertNotIn("Use separate colors", out)
+        self.assertEqual(self.variables["user.color_preset"], "Dark One")
+
+    def test_favorite_marks_update_on_buried_sessions_too(self):
+        self.main["save_favorite"](self.db, "Dark One", "Monaco", 13, 4)
+        self.tab({"user.color_preset": "Dark One", "user.font": "Monaco", "user.is_favorite": 0})
+        self.app.buried_sessions = [self.session]  # Session > Bury Session; no open windows
+        self.main["spawn"] = lambda what, coro: coro.close()
+        self.run_quietly(self.main["favorites_changed"](self.app, self.store, "Dark One"))
+        self.assertEqual(self.variables["user.is_favorite"], 1)
+
+    def test_favorite_marks_that_hang_are_given_up_and_the_sync_still_runs(self):
+        self.tab({"user.color_preset": "Dark One"})
+
+        async def lost_reply(_name):
+            await asyncio.sleep(3600)
+
+        self.session.async_get_variable.side_effect = lost_reply
+        tab = types.SimpleNamespace(all_sessions=[self.session, self.session])
+        self.app.windows = [types.SimpleNamespace(tabs=[tab])]
+        self.main["FAVORITES_MARK_TIMEOUT_S"] = 0.05
+        spawned = []
+        self.main["spawn"] = lambda what, coro: spawned.append(what) or coro.close()
+        marks = self.main["favorites_changed"](self.app, self.store, "Dark One")
+        out = self.run_quietly(asyncio.wait_for(marks, 5))  # the old code hung: fail, not hang
+        self.assertEqual(out.count("favorite marks not all updated within 0.05 s"), 1)
+        self.assertEqual(spawned, ["favorite profiles sync"])
 
     def test_a_failing_tab_doesnt_stop_the_favorites_check(self):
         self.tab({"user.color_preset": "Dark One", "user.font": "Monaco", "user.is_favorite": 1})

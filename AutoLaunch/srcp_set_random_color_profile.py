@@ -13,7 +13,8 @@ current look; "Remove profile from favorites" (right-click; hidden on non-favori
 iTerm2 supports API protocol 1.23+) un-stars it; "Change to another profile" (right-click)
 re-rolls the session's look; "Never show this profile" (right-click) hides the preset and
 re-rolls (Scripts > srcp_never_show.py undoes it). Every favorite is also an
-iTerm2 profile ("Kibble - Menlo"), kept in a Dynamic Profiles file.
+iTerm2 profile ("Kibble - Menlo"), kept in a Dynamic Profiles file. Tabs of a profile with
+"Use separate colors for light and dark mode" on are left as they are (the Console says so).
 """
 
 from __future__ import annotations
@@ -73,7 +74,7 @@ except ImportError as e:
     )
     sys.exit(1)
 
-VERSION = "0.13.0"  # bump on every change, so the Console shows which code is running
+VERSION = "0.13.1"  # bump on every change, so the Console shows which code is running
 LOCK_PATH = os.path.join(DATA_DIR, ".lock")
 # How often the running script checks whether a snapshot is due. asyncio's clock stops while
 # the Mac sleeps, so check often (it's a few file stats) to keep it close to daily.
@@ -121,6 +122,15 @@ def warn_once(key: str, msg: str) -> None:
     if key not in _warned:
         _warned.add(key)
         log("warn", msg)
+
+
+def warn(key: str, msg: str, every: bool) -> None:
+    """Log msg every time (asked for by hand, where a dialog says to look in the Console), or
+    once per key."""
+    if every:
+        log("warn", msg)
+    else:
+        warn_once(key, msg)
 
 
 def now() -> str:
@@ -342,6 +352,7 @@ class Look(NamedTuple):
     preset: str
     font: str | None  # the favorite's font, else a random enabled one; None if there's none
     source: str  # 'favorite' or 'discovery'
+    # The picked favorite's, or the random font's own when that (preset, font) is one too.
     stars: int | None
     fixes_json: str | None
     built_hash: str | None
@@ -363,6 +374,10 @@ def pick_look(db: sqlite3.Connection, mode: str, exclude: set[str]) -> Look | No
     else:
         preset, saved, source, stars = choice
         font = saved or random_font(db)
+        font_off = source == "favorite" and saved is None  # pick() drops a disabled saved font
+        font_stars = favorite_stars(db, preset, font) if font else None
+        if font_off and font_stars is not None:
+            stars = font_stars  # the random font is a favorite too: show its own stars
         look = Look(
             preset,
             font,
@@ -370,8 +385,8 @@ def pick_look(db: sqlite3.Connection, mode: str, exclude: set[str]) -> Look | No
             stars,
             *look_fixes(db, preset),
             nonascii_font(db),
-            bool(font) and is_favorite(db, preset, font),
-            source == "favorite" and saved is None,  # pick() drops a disabled saved font
+            font_stars is not None,
+            font_off,
         )
     db.execute("COMMIT")
     return look
@@ -513,17 +528,14 @@ def close_stale(db: sqlite3.Connection, live_ids: set[str], started: str) -> int
     Only launches from before this script started: sessions colored since then aren't in
     live_ids, which was taken at startup.
     """
-    stale = [
-        (i,)
-        for i, sid in db.execute(
-            "SELECT id, session_id FROM launches "
-            "WHERE ended_at IS NULL AND end_reason IS NULL AND launched_at < ?",
-            (started,),
-        )
-        if sid not in live_ids
-    ]
-    db.executemany("UPDATE launches SET end_reason = 'unknown' WHERE id = ?", stale)
-    return len(stale)
+    # The ids as one JSON list; empty ones dropped, since a NULL in NOT IN matches nothing.
+    live = json.dumps([i for i in live_ids if i])
+    return db.execute(  # one statement, so one transaction
+        "UPDATE launches SET end_reason = 'unknown' "
+        "WHERE ended_at IS NULL AND end_reason IS NULL AND launched_at < ? "
+        "AND (session_id IS NULL OR session_id NOT IN (SELECT value FROM json_each(?)))",
+        (started, live),
+    ).rowcount
 
 
 def preset_info(
@@ -537,22 +549,14 @@ def preset_info(
         "WHERE preset = ? GROUP BY preset",
         (preset,),
     ).fetchone()
-    stars = db.execute(
-        "SELECT stars FROM favorites WHERE preset = ? AND font = ?", (preset, font)
-    ).fetchone()
-    return stats, stars[0] if stars else None
+    return stats, favorite_stars(db, preset, font)
 
 
 def log_rating(
     db: sqlite3.Connection, preset: str, font: str | None, action: str, stars: int | None
 ) -> None:
     """Add a ratings row (history)."""
-    previous = None
-    if font is not None:
-        row = db.execute(
-            "SELECT stars FROM favorites WHERE preset = ? AND font = ?", (preset, font)
-        ).fetchone()
-        previous = row[0] if row else None
+    previous = favorite_stars(db, preset, font) if font is not None else None
     db.execute(
         # OR IGNORE: a second event for the same look in the same second would hit the
         # ratings_event unique index and roll back the whole save; history is best-effort.
@@ -603,12 +607,16 @@ def favorite_fonts(db: sqlite3.Connection, preset: str) -> list[tuple[str, int]]
     ]
 
 
+def favorite_stars(db: sqlite3.Connection, preset: str, font: str) -> int | None:
+    """The stars of (preset, font), or None if it isn't a favorite."""
+    row = db.execute(
+        "SELECT stars FROM favorites WHERE preset = ? AND font = ?", (preset, font)
+    ).fetchone()
+    return row[0] if row else None
+
+
 def is_favorite(db: sqlite3.Connection, preset: str, font: str) -> bool:
-    return bool(
-        db.execute(
-            "SELECT 1 FROM favorites WHERE preset = ? AND font = ?", (preset, font)
-        ).fetchone()
-    )
+    return favorite_stars(db, preset, font) is not None
 
 
 def favorite_guid(preset: str, font: str) -> str:
@@ -734,6 +742,8 @@ def favorite_profiles(
                 "Guid": favorite_guid(row.preset, row.font),
                 "Dynamic Profile Parent Name": parent,
                 "Normal Font": f"{row.font} {size_text}",
+                # Off: with it on, iTerm2 draws the light/dark color keys, not these.
+                "Use Separate Colors for Light and Dark Mode": False,
                 **(
                     {"Use Non-ASCII Font": True, "Non Ascii Font": f"{fallback} {size_text}"}
                     if fallback
@@ -923,6 +933,22 @@ def took(started: float) -> str:
     return f" ({(time.monotonic() - started) * 1000:.0f} ms)"
 
 
+def skips_separate_colors(profile: iterm2.Profile, reroll: bool) -> bool:
+    """True if the profile draws its own light/dark colors (a preset wouldn't show); says so
+    once per profile (again if it's turned back on later), every time on a re-roll."""
+    key = f"separate-{profile.name}"
+    if not profile.use_separate_colors_for_light_and_dark_mode:
+        _warned.discard(key)
+        return False
+    why = (
+        f'profile {profile.name!r} has "Use separate colors for light and dark mode" on '
+        "(Settings > Profiles > Colors), so its tabs are left as is; turn it off to have "
+        "them colored (see Troubleshooting in the README)"
+    )
+    warn(key, why, every=reroll)
+    return True
+
+
 async def color_session(
     connection: iterm2.Connection,
     app: iterm2.App,
@@ -944,6 +970,8 @@ async def color_session(
     theme, profile = await asyncio.gather(app.async_get_theme(), session.async_get_profile())
     mode = "dark" if "dark" in theme else "light"
     if not reroll:
+        # Before the separate-colors check: a favorite's own profile turns that setting off,
+        # but until startup rewrites the file it may inherit it from its parent profile.
         kept = await keep_favorite_profile(store, session, profile, mode)
         if kept:
             launch, adjusted = kept
@@ -955,15 +983,18 @@ async def color_session(
                 f"{launch.font} {launch.size}{note}{took(started)}",
             )
             return launch
+    if skips_separate_colors(profile, reroll):
+        return None
     exclude: set[str] = {current} if current else set()  # a re-roll never gives the same back
     for _ in range(MISSING_PICKS):
         # A DB failure raises DbUnavailable, which color_one_at_a_time handles.
         look = await store.call(pick_look, mode, exclude)
         if look is None:
-            if reroll:  # asked for by hand, and the dialog says to look here: every time
-                log("warn", f"nothing left to pick: no {mode} presets; this tab keeps its look")
+            if reroll:
+                why = f"nothing left to pick: no {mode} presets; this tab keeps its look"
             else:
-                warn_once(f"empty-{mode}", f"no {mode} presets to pick from; sessions left as is")
+                why = f"no {mode} presets to pick from; sessions left as is"
+            warn(f"empty-{mode}", why, every=reroll)
             return None
         preset = await get_preset(connection, look.preset)
         if preset:
@@ -1083,7 +1114,7 @@ async def color_one_at_a_time(
 
 # How often the favorites' profiles are checked for changes made outside the dialogs (edits
 # in sqlite3, an export restored, a rebuild). Off the tab path: a rewrite reads all of
-# iTerm2's settings (about 0.3 s, or up to 30 s if stuck).
+# iTerm2's settings (0.4-0.6 s, measured 2026-11-05; up to 30 s if stuck).
 SYNC_EVERY_S = 30
 
 
@@ -1129,6 +1160,11 @@ async def sync_and_log(store: Store) -> int | None:
     return count
 
 
+# How long favorites_changed spends on the open tabs' marks before giving up on the rest (a
+# lost iTerm2 reply would otherwise hold the dialog's task, and its re-roll, forever).
+FAVORITES_MARK_TIMEOUT_S = 15
+
+
 async def favorites_changed(app: iterm2.App, store: Store, preset: str) -> None:
     """Update user.is_favorite on open sessions showing preset, and the profiles file."""
 
@@ -1137,7 +1173,7 @@ async def favorites_changed(app: iterm2.App, store: Store, preset: str) -> None:
     async def update(session: iterm2.Session) -> None:
         nonlocal db_failed
         try:
-            if db_failed or await session.async_get_variable("user.color_preset") != preset:
+            if db_failed:
                 return
             font = await session.async_get_variable("user.font")
             fav = await store.call(is_favorite, preset, font) if font else False
@@ -1150,8 +1186,24 @@ async def favorites_changed(app: iterm2.App, store: Store, preset: str) -> None:
             log("warn", f"favorite mark not updated on session {session.session_id}: {e!r}")
 
     sessions = [s for w in app.windows for t in w.tabs for s in t.all_sessions]
-    for session in sessions:  # one at a time: they queue on Store.lock anyway
-        await update(session)
+    sessions += app.buried_sessions  # Session > Bury Session
+    try:
+        async with asyncio.timeout(FAVORITES_MARK_TIMEOUT_S):
+            # Every tab's preset at once (an error, e.g. a tab closed meanwhile, never
+            # matches); then the tabs showing it, one at a time, as each makes a DB call.
+            shown = await asyncio.gather(
+                *(s.async_get_variable("user.color_preset") for s in sessions),
+                return_exceptions=True,
+            )
+            for session, name in zip(sessions, shown, strict=True):
+                if name == preset:
+                    await update(session)
+    except TimeoutError:
+        log(
+            "warn",
+            f"favorite marks not all updated within {FAVORITES_MARK_TIMEOUT_S} s "
+            "(iTerm2 or the DB was busy); some tabs' Remove item may be out of date",
+        )
     # In the background: a rewrite reads all of iTerm2's settings, and the dialog's re-roll
     # shouldn't wait for it. sync_lock keeps syncs from overlapping.
     spawn("favorite profiles sync", sync_and_log(store))
@@ -1559,7 +1611,7 @@ async def startup(
             await color_one_at_a_time(connection, app, store, session)
         except Exception as e:  # one session must not stop the rest, or startup
             log("warn", f"coloring open session failed: {e!r}")
-    # Last: parsing iTerm2's settings (about 0.3 s, holding Python's GIL) slows every coloring
+    # Last: parsing iTerm2's settings (0.4-0.6 s, holding Python's GIL) slows every coloring
     # that overlaps it, so the tabs open at launch go first. With no DB it syncs nothing.
     await sync_and_log(store)
 

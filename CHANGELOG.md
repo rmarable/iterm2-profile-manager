@@ -4,6 +4,9 @@ What changed for someone using iTerm2 Profile Manager, newest first. Releases up
 
 ## Unreleased
 
+- Tabs of a profile with "Use separate colors for light and dark mode" on are left as they are, with one Console line saying how to turn it off, instead of getting colors that don't show. Favorites' profiles have that setting off.
+- After you save or remove a favorite, **Remove profile from favorites** now shows or hides correctly in buried sessions (Session > Bury Session) too.
+- A favorite opened in another of its saved fonts, because its own font was turned off, shows that font's stars.
 - A tab closed while one of the script's dialogs was open no longer prints a traceback in the Console.
 - A database rebuilt by newer scripts while the main script runs is noticed right away, and the Console says to restart the script, instead of the database being read as if nothing had changed. This also works after an earlier "rebuild it" message.
 - "Change to another profile" says so in a dialog when the tab couldn't get a new look, instead of only in the Console.
