@@ -1260,6 +1260,88 @@ class SnapshotTest(DbTest):
             self.main["daily_snapshot"](self.db)
         self.assertEqual(out.getvalue().count("time in the future"), 1)
 
+    def test_a_damaged_db_is_not_snapshotted(self):
+        db_path = os.path.join(self.tmp, "damaged", "schemes.db")
+        os.makedirs(os.path.dirname(db_path))
+        with contextlib.closing(sqlite3.connect(db_path)) as db:
+            db.execute("CREATE TABLE t (x)")
+            db.executemany("INSERT INTO t VALUES (?)", [(b"x" * 100,)] * 2000)
+            db.commit()
+        page = 4096
+        with open(db_path, "r+b") as f:
+            f.seek(3 * page)
+            f.write(b"\xff" * page)  # one page of the table overwritten
+        with self.assertRaises(srcp_db_backup.DamagedDb):
+            srcp_db_backup.snapshot_if_due(db_path)
+        self.assertEqual(os.listdir(os.path.dirname(db_path)), ["schemes.db"])  # no backups/
+        self.assertEqual(srcp_db_backup.check_db(self.db_path), "")  # a sound one passes
+
+    def test_the_main_script_warns_once_about_a_damaged_db_until_it_passes(self):
+        out = io.StringIO()
+        checks = iter(["page 3: btree damaged", "page 3: btree damaged", "", "bad again"])
+        with (
+            mock.patch.object(srcp_db_backup, "check_db", lambda *_: next(checks)),
+            contextlib.redirect_stdout(out),
+        ):
+            for _ in range(2):
+                self.assertIsNone(self.main["daily_snapshot"](self.db))
+            self.assertEqual(self.snapshots(), [])
+            self.assertTrue(self.main["daily_snapshot"](self.db))  # passes: a snapshot
+            self.backdate()
+            self.assertIsNone(self.main["daily_snapshot"](self.db))
+        # Two failures in a row: one line; the snapshot that passed re-arms it.
+        self.assertEqual(out.getvalue().count("fails its integrity check"), 2)
+        self.assertIn("(page 3: btree damaged)", out.getvalue())
+
+    def test_a_check_that_passes_re_arms_the_warning_even_if_the_snapshot_fails(self):
+        out = io.StringIO()
+        checks = iter(["bad", "", "bad"])
+        with (
+            mock.patch.object(srcp_db_backup, "check_db", lambda *_: next(checks)),
+            contextlib.redirect_stdout(out),
+        ):
+            self.main["daily_snapshot"](self.db)
+            with (
+                mock.patch.object(srcp_db_backup, "snapshot", side_effect=OSError("full")),
+                self.assertRaises(OSError),
+            ):
+                self.main["daily_snapshot"](self.db)  # passed, then the copy failed
+            self.main["daily_snapshot"](self.db)
+        self.assertEqual(out.getvalue().count("fails its integrity check"), 2)
+
+    def test_a_busy_check_leaves_the_damaged_warning_as_it_is(self):
+        out = io.StringIO()
+        results = iter(["bad", sqlite3.OperationalError("database is locked"), "bad"])
+
+        def check(*_):
+            result = next(results)
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        with (
+            mock.patch.object(srcp_db_backup, "check_db", check),
+            contextlib.redirect_stdout(out),
+        ):
+            self.main["daily_snapshot"](self.db)
+            with self.assertRaises(sqlite3.OperationalError):
+                self.main["daily_snapshot"](self.db)  # busy: Store.call logs and retries
+            self.main["daily_snapshot"](self.db)
+        self.assertEqual(out.getvalue().count("fails its integrity check"), 1)
+
+    def test_check_db_reports_on_one_line(self):
+        class Rows:
+            def execute(self, _sql):
+                return self
+
+            def fetchmany(self, _n):
+                return [("*** in database main ***\nTree 3 page 3: bad",), ("page 4: bad",)]
+
+        self.assertEqual(
+            srcp_db_backup.check_db(self.db_path, src=Rows()),
+            "*** in database main *** Tree 3 page 3: bad; page 4: bad",
+        )
+
     def test_a_failed_check_does_not_stop_later_ones(self):
         calls = []
 
@@ -2569,7 +2651,9 @@ class TabTest(DbTest):
         self.main["save_favorite"](self.db, "Dark One", "Monaco", 13, 4)
         self.main["save_favorite"](self.db, "Dark One", "Menlo-Regular", 13, 2)
         self.db.execute("UPDATE fonts SET enabled = (name = 'Menlo-Regular')")  # Monaco off
-        self.main["pick"] = lambda db, mode, exclude: self.main["Pick"]("Dark One", None, "favorite", 4)  # Monaco's
+        self.main["pick"] = lambda db, mode, exclude: self.main["Pick"](
+            "Dark One", None, "favorite", 4
+        )  # Monaco's
         look = self.main["pick_look"](self.db, "dark", set())
         self.assertEqual(
             (look.font, look.is_favorite, look.font_off), ("Menlo-Regular", True, True)
@@ -2579,7 +2663,9 @@ class TabTest(DbTest):
     def test_a_favorite_in_a_random_font_that_isnt_saved_keeps_the_picked_stars(self):
         self.main["save_favorite"](self.db, "Dark One", "Monaco", 13, 4)
         self.db.execute("UPDATE fonts SET enabled = (name = 'Menlo-Regular')")  # Monaco off
-        self.main["pick"] = lambda db, mode, exclude: self.main["Pick"]("Dark One", None, "favorite", 4)
+        self.main["pick"] = lambda db, mode, exclude: self.main["Pick"](
+            "Dark One", None, "favorite", 4
+        )
         look = self.main["pick_look"](self.db, "dark", set())
         self.assertEqual((look.font, look.is_favorite, look.stars), ("Menlo-Regular", False, 4))
 

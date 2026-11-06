@@ -435,6 +435,37 @@ class ClaudeIntegrationTest(unittest.TestCase):
         self.assertEqual(len(kept), 1)  # yours, moved aside rather than deleted
         self.assertEqual(os.readlink(os.path.join(folder, kept[0])), "/usr/local/bin/elsewhere")
 
+    def test_enable_refuses_settings_it_cant_read_before_changing_anything(self):
+        os.makedirs(os.path.dirname(self.settings))
+        for settings, said in (
+            ([], "isn't a JSON object"),
+            ({"hooks": []}, '"hooks" isn\'t an object'),
+            ({"hooks": {"Stop": {}}}, '"hooks.Stop" isn\'t a list'),
+            ({"hooks": {"Stop": ["x"]}}, '"hooks.Stop[0]" isn\'t an object'),
+            ({"hooks": {"Stop": [{"hooks": "x"}]}}, '"hooks.Stop[0].hooks" isn\'t a list of'),
+            ({"hooks": {"Stop": [{"hooks": [1]}]}}, '"hooks.Stop[0].hooks" isn\'t a list of'),
+        ):
+            with self.subTest(settings=settings):
+                with open(self.settings, "w") as f:
+                    json.dump(settings, f)
+                before = tree(self.tmp)
+                with self.assertRaises(SystemExit) as caught:
+                    self.run_tool(prefs={})
+                self.assertIn(said, str(caught.exception))
+                self.assertEqual(tree(self.tmp), before)  # no link, no backup, no write
+        with open(self.settings, "w") as f:
+            json.dump({"hooks": {"Other": "of yours"}}, f)  # not an event this adds: fine
+        self.run_tool(prefs={})
+        self.assertEqual(os.readlink(self.link), self.src)
+
+    def test_remove_with_unreadable_settings_keeps_the_link(self):
+        self.run_tool(prefs={})  # enabled: the link is there
+        with open(self.settings, "w") as f:
+            f.write("[")  # not JSON
+        with self.assertRaises(SystemExit):
+            self.run_tool("--remove", prefs={})
+        self.assertEqual(os.readlink(self.link), self.src)  # not half removed
+
     def test_settings_backups_keep_the_newest_ten_of_ours(self):
         folder = os.path.dirname(self.settings)
         os.makedirs(folder)
@@ -787,6 +818,87 @@ class ShellDryRunTest(unittest.TestCase):
             self.assertIn(f"left in place (dated in the future): {path}\n", out)
             self.assertEqual(out.count(path + "\n"), 1)  # said once, not listed again
         self.assertIn(f"$ rm -f {main['DYNAMIC_PATH']}\n", out)  # the file the script writes
+
+    def data_section(self):
+        self.set_prefs()
+        return self.run_script("uninstall.sh", "--dryrun", "--data").split("==> Scheme DB")[1]
+
+    def test_uninstall_data_keeps_the_newest_snapshot_over_an_empty_db(self):
+        data = os.path.join(self.home, ".local", "share", "iterm2-color-schemes")
+        open(os.path.join(data, "schemes.db"), "w").close()  # 0 bytes: holds nothing
+        snapshot = os.path.join(data, "backups", "schemes-20260101T000000Z.db")
+        out = self.data_section()
+        self.assertIn("schemes.db is empty: keeping and exporting the newest snapshot", out)
+        self.assertIn(f"$ cp {snapshot} ", out)
+        self.assertNotIn("VACUUM INTO", out)
+        self.assertIn(f"$ rm -f {snapshot}\n", out)  # after it was kept, as with no DB
+
+    def test_uninstall_data_deletes_nothing_for_an_empty_db_with_a_wal(self):
+        data = os.path.join(self.home, ".local", "share", "iterm2-color-schemes")
+        open(os.path.join(data, "schemes.db"), "w").close()
+        with open(os.path.join(data, "schemes.db-wal"), "w") as f:
+            f.write("changes not yet written back")
+        for db_there in (True, False):  # an empty DB, or none, beside a -wal with data
+            with self.subTest(db_there=db_there):
+                if not db_there:
+                    os.remove(os.path.join(data, "schemes.db"))
+                self.set_prefs()
+                result = subprocess.run(
+                    [
+                        "/bin/bash",
+                        os.path.join(self.checkout, "uninstall.sh"),
+                        "--dryrun",
+                        "--data",
+                    ],
+                    env=self.env,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=120,
+                )
+                self.assertEqual(result.returncode, 1)  # a failure, said again at the end
+                self.assertIn("! The scheme DB folder was left alone", result.stderr)
+                self.assertIn("is empty or missing but", result.stderr)
+                self.assertIn("Don't open the DB", result.stderr)
+                section = result.stdout.split("==> Scheme DB")[1]
+                self.assertNotIn("$ rm", section)
+                self.assertNotIn("$ cp", section)
+
+    def test_setup_pulls_only_a_clone_of_the_schemes_repo(self):
+        self.set_prefs()
+        pull = f"$ git -C {self.repo} pull --ff-only"
+        self.assertIn(pull, self.run_script("setup.sh", "--dryrun"))
+        self.git_run("remote", "set-url", "origin", "https://example.invalid/mine.git")
+        out = self.run_script("setup.sh", "--dryrun")
+        self.assertNotIn(pull, out)
+        self.assertIn("origin: https://example.invalid/mine.git): not pulled, used as it is", out)
+
+    def test_a_scripts_folder_that_is_another_clone_is_left_alone(self):
+        scripts = os.path.join(self.home, "Library", "Application Support", "iTerm2", "Scripts")
+        os.makedirs(os.path.join(scripts, ".git"))  # a Scripts folder you keep in git yourself
+        tools = os.path.join(scripts, ".tools")
+        autolaunch = os.path.join(scripts, "AutoLaunch", "srcp_set_random_color_profile.py")
+        self.assertTrue(os.path.exists(autolaunch))  # install() put it there
+        self.set_prefs()
+        out = self.run_script("setup.sh", "--dryrun")
+        self.assertIn("==> Installing scripts into", out)  # copies: not a checkout of ours
+        self.assertIn("$ rm -f", self.run_script("uninstall.sh", "--dryrun"))
+        open(os.path.join(scripts, "setup.sh"), "w").close()  # a setup.sh of yours: still not
+        self.assertIn("==> Installing scripts into", self.run_script("setup.sh", "--dryrun"))
+        shutil.copy(os.path.join(ROOT, ".tools", "srcp_build_scheme_db.py"), tools)  # a checkout
+        out = self.run_script("setup.sh", "--dryrun")
+        self.assertIn(f"the Scripts folder, {os.path.realpath(scripts)}, is another checkout", out)
+        self.assertNotIn("retired AutoLaunch scripts", out)  # an old checkout may track them
+        self.assertNotIn(f" {scripts}/", out.split("==> Not installing")[1].split("==>")[0])
+        self.assertNotIn("$ cp ", out)
+        out = self.run_script("uninstall.sh", "--dryrun")
+        self.assertIn(f"$ mv {autolaunch} {autolaunch}.disabled", out)  # stops it, keeps it
+        self.assertIn("its files stay", out)
+        self.assertNotIn("srcp_ratings.py", out)
+        os.rename(autolaunch, autolaunch + ".disabled")  # as uninstall leaves it: still ours
+        out = self.run_script("setup.sh", "--dryrun")
+        self.assertNotIn("$ cp ", out)
+        self.assertIn(f"$ mv {autolaunch}.disabled", out)  # re-enabled, not copied over
 
     def test_uninstall_fonts_removes_only_what_setup_installed(self):
         fonts = os.path.join(self.home, "Library", "Fonts")

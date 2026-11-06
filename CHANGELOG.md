@@ -4,6 +4,12 @@ What changed for someone using iTerm2 Profile Manager, newest first. Releases up
 
 ## Unreleased
 
+- `uninstall.sh --data` no longer takes an empty (0-byte) database as the one to keep and then deletes every snapshot: it keeps the newest snapshot instead, and deletes nothing if the database is empty or missing but its `-wal` file holds data (and says so at the end, exiting with an error). When copying or exporting the database fails, it now says which step failed and what to do, and removes the half-written copy.
+- The daily snapshot skips a damaged database (one Console warning) instead of copying the damage into `backups/`, where it would push the good snapshots out over two weeks.
+- `setup.sh` and `uninstall.sh` run from a second clone no longer copy over or delete the files of a Scripts folder that is itself a clone of this repo.
+- `setup.sh` updates `~/src/iTerm2-Color-Schemes` only if it is a clone of that repo; any other repo there is used as it is.
+- `.tools/srcp_enable_claude_integration.py` stops with a message naming the problem, before changing anything, when `~/.claude/settings.json` has hooks it can't read, instead of a traceback.
+- `uninstall.sh --fonts` with no install record now says it may be a manual install, not only one from before 0.11.0.
 - Sessions buried with Session > Bury Session when the script starts are colored too.
 - If a dialog or right-click item on a tab never finishes (a reply from iTerm2 got lost), the next right-click item on that tab after 10 minutes replaces it, instead of the tab's items staying blocked until a restart.
 - **Change to another profile** on a favorite saved under an older preset name no longer lands on the same colors under the other name.

@@ -20,10 +20,16 @@ import sqlite3
 import time
 from pathlib import Path
 
+from srcp_schema import is_busy
+
 KEEP = 14
 DAY_S = 24 * 3600
 NAME_TIME = "%Y%m%dT%H%M%SZ"
 SNAPSHOT_RE = re.compile(r"schemes-(\d{8}T\d{6}Z)(?:-(\d+))?\.db")
+
+
+class DamagedDb(Exception):
+    """The DB failed PRAGMA quick_check; no snapshot was taken. str(): what the check said."""
 
 
 def snapshot_files(folder):
@@ -143,4 +149,31 @@ def snapshot_if_due(db_path, every_s=DAY_S, keep=KEEP, src=None, now=None):
     dated = [when for when, _, _ in snapshot_files(folder) if when <= now]
     if dated and now - max(dated) < every_s:
         return None
+    if os.path.exists(db_path):  # snapshot() returns None for no DB
+        problem = check_db(db_path, src)
+        if problem:
+            raise DamagedDb(problem)
     return snapshot(db_path, keep, src)
+
+
+def check_db(db_path, src=None):
+    """What PRAGMA quick_check finds wrong with db_path, on one line, or "" if nothing; through
+    src (an open connection to it) if given. The build and the main script both judge damage
+    by it. A 0-byte file passes (SQLite takes it as a new, empty DB): the build tests the size
+    itself. A busy DB raises its sqlite3 error: that's no damage, and the caller tries again."""
+    own = src is None
+    uri = Path(db_path).resolve().as_uri() + "?mode=rw"
+    conn = None
+    try:
+        conn = sqlite3.connect(uri, uri=True) if own else src
+        rows = conn.execute("PRAGMA quick_check").fetchmany(3)
+    except sqlite3.DatabaseError as e:  # not a DB, or too damaged to check at all; or busy
+        if is_busy(e):
+            raise
+        return " ".join(str(e).split())
+    finally:
+        if own and conn is not None:
+            conn.close()
+    if rows == [("ok",)]:
+        return ""
+    return " ".join("; ".join(str(r[0]) for r in rows).split())  # a row can hold newlines

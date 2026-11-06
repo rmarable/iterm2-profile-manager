@@ -151,9 +151,9 @@ insert into overrides (name, mode) values ('Some Scheme', 'dark')
 Snapshots of the database go to `backups/` beside it:
 
 - Before every rebuild
-- While the main script runs (at start, then every 15 minutes of awake time), if the newest snapshot is over a day old
+- While the main script runs (at start, then every 15 minutes of awake time), if the newest snapshot is over a day old and the database passes `PRAGMA quick_check` (a damaged one is skipped with one Console warning, so the good snapshots aren't pruned out in its place)
 
-The newest 14 are kept; `manual-*.db` snapshots are never pruned. Snapshots are aged by the UTC time in their names, not mtime; one named after now (a clock set ahead, or a file from another Mac) is neither counted nor pruned, and `uninstall.sh --data` leaves it in place and says so. Preset data can be rebuilt from iTerm2's settings; snapshots protect favorites, ratings, hidden presets, launches and settings.
+The newest 14 are kept; `manual-*.db` snapshots are never pruned. Snapshots are aged by the UTC time in their names, not mtime; one named after now (a clock set ahead, or a file from another Mac) is neither counted nor pruned, and `uninstall.sh --data` leaves it in place and says so. `uninstall.sh --data` treats an empty (0-byte) `schemes.db` as missing and keeps the newest snapshot instead. If `schemes.db` is empty or missing but its `-wal` isn't, it deletes nothing: don't open the database then (SQLite discards a `-wal` beside an empty or missing database when it opens it); follow Restore below, which sets the files aside first. If copying or exporting the database fails, it stops before deleting anything in the data folder. Preset data can be rebuilt from iTerm2's settings; snapshots protect favorites, ratings, hidden presets, launches and settings.
 
 ### Manual snapshot
 
@@ -233,7 +233,7 @@ It doesn't touch iTerm2's AI chat settings or API key. `uninstall.sh` doesn't un
 
 ### Clone into the Scripts folder
 
-iTerm2 runs scripts only from `~/Library/Application Support/iTerm2/Scripts/`, and starts everything in its `AutoLaunch/` folder at launch. Instead of letting `setup.sh` copy the scripts there, you can clone straight into it (it must be missing or empty). Edits and `git pull` then apply with no copy step; restart the main script from the Scripts menu after pulling.
+iTerm2 runs scripts only from `~/Library/Application Support/iTerm2/Scripts/`, and starts everything in its `AutoLaunch/` folder at launch. Instead of letting `setup.sh` copy the scripts there, you can clone straight into it (it must be missing or empty). Edits and `git pull` then apply with no copy step; restart the main script from the Scripts menu after pulling. `setup.sh` and `uninstall.sh` run from another clone see that the Scripts folder is a checkout (a `.git` and `.tools/srcp_build_scheme_db.py`, which `setup.sh` never copies there) and never copy over or remove its files; uninstall only renames its main script to `.py.disabled`.
 
 ```sh
 git clone https://github.com/rmarable/iterm2-profile-manager.git ~/Library/Application\ Support/iTerm2/Scripts
@@ -273,7 +273,7 @@ Double-clicking an `.itermcolors` file also imports it, with one dialog per file
 | `~/.local/share/iterm2-profile-manager/prefs-backups/com.googlecode.iterm2-<UTC time>.plist` | iTerm2 settings backups, newest 10 kept (by the time in the name; local time before v0.12). Restore one with iTerm2 quit: `defaults import com.googlecode.iterm2 <file>`. Versions before 0.6.7 wrote them to `~/Library/Preferences/com.googlecode.iterm2.backup-*.plist`; those can be deleted. |
 | `$SRC_DIR/iTerm2-Color-Schemes` (default `~/src`) | Schemes repo clone. |
 | `~/Library/Fonts` | Copied Terminal.app fonts. |
-| `~/.local/share/iterm2-profile-manager/installed.txt` | What `setup.sh` installed: `font <file>`, `fonthash <sha256> <file>` (the copy it installed) and `cask <name>` lines, so `uninstall.sh --fonts` removes only those, and only while unchanged. `setup.sh` updates a font only while it still has the recorded hash; any other copy is left alone (to get Terminal.app's copy, delete yours in Font Book and run `setup.sh` again; that is also the way out for a font recorded by 0.11.0, before hashes, that Terminal.app has since changed). The hash comes before the name, so names with spaces survive. An install from before 0.11.0 has no record, and keeps its fonts on uninstall. |
+| `~/.local/share/iterm2-profile-manager/installed.txt` | What `setup.sh` installed: `font <file>`, `fonthash <sha256> <file>` (the copy it installed) and `cask <name>` lines, so `uninstall.sh --fonts` removes only those, and only while unchanged. `setup.sh` updates a font only while it still has the recorded hash; any other copy is left alone (to get Terminal.app's copy, delete yours in Font Book and run `setup.sh` again; that is also the way out for a font recorded by 0.11.0, before hashes, that Terminal.app has since changed). The hash comes before the name, so names with spaces survive. An install from before 0.11.0, or one done by hand, has no record, and keeps its fonts on uninstall. |
 | `~/srcp-curation-<time>.sql`, `~/srcp-curation-<time>.db` | Written by `uninstall.sh --data`: the ratings export, and a copy of the whole database. |
 
 ### Repo files

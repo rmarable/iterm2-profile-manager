@@ -63,11 +63,11 @@ Setup changes iTerm2's settings, and iTerm2 overwrites them when it quits, so ru
 
 1. Copies SF Mono and SF Mono Terminal from Terminal.app into `~/Library/Fonts`. A different copy you already have there is left alone (delete it in Font Book and re-run to get Terminal.app's).
 2. Installs MesloLGS Nerd Font via Homebrew, if installed.
-3. Clones or updates iTerm2-Color-Schemes in `~/src/iTerm2-Color-Schemes` (set `SRC_DIR` to use another folder).
+3. Clones or updates iTerm2-Color-Schemes in `~/src/iTerm2-Color-Schemes` (set `SRC_DIR` to use another folder). A folder there that isn't a clone of that repo is used as it is, not updated.
 4. Imports its schemes as iTerm2 color presets, and updates ones the repo has changed since, unless you've edited them.
 5. Builds the database the main script picks from.
 6. Binds ⌃⌥⌘S to the rating dialog.
-7. Copies the scripts into iTerm2's Scripts folder, and removes older versions' AutoLaunch scripts.
+7. Copies the scripts into iTerm2's Scripts folder (unless that folder is a clone of this repo), and removes older versions' AutoLaunch scripts.
 
 It backs up iTerm2's settings to `~/.local/share/iterm2-profile-manager/prefs-backups/com.googlecode.iterm2-<timestamp>.plist` before changing them (newest 10 kept). For a custom `SRC_DIR`, cloning straight into the Scripts folder, or a manual install, see [docs/REFERENCE.md](docs/REFERENCE.md#install-options).
 
@@ -112,7 +112,7 @@ Quit iTerm2, then from Terminal.app in the repo:
 
 | Item | Flag |
 |---|---|
-| Main script (renamed `.py.disabled` if the repo is the Scripts folder) | (default) |
+| Main script (renamed `.py.disabled` if the Scripts folder is a clone of this repo) | (default) |
 | Menu scripts copied into the Scripts folder | (default) |
 | Favorite profiles (iTerm2 drops its saved copies the next time it opens) | (default) |
 | ⌃⌥⌘S key binding (settings backed up first) | (default) |

@@ -1,7 +1,8 @@
 #!/bin/bash
 # Undo setup.sh on this Mac. By default:
 #   1. stop the AutoLaunch script from starting (delete the installed copy; in a
-#      checkout that is the Scripts folder itself, rename it to .py.disabled)
+#      checkout that is the Scripts folder itself, this one or another, rename it to
+#      .py.disabled)
 #   2. remove the srcp_ menu scripts setup.sh copied into iTerm2's Scripts folder
 #   3. remove the favorites' Dynamic Profiles file (Profiles > Favorites)
 #   4. remove the Ctrl-Opt-Cmd-S save_profile() key binding (iTerm2 prefs, backed up)
@@ -24,7 +25,7 @@
 #   ./uninstall.sh [--data] [--presets] [--fonts] [--repo] | --all
 set -euo pipefail
 
-DRYRUN=false DATA=false PRESETS=false FONTS=false REPO=false
+DRYRUN=false DATA=false PRESETS=false FONTS=false REPO=false DATA_REFUSED=false
 for arg in "$@"; do
 	case "$arg" in
 	--dryrun | --dry-run) DRYRUN=true ;;
@@ -51,6 +52,16 @@ REPO_DIR="$SRC_DIR/iTerm2-Color-Schemes"
 HERE="$(cd "$(dirname "$0")" && pwd -P)"
 SCRIPTS_DIR="$HOME/Library/Application Support/iTerm2/Scripts"
 SCRIPTS_REAL="$(cd "$SCRIPTS_DIR" 2>/dev/null && pwd -P || echo "$SCRIPTS_DIR")"
+# The Scripts folder is a checkout of this project: this one, or another clone (a .git and
+# .tools/srcp_build_scheme_db.py, which setup.sh never copies there; a Scripts folder you keep
+# in git yourself has none). Its files are tracked there, so they're never copied over or removed. The same
+# test is in setup.sh: change both.
+SCRIPTS_CHECKOUT=""
+if [[ "$HERE" == "$SCRIPTS_REAL" ]]; then
+	SCRIPTS_CHECKOUT="this checkout is the Scripts folder"
+elif [[ -e "$SCRIPTS_REAL/.git" && -f "$SCRIPTS_REAL/.tools/srcp_build_scheme_db.py" ]]; then
+	SCRIPTS_CHECKOUT="the Scripts folder, $SCRIPTS_REAL, is another checkout of this project"
+fi
 DATA_DIR="$HOME/.local/share/iterm2-color-schemes"
 DYNAMIC="$HOME/Library/Application Support/iTerm2/DynamicProfiles/iterm2-profile-manager.plist"
 TERMINAL_FONTS="/System/Applications/Utilities/Terminal.app/Contents/Resources/Fonts"
@@ -137,8 +148,9 @@ fi
 
 echo "==> AutoLaunch script"
 AUTOLAUNCH="$SCRIPTS_DIR/AutoLaunch/srcp_set_random_color_profile.py"
-if [[ "$HERE" == "$SCRIPTS_REAL" ]]; then
-	# This checkout is the Scripts folder: keep the code, just stop it autostarting.
+if [[ -n "$SCRIPTS_CHECKOUT" ]]; then
+	# A checkout is the Scripts folder: keep the code, just stop it autostarting.
+	echo "  ($SCRIPTS_CHECKOUT)"
 	if [[ -e "$AUTOLAUNCH" ]]; then
 		run mv "$AUTOLAUNCH" "$AUTOLAUNCH.disabled"
 	else
@@ -149,8 +161,8 @@ else
 fi
 
 echo "==> Menu scripts"
-if [[ "$HERE" == "$SCRIPTS_REAL" ]]; then
-	echo "  = this checkout is the Scripts folder; its files stay (delete the checkout to remove them)"
+if [[ -n "$SCRIPTS_CHECKOUT" ]]; then
+	echo "  = $SCRIPTS_CHECKOUT; its files stay (delete that checkout to remove them)"
 else
 	run rm -f "$SCRIPTS_DIR/srcp_score_presets.py" "$SCRIPTS_DIR/srcp_ratings.py" \
 		"$SCRIPTS_DIR/srcp_never_show.py" "$SCRIPTS_DIR/.tools/srcp_favorites.py" \
@@ -201,22 +213,52 @@ if $DATA; then
 		fi
 	done
 	# A copy of the whole DB next to the export, so nothing is lost if the export isn't enough.
-	keep_file="${export_file%.sql}.db" kept=false
-	if [[ -e "$DATA_DIR/schemes.db" ]]; then
+	keep_file="${export_file%.sql}.db" kept=false refused=false db="$DATA_DIR/schemes.db"
+	if [[ -e "$keep_file" || -e "$export_file" ]]; then # so a failure below removes only ours
+		echo "  ! ${export_file%.sql}.* already exists; run this again in a second" >&2
+		exit 1
+	fi
+	# Stop before anything in DATA_DIR is deleted, saying which step failed (and dropping what
+	# it left half written).
+	data_failed() {
+		rm -f "$keep_file" "$export_file"
+		echo "  ! $1 failed, so nothing in $DATA_DIR was deleted, and the rest of this run" >&2
+		echo "    (--fonts, --repo) didn't happen. If the error above says the DB is damaged or" >&2
+		echo "    not a database, restore a snapshot (docs/REFERENCE.md, Restore); then run this again." >&2
+		exit 1
+	}
+	# An empty (0-byte) schemes.db holds nothing, so it counts as none: otherwise the empty
+	# file would be kept and every snapshot deleted.
+	if [[ -s "$db" ]]; then
 		# VACUUM INTO: a consistent copy, -wal changes included, in rollback-journal mode (no
 		# -wal/-shm left beside it). A ' in the path is written '' in SQL.
 		q="'"
-		run sqlite3 "$DATA_DIR/schemes.db" "VACUUM INTO '${keep_file//$q/$q$q}';"
-		run python3 "$HERE/.tools/srcp_export_curation.py" -o "$export_file"
+		run sqlite3 "$db" "VACUUM INTO '${keep_file//$q/$q$q}';" || data_failed "Copying $db"
+		run python3 "$HERE/.tools/srcp_export_curation.py" -o "$export_file" ||
+			data_failed "Exporting $db"
 		kept=true
-	elif [[ -n "$newest_backup" ]]; then
-		echo "  (no schemes.db: keeping and exporting the newest snapshot instead)"
-		run cp "$newest_backup" "$keep_file"
-		run python3 "$HERE/.tools/srcp_export_curation.py" --db "$newest_backup" -o "$export_file"
-		kept=true
+	elif [[ -s "$db-wal" ]]; then
+		# The data may all be in the -wal still, and SQLite discards a -wal beside an empty or
+		# missing DB when it opens it (checked 2026-11-06): don't judge, and don't open it.
+		echo "  ! $db is empty or missing but $db-wal holds data: nothing here deleted." >&2
+		echo "    Don't open the DB (SQLite would discard that -wal). Set the files aside and copy" >&2
+		echo "    the newest snapshot in (docs/REFERENCE.md, Restore), then run this again." >&2
+		refused=true
+		DATA_REFUSED=true
+	else
+		if [[ -e "$db" ]]; then none="schemes.db is empty"; else none="no schemes.db"; fi
+		if [[ -n "$newest_backup" ]]; then
+			echo "  ($none: keeping and exporting the newest snapshot instead)"
+			run cp "$newest_backup" "$keep_file" || data_failed "Copying $newest_backup"
+			run python3 "$HERE/.tools/srcp_export_curation.py" --db "$newest_backup" -o "$export_file" ||
+				data_failed "Exporting $newest_backup"
+			kept=true
+		fi
 	fi
-	if ! $kept && ((snapshots > 0)); then
-		echo "  ! no schemes.db, and no snapshot to keep (all dated in the future?): left alone"
+	if $refused; then
+		:
+	elif ! $kept && ((snapshots > 0)); then
+		echo "  ! $none, and no snapshot to keep (all dated in the future?): left alone"
 	elif [[ -d "$DATA_DIR" ]]; then
 		# Then (set -e: only if those worked) delete what the scripts made, not the folder.
 		for f in "${DB_FILES[@]}"; do
@@ -250,12 +292,13 @@ fi
 
 if $FONTS; then
 	# Only what setup.sh's record lists. No record means an install from before 0.11.0, when
-	# it kept none, so nothing can be told apart from fonts of yours: all are left alone.
+	# it kept none, or fonts installed by hand: nothing can be told apart from fonts of yours,
+	# so all are left alone.
 	installed() { [[ -f "$MANIFEST" ]] && grep -qxF "$1" "$MANIFEST"; }
 	still_listed=() # what the record lists that's still there afterwards
 	echo "==> Terminal.app fonts in $FONT_DIR (only ones setup.sh installed, unchanged since)"
 	if [[ ! -f "$MANIFEST" ]]; then
-		echo "  (no record of what setup.sh installed, from before 0.11.0: all left alone;"
+		echo "  (no record of what setup.sh installed: from before 0.11.0, or set up by hand; all left alone;"
 		echo "   remove fonts by hand in Font Book, and brew uninstall --cask font-meslo-lg-nerd-font)"
 	fi
 	# Not grep -q: with pipefail, an early exit can turn defaults' SIGPIPE into "no match".
@@ -344,6 +387,7 @@ fi
 
 if $REPO; then
 	echo "==> Schemes repo: $REPO_DIR"
+	# The same test is in setup.sh (before its pull): change both.
 	if [[ -d "$REPO_DIR/.git" ]] && [[ "$(git -C "$REPO_DIR" remote get-url origin 2>/dev/null)" == "$REPO_URL" ]]; then
 		keep="$(repo_keep_reason "$REPO_DIR")"
 		if [[ -n "$keep" ]]; then
@@ -358,6 +402,11 @@ if $REPO; then
 	fi
 fi
 
+if $DATA_REFUSED; then
+	# Again at the end, where it can't scroll past, and as a failure.
+	echo "! The scheme DB folder was left alone: its -wal holds data (see the --data lines above)." >&2
+	exit 1
+fi
 $DRYRUN && exit 0
 cat <<'EOF'
 

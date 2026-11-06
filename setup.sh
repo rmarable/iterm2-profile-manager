@@ -7,8 +7,8 @@
 #      ones the repo changed since, unless you edited them
 #   5. build the light/dark scheme database the AutoLaunch script picks from
 #   6. bind Ctrl-Opt-Cmd-S to the "Save/update this profile" dialog
-#   7. install the scripts into iTerm2's Scripts folder, if this checkout isn't
-#      already that folder, and remove retired AutoLaunch scripts
+#   7. install the scripts into iTerm2's Scripts folder, unless it is a checkout of this
+#      project (this one or another), and remove retired AutoLaunch scripts
 #
 # Run from Terminal.app with iTerm2 quit (it refuses otherwise):
 #   ./setup.sh
@@ -38,6 +38,17 @@ REPO_DIR="$SRC_DIR/iTerm2-Color-Schemes"
 # -P: run via the ~/.config/iterm2/AppSupport symlink, this still matches SCRIPTS_DIR.
 HERE="$(cd "$(dirname "$0")" && pwd -P)"
 SCRIPTS_DIR="$HOME/Library/Application Support/iTerm2/Scripts"
+SCRIPTS_REAL="$(cd "$SCRIPTS_DIR" 2>/dev/null && pwd -P || echo "$SCRIPTS_DIR")"
+# The Scripts folder is a checkout of this project: this one, or another clone (a .git and
+# .tools/srcp_build_scheme_db.py, which setup.sh never copies there; a Scripts folder you keep
+# in git yourself has none). Its files are tracked there, so they're never copied over or removed. The same
+# test is in uninstall.sh: change both.
+SCRIPTS_CHECKOUT=""
+if [[ "$HERE" == "$SCRIPTS_REAL" ]]; then
+	SCRIPTS_CHECKOUT="this checkout is the Scripts folder"
+elif [[ -e "$SCRIPTS_REAL/.git" && -f "$SCRIPTS_REAL/.tools/srcp_build_scheme_db.py" ]]; then
+	SCRIPTS_CHECKOUT="the Scripts folder, $SCRIPTS_REAL, is another checkout of this project"
+fi
 TERMINAL_FONTS="/System/Applications/Utilities/Terminal.app/Contents/Resources/Fonts"
 FONT_DIR="$HOME/Library/Fonts"
 DRY_FLAG=()
@@ -153,7 +164,14 @@ fi
 echo "==> Color schemes repo: $REPO_DIR"
 run mkdir -p "$SRC_DIR"
 if [[ -d "$REPO_DIR/.git" ]]; then
-	run git -C "$REPO_DIR" pull --ff-only || echo "  (pull failed; using the existing checkout)"
+	# Only pull a clone of the schemes repo: a repo of yours that happens to sit there is used
+	# as it is. The same test is in uninstall.sh (--repo): change both.
+	origin="$(git -C "$REPO_DIR" remote get-url origin 2>/dev/null || true)"
+	if [[ "$origin" == "$REPO_URL" ]]; then
+		run git -C "$REPO_DIR" pull --ff-only || echo "  (pull failed; using the existing checkout)"
+	else
+		echo "  ! not a clone of $REPO_URL (origin: ${origin:-none}): not pulled, used as it is"
+	fi
 else
 	run git clone --depth 1 "$REPO_URL" "$REPO_DIR"
 fi
@@ -175,7 +193,12 @@ if ! python3 "$HERE/.tools/srcp_add_key_binding.py" "${DRY_FLAG[@]+"${DRY_FLAG[@
 		"action Invoke Script Function, function save_profile())"
 fi
 
-if [[ "$HERE" != "$(cd "$SCRIPTS_DIR" 2>/dev/null && pwd -P || echo "$SCRIPTS_DIR")" ]]; then
+if [[ -n "$SCRIPTS_CHECKOUT" && "$HERE" != "$SCRIPTS_REAL" ]]; then
+	echo "==> Not installing scripts into $SCRIPTS_DIR"
+	echo "  = $SCRIPTS_CHECKOUT, and iTerm2 runs that one: nothing copied into it."
+	echo "    Bring it to this checkout's version (git pull there) and restart the main script,"
+	echo "    or it may refuse the database just built here as newer than it."
+elif [[ -z "$SCRIPTS_CHECKOUT" ]]; then
 	echo "==> Installing scripts into $SCRIPTS_DIR"
 	run mkdir -p "$SCRIPTS_DIR/AutoLaunch"
 	run mkdir -p "$SCRIPTS_DIR/.tools"
@@ -187,16 +210,19 @@ if [[ "$HERE" != "$(cd "$SCRIPTS_DIR" 2>/dev/null && pwd -P || echo "$SCRIPTS_DI
 		"$HERE/.tools/srcp_iterm_prefs.py" "$SCRIPTS_DIR/.tools/"
 	run cp "$HERE/AutoLaunch/srcp_set_random_color_profile.py" "$SCRIPTS_DIR/AutoLaunch/"
 fi
-# uninstall.sh disables the script this way when this checkout is the Scripts folder.
+# uninstall.sh disables the script this way when a checkout is the Scripts folder.
 if [[ -e "$SCRIPTS_DIR/AutoLaunch/srcp_set_random_color_profile.py.disabled" ]] &&
 	[[ ! -e "$SCRIPTS_DIR/AutoLaunch/srcp_set_random_color_profile.py" ]]; then
 	echo "==> Re-enabling the AutoLaunch script uninstall.sh disabled"
 	run mv "$SCRIPTS_DIR/AutoLaunch/srcp_set_random_color_profile.py.disabled" \
 		"$SCRIPTS_DIR/AutoLaunch/srcp_set_random_color_profile.py"
 fi
-echo "==> Removing retired AutoLaunch scripts (random_profile_color.py, pre-srcp_ names)"
-run rm -f "$SCRIPTS_DIR/AutoLaunch/random_profile_color.py" \
-	"$SCRIPTS_DIR/AutoLaunch/set_random_color_profile.py"
+# Not in another checkout: an old one may still track them.
+if [[ -z "$SCRIPTS_CHECKOUT" || "$HERE" == "$SCRIPTS_REAL" ]]; then
+	echo "==> Removing retired AutoLaunch scripts (random_profile_color.py, pre-srcp_ names)"
+	run rm -f "$SCRIPTS_DIR/AutoLaunch/random_profile_color.py" \
+		"$SCRIPTS_DIR/AutoLaunch/set_random_color_profile.py"
+fi
 
 $DRYRUN && exit 0
 cat <<'EOF'

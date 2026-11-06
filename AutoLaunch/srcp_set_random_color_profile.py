@@ -78,7 +78,7 @@ except ImportError as e:
     )
     sys.exit(1)
 
-VERSION = "0.14.1"  # bump on every change, so the Console shows which code is running
+VERSION = "0.14.2"  # bump on every change, so the Console shows which code is running
 LOCK_PATH = os.path.join(DATA_DIR, ".lock")
 # How often the running script checks whether a snapshot is due. asyncio's clock stops while
 # the Mac sleeps, so check often (it's a few file stats) to keep it close to daily.
@@ -849,7 +849,8 @@ def never_show(db: sqlite3.Connection, preset: str) -> bool:
 
 
 def daily_snapshot(db: sqlite3.Connection) -> str | None:
-    """Snapshot the DB through this connection if the newest snapshot is a day old."""
+    """Snapshot the DB through this connection if the newest snapshot is a day old and the DB
+    passes its integrity check (else warn once and skip)."""
     folder = os.path.join(os.path.dirname(DB_PATH), "backups")
     if srcp_db_backup.future_snapshots(folder):
         warn_once(
@@ -857,7 +858,25 @@ def daily_snapshot(db: sqlite3.Connection) -> str | None:
             f"snapshots in {folder} are named with a time in the future (a wrong clock, or "
             "copied from another Mac); they're kept but don't count as the newest",
         )
-    return srcp_db_backup.snapshot_if_due(DB_PATH, src=db)
+    rearm = True
+    try:
+        return srcp_db_backup.snapshot_if_due(DB_PATH, src=db)
+    except srcp_db_backup.DamagedDb as e:
+        # Checked again every SNAPSHOT_CHECK_S; the snapshots already there are kept.
+        rearm = False
+        warn_once(
+            "snapshot-damaged",
+            f"daily DB snapshot skipped: {DB_PATH} fails its integrity check ({e}); the "
+            f"snapshots in {folder} are kept. Restore one: docs/REFERENCE.md, Restore",
+        )
+        return None
+    except sqlite3.Error as e:
+        rearm = not is_busy(e)  # busy: the check may not have run, so nothing is known
+        raise
+    finally:
+        # Anything else (not due, a snapshot, or a failure after the check passed) re-arms it.
+        if rearm:
+            _warned.discard("snapshot-damaged")
 
 
 async def snapshot_periodically(

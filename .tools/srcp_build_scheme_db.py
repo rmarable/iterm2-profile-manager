@@ -27,7 +27,7 @@ import sys
 from typing import NamedTuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # works under python3 -I too
-from srcp_db_backup import snapshot
+from srcp_db_backup import check_db, snapshot
 from srcp_iterm_prefs import PRESETS_KEY, load_prefs
 from srcp_schema import (  # shared with the main script and srcp_favorites.py
     COMPONENTS,
@@ -812,7 +812,7 @@ def check_existing_db(path):
             raise sqlite3.DatabaseError(check)
         version = db.execute("PRAGMA user_version").fetchone()[0]
         # Before the snapshot: a copy of a damaged DB would push a good snapshot out.
-        check = db.execute("PRAGMA quick_check").fetchone()[0]
+        check = check_db(path, src=db) or "ok"
     except sqlite3.DatabaseError as e:
         if is_busy(e):
             raise

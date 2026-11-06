@@ -107,9 +107,32 @@ def read_settings():
         return {}
     with open(CLAUDE_SETTINGS, encoding="utf-8") as f:
         try:
-            return json.load(f)
+            settings = json.load(f)
         except json.JSONDecodeError as e:
             sys.exit(f"{CLAUDE_SETTINGS} isn't valid JSON ({e}); fix it and run this again.")
+    if not isinstance(settings, dict):
+        sys.exit(f"{CLAUDE_SETTINGS} isn't a JSON object; fix it and run this again.")
+    return settings
+
+
+def hooks_problem(settings):
+    """Where settings' hooks aren't shaped as add_hooks reads them (hooks an object, each of
+    our events a list of objects whose "hooks" is a list of objects), or "" if they are."""
+    hooks = settings.get("hooks", {})
+    if not isinstance(hooks, dict):
+        return '"hooks" isn\'t an object'
+    for event in HOOK_EVENTS:
+        groups = hooks.get(event, [])
+        if not isinstance(groups, list):
+            return f'"hooks.{event}" isn\'t a list'
+        for i, group in enumerate(groups):
+            where = f"hooks.{event}[{i}]"
+            if not isinstance(group, dict):
+                return f'"{where}" isn\'t an object'
+            inner = group.get("hooks", [])
+            if not isinstance(inner, list) or not all(isinstance(h, dict) for h in inner):
+                return f'"{where}.hooks" isn\'t a list of objects'
+    return ""
 
 
 SETTINGS_BACKUP_KEEP = 10
@@ -155,8 +178,7 @@ def write_settings(settings):
         raise
 
 
-def add_hooks(dry):
-    settings = read_settings()
+def add_hooks(settings, dry):
     hooks = settings.setdefault("hooks", {})
 
     added = []
@@ -248,8 +270,7 @@ def unlink_cc_status(dry):
         os.remove(CC_STATUS_LINK)
 
 
-def remove_hooks(dry):
-    settings = read_settings()
+def remove_hooks(settings, dry):
     hooks = settings.get("hooks")
     if not isinstance(hooks, dict):
         print(f"  = {CLAUDE_SETTINGS}: no hooks")
@@ -328,14 +349,21 @@ def main():
         if not args.dry_run:
             sys.exit(CUSTOM_FOLDER.format(folder))
         print(f"  ! {CUSTOM_FOLDER.format(folder)}")
+    # Read once, before the link either way: a file it can't read stops it with nothing half
+    # done, and what was checked is what gets written.
+    settings = read_settings()
+    if not args.remove:
+        problem = hooks_problem(settings)
+        if problem:
+            sys.exit(f"{CLAUDE_SETTINGS}: {problem}; fix it and run this again (nothing changed).")
 
     if args.remove:
         unlink_cc_status(args.dry_run)
-        remove_hooks(args.dry_run)
+        remove_hooks(settings, args.dry_run)
         remove_prefs(args.dry_run)
     else:
         link_cc_status(args.dry_run)
-        add_hooks(args.dry_run)
+        add_hooks(settings, args.dry_run)
         update_prefs(args.dry_run)
     if args.dry_run:
         print("  (dry run: nothing written)")
