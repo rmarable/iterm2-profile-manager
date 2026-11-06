@@ -4,7 +4,7 @@ Details behind the [README](../README.md). The main script is `AutoLaunch/srcp_s
 
 ## Rating dialog
 
-Right-click a session → **Save/update this profile**, or press ⌃⌥⌘S. The rating dialog shows the preset, mode, font, current stars, and the preset's launch count and last launch (any font). Changes apply to the next new session. Escape or **Cancel** closes it without saving; Return does nothing, so it can't save a rating by accident.
+Right-click a session → **Save/update this profile**, or press `⌃⌥⌘S`. The rating dialog shows the preset, mode, font, current stars, and the preset's launch count and last launch (any font). Changes apply to the next new session. Escape or **Cancel** closes it without saving; Return does nothing, so it can't save a rating by accident.
 
 | Button | Effect |
 |---|---|
@@ -277,7 +277,7 @@ cp .tools/srcp_favorites.py .tools/srcp_popup.py .tools/srcp_popup.js \
    ~/Library/Application\ Support/iTerm2/Scripts/.tools/                  # the main script needs the last three
 ```
 
-Every tool that changes iTerm2's settings takes `--dryrun`, and so does the build; `srcp_favorites.py --show-again` writes the database at once (otherwise `srcp_favorites.py`, `srcp_odds.py` and `srcp_export_curation.py` only read it). Manual key binding: Settings → Keys → Key Bindings → **+**, shortcut ⌃⌥⌘S, action **Invoke Script Function**, function `save_profile()`.
+Every tool that changes iTerm2's settings takes `--dryrun`, and so does the build; `srcp_favorites.py --show-again` writes the database at once (otherwise `srcp_favorites.py`, `srcp_odds.py` and `srcp_export_curation.py` only read it). Manual key binding: Settings → Keys → Key Bindings → **+**, shortcut `⌃⌥⌘S`, action **Invoke Script Function**, function `save_profile()`.
 
 Double-clicking an `.itermcolors` file also imports it, with one dialog per file.
 
@@ -310,7 +310,7 @@ Double-clicking an `.itermcolors` file also imports it, with one dialog per file
 | `.tools/` | Command-line tools. The leading dot keeps them out of iTerm2's Scripts menu. |
 | `.tools/srcp_build_scheme_db.py` | Sets each preset's mode, runs the readability checks, writes the database. |
 | `.tools/srcp_import_presets.py` | Imports a folder of `.itermcolors` files without a dialog per file. |
-| `.tools/srcp_add_key_binding.py` | Binds ⌃⌥⌘S. |
+| `.tools/srcp_add_key_binding.py` | Binds `⌃⌥⌘S`. |
 | `.tools/srcp_favorites.py` | Ratings report (CLI) and `--show-again`; also used by the menu scripts. |
 | `.tools/srcp_odds.py` | Odds of the next session's look, as bar charts or JSON. |
 | `.tools/srcp_popup.js`, `.tools/srcp_popup.py` | The window for `srcp_ratings.py` and `srcp_never_show.py` (JXA `NSAlert`, optional dropdown), and the Python side that runs it. |

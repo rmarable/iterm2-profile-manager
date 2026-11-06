@@ -4,7 +4,7 @@ iTerm2 Profile Manager gives every new iTerm2 tab and window its own color schem
 
 The presets come from [iTerm2-Color-Schemes](https://github.com/mbadolato/iTerm2-Color-Schemes) (800+). Light presets are used when macOS is in Light Mode and dark ones in Dark Mode. Colors that are hard to see against their background are adjusted a little, so most presets are readable. (You can turn that off; see [docs/REFERENCE.md](docs/REFERENCE.md#color-adjustments).)
 
-Press ⌃⌥⌘S to rate the current preset and font from 1 to 5 stars. Rated combinations come up more often and are saved as profiles under **Profiles → Favorites**. **Never show** in the same dialog, or right-click → **Never show this profile**, hides a preset until you bring it back.
+Press `⌃⌥⌘S` to rate the current preset and font from 1 to 5 stars. Rated combinations come up more often and are saved as profiles under **Profiles → Favorites**. **Never show** in the same dialog, or right-click → **Never show this profile**, hides a preset until you bring it back.
 
 ![One iTerm2 window split three ways: two Claude Code sessions and a shell, each with its own color scheme](images/profile-chooser.jpg)
 
@@ -47,7 +47,7 @@ Set these before running setup:
 
 Setup changes iTerm2's settings, and iTerm2 overwrites them when it quits, so run it with iTerm2 closed.
 
-1. Quit iTerm2 (⌘Q) and open **Terminal.app** (Applications → Utilities).
+1. Quit iTerm2 (`⌘Q`) and open **Terminal.app** (Applications → Utilities).
 2. Run:
 
    ```sh
@@ -66,7 +66,7 @@ Setup changes iTerm2's settings, and iTerm2 overwrites them when it quits, so ru
 3. Clones or updates iTerm2-Color-Schemes in `~/src/iTerm2-Color-Schemes` (set `SRC_DIR` to use another folder). A folder there that isn't a clone of that repo is used as it is, not updated.
 4. Imports its schemes as iTerm2 color presets, and updates ones the repo has changed since, unless you've edited them.
 5. Builds the database the main script picks from.
-6. Binds ⌃⌥⌘S to the rating dialog.
+6. Binds `⌃⌥⌘S` to the rating dialog.
 7. Copies the scripts into iTerm2's Scripts folder (unless that folder is a clone of this repo), and removes older versions' AutoLaunch scripts.
 
 It backs up iTerm2's settings to `~/.local/share/iterm2-profile-manager/prefs-backups/com.googlecode.iterm2-<timestamp>.plist` before changing them (newest 10 kept). For a custom `SRC_DIR`, cloning straight into the Scripts folder, or a manual install, see [docs/REFERENCE.md](docs/REFERENCE.md#install-options).
@@ -75,11 +75,11 @@ It backs up iTerm2's settings to `~/.local/share/iterm2-profile-manager/prefs-ba
 
 | To | Do |
 |---|---|
-| Keep a look you like | Right-click → **Save/update this profile**, or press ⌃⌥⌘S, then pick 1 to 5 stars. Rate again to change. |
+| Keep a look you like | Right-click → **Save/update this profile**, or press `⌃⌥⌘S`, then pick 1 to 5 stars. Rate again to change. |
 | Try a different look in this tab | Right-click → **Change to another profile**. Repeat until one sticks. |
 | Open a saved look | **Profiles → Favorites → \<name\>** |
 | Drop a favorite | Right-click → **Remove profile from favorites**, or the same dialog → **Remove favorite** |
-| Never see a scheme again | Right-click → **Never show this profile**, and the tab switches to another look. If it's a favorite, you're asked first, since its stars are deleted. Or in the rating dialog (⌃⌥⌘S) → **Never show**. Either way it's hidden with every font and stays hidden through updates. |
+| Never see a scheme again | Right-click → **Never show this profile**, and the tab switches to another look. If it's a favorite, you're asked first, since its stars are deleted. Or in the rating dialog (`⌃⌥⌘S`) → **Never show**. Either way it's hidden with every font and stays hidden through updates. |
 | See your ratings | **Scripts → srcp_ratings.py** |
 | See schemes you've hidden | **Scripts → srcp_never_show.py** (or **srcp_ratings.py** → **Hidden**) |
 | Bring a hidden scheme back | **Scripts → srcp_never_show.py**, pick it in the list, then **Show again**. Its old stars don't come back; rate it again if you want it as a favorite. |
@@ -129,7 +129,7 @@ Quit iTerm2, then from Terminal.app in the repo:
 | Main script (renamed `.py.disabled` if the Scripts folder is a clone of this repo) | (default) |
 | Menu scripts copied into the Scripts folder | (default) |
 | Favorite profiles (iTerm2 drops its saved copies the next time it opens) | (default) |
-| ⌃⌥⌘S key binding (settings backed up first) | (default) |
+| `⌃⌥⌘S` key binding (settings backed up first) | (default) |
 | Database, snapshots, launch history (ratings exported to `~/srcp-curation-<time>.sql` first, with a copy of the whole database beside it; other files there, and snapshots dated in the future, are kept) | `--data` |
 | Presets matching the repo's files, current or earlier versions (edited ones are kept) | `--presets` |
 | The Terminal.app fonts `setup.sh` installed, while unchanged since, and the MesloLGS Homebrew package if it installed it (fonts you had already stay) | `--fonts` |
@@ -161,11 +161,11 @@ Kept: this repo, iTerm2 settings backups, shell config, and the Claude Code inte
 | Console: `another copy is still running after 5 s; exiting` | A lock allows one copy, and a restart waits 5 s for the old one to exit. If new tabs stopped changing color, a copy from before is stuck: quit iTerm2, run `pkill -f srcp_set_random_color_profile` in Terminal.app, and relaunch. |
 | A font never appears | Disabled or not installed: `select name, enabled from fonts`, or `python3 .tools/srcp_fonts.py`. If you installed it after setup, run `python3 .tools/srcp_build_scheme_db.py`. No restart needed. |
 | A favorite is missing from the Profiles menu | Preset not installed, or marked **Never show**. |
-| ⌃⌥⌘S does nothing | Check Settings → Keys → Key Bindings for `save_profile()`, and the Console for the main script's startup line. |
+| `⌃⌥⌘S` does nothing | Check Settings → Keys → Key Bindings for `save_profile()`, and the Console for the main script's startup line. |
 | Console: `[warn] DB pick_look: database is locked` (or another name after `DB`), then `couldn't read the DB; session left as is` | A rebuild or open `sqlite3` transaction held the lock over 5 s. A session opened then keeps the profile's colors, or isn't logged; a rating made then shows a "didn't take" alert: rate again. |
 | `srcp_build_scheme_db.py`: `... schemes.db is locked (another sqlite3 session or a long write?)` | Another program has the database open, usually an `sqlite3` session in some tab. Close it and run the build again; the message says whether the database was changed. |
 | `srcp_build_scheme_db.py`: `schemes.db is missing but its -wal/-shm files are still there` | Move `schemes.db-wal` and `schemes.db-shm` out of the way (keep them until the new build works), or restore a snapshot. |
-| A tool says iTerm2 is running | Quit iTerm2 (⌘Q) and run the tool from Terminal.app. |
+| A tool says iTerm2 is running | Quit iTerm2 (`⌘Q`) and run the tool from Terminal.app. |
 | Setup says iTerm2 loads its settings from a custom folder | iTerm2 would overwrite the changes. Turn off Settings → General → Settings → **Load settings from a custom folder or URL**, run setup, then turn it back on and save the current settings to the folder. |
 
 ## More
