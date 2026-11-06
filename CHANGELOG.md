@@ -6,6 +6,7 @@ What changed for someone using iTerm2 Profile Manager, newest first. Releases up
 
 - Three more fonts in the random pool: SF Mono Terminal, PT Mono and Andale Mono, which come with macOS or Terminal.app. They show up after the next `./setup.sh` or `python3 .tools/srcp_build_scheme_db.py`.
 - New `.tools/srcp_fonts.py`: opens a page comparing fixed-width fonts side by side; `--add "JetBrains Mono"` installs a Homebrew font and adds it to the pool, and `--remove` takes one out.
+- Each tab's coloring time (the ms in its Console line, any wait behind other tabs, and whether it was colored at startup, as a new tab or by **Change to another profile**) is now kept in the database's `launches` table for later review. Restart the main script (Scripts menu, or relaunch iTerm2), then rebuild the database right away (`python3 .tools/srcp_build_scheme_db.py`); until the rebuild, new tabs are left as they are.
 
 ## v0.14.3 (2026-11-06)
 

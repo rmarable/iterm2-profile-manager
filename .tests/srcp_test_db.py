@@ -188,9 +188,29 @@ class DbTest(unittest.TestCase):
             asyncio.run(asyncio.wait_for(coro, limit_s))
         return out.getvalue()
 
+    def undo_step_9(self):
+        """Drop migration 9's columns (it can't run twice), for a DB faked as older; a later
+        ADD COLUMN step adds its columns here too."""
+        for column in ("coloring_ms", "queued_ms", "queue"):
+            self.db.execute(f"ALTER TABLE launches DROP COLUMN {column}")
+
     def record(self, *values):
         """Add a launches row: values as the fields of the main script's Launch."""
         self.main["record_launch"](self.db, self.main["Launch"](*values))
+
+    def assert_timing_matches_the_console(self, out, queue, queued=...):
+        """The newest launches row has its timing, the same numbers its Console line shows
+        (the line leaves out a wait under 10 ms); queued_ms returned."""
+        row = self.db.execute(
+            "SELECT coloring_ms, queued_ms, queue FROM launches ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        coloring_ms, queued_ms, got_queue = row
+        self.assertEqual(got_queue, queue)
+        if queued is not ...:
+            self.assertEqual(queued_ms, queued)
+        wait = f", {queued_ms} ms queued" if queued_ms is not None and queued_ms >= 10 else ""
+        self.assertIn(f" ({coloring_ms} ms{wait})", out)
+        return queued_ms
 
     def assert_applied(self, preset):
         """The tab got one look, in one profile write, and names it."""
@@ -471,6 +491,7 @@ class BuildTest(DbTest):
     def test_schema_5_marks_disabled_fonts_that_are_still_missing(self):
         self.db.execute("ALTER TABLE fonts DROP COLUMN missing")
         self.db.execute("DROP INDEX launches_open")  # migration 6's, so this is a version 4 DB
+        self.undo_step_9()  # and 9's
         self.db.execute("PRAGMA user_version = 4")
         self.db.execute("UPDATE fonts SET enabled = 0")
         self.db.execute("UPDATE fonts SET enabled = 1 WHERE name = 'Monaco'")
@@ -646,6 +667,7 @@ class MigrationTest(DbTest):
         "190d77892180900af589600618cac1ed2cc3312f",
         "5f5c310bd33c72ef4b7aa0f1dc85fbba846a0a13",
         "1f8ef37474b2259ca39f59af37e66f25474beb1b",
+        "d00b9d4aa1236320a4c88837055915f8a99b728e",
     )
 
     def test_min_schema_is_the_newest_migration(self):
@@ -662,7 +684,11 @@ class MigrationTest(DbTest):
 
     # sha1 of the schemes table and views as the build writes them (constants filled in, --
     # comments dropped, whitespace collapsed), for the schema version they belong to.
-    SHAPE: ClassVar[dict[int, str]] = {8: "b0e67223c24ab81e166c78329b1205b330cfa040"}
+    # 9 changed only launches, so its shape is 8's.
+    SHAPE: ClassVar[dict[int, str]] = {
+        8: "b0e67223c24ab81e166c78329b1205b330cfa040",
+        9: "b0e67223c24ab81e166c78329b1205b330cfa040",
+    }
 
     def test_a_change_to_schemes_or_a_view_comes_with_a_new_schema_version(self):
         sql = build.SCHEMES_TABLE + build.VIEWS.format(
@@ -779,8 +805,8 @@ class OldSchemaTest(DbTest):
     an open Store is reopened."""
 
     def make_old(self):
-        """This DB as the build before the newest step left it (only the version is behind:
-        every step so far that raised MIN_SCHEMA was harmless to run again)."""
+        """This DB as the build before the newest step left it (the way back REFERENCE gives)."""
+        self.undo_step_9()
         self.db.execute(f"PRAGMA user_version = {srcp_schema.MIN_SCHEMA - 1}")
 
     def test_a_db_newer_than_the_running_script_asks_for_a_restart(self):
@@ -896,6 +922,15 @@ class OldSchemaTest(DbTest):
         self.assertIn("DB look_fixes: database is locked", out.getvalue())
         self.assertNotIn("is damaged", out.getvalue())
         self.assertIsNotNone(store.db)  # kept: busy isn't a reason to reconnect
+
+    def test_a_rebuild_adds_the_timing_columns_and_older_launches_keep_null(self):
+        self.record("Dark One", "Monaco", 13, "dark", "discovery", None, "Default", "s1")
+        self.make_old()
+        self.build()
+        row = self.db.execute("SELECT preset, coloring_ms, queued_ms, queue FROM launches")
+        self.assertEqual(row.fetchall(), [("Dark One", None, None, None)])
+        with self.assertRaises(sqlite3.IntegrityError):  # only the three queues
+            self.record("Dark Two", None, 13, "dark", "discovery", None, "p", "s2", 1, 1, "x")
 
     def test_the_main_script_asks_once_for_a_rebuild_then_works_without_a_restart(self):
         self.make_old()
@@ -1066,7 +1101,7 @@ class MainScriptTest(DbTest):
     def test_every_launch_field_is_a_launches_column(self):
         columns = [r[1] for r in self.db.execute("PRAGMA table_info(launches)")]
         self.assertLessEqual(set(self.main["Launch"]._fields), set(columns))
-        launch = ("Dark One", "Monaco", 13, "dark", "favorite", 4, "Default", "s1")
+        launch = ("Dark One", "Monaco", 13, "dark", "favorite", 4, "Default", "s1", 84, 312, "new")
         self.record(*launch)
         names = ", ".join(self.main["Launch"]._fields)
         row = self.db.execute(f"SELECT {names} FROM launches").fetchone()  # noqa: S608  (field names only)
@@ -1164,11 +1199,12 @@ class MainScriptTest(DbTest):
         self.record("Dark One", "Monaco", 13, "dark", "discovery", None, "Default", "s1")
         self.run_quietly(color(None, self.app, self.store, self.session))  # has a look: left alone
         self.session.async_set_profile_properties.assert_not_called()
-        self.run_quietly(color(None, self.app, self.store, self.session, reroll=True))
+        out = self.run_quietly(color(None, self.app, self.store, self.session, reroll=True))
         self.assert_applied("Dark Two")
         self.assertEqual(self.variables["user.color_preset"], "Dark Two")
         rows = self.db.execute("SELECT preset, end_reason FROM launches ORDER BY id")
         self.assertEqual(rows.fetchall(), [("Dark One", "changed"), ("Dark Two", None)])
+        self.assert_timing_matches_the_console(out, "reroll", queued=None)  # it takes no slot
 
     def test_a_favorite_warns_again_when_its_preset_goes_missing_after_coming_back(self):
         self.main["save_favorite"](self.db, "Dark One", "Monaco", 13, 4)
@@ -2761,6 +2797,8 @@ class TabTest(DbTest):
 
         self.run_quietly(scenario())
         self.assertTrue(all("user.color_preset" in s.variables for s in restored.values()))
+        queues = dict(self.db.execute("SELECT session_id, queue FROM launches"))
+        self.assertEqual(queues, {**dict.fromkeys(restored, "startup"), new_tab.session_id: "new"})
 
     def test_time_waiting_for_a_slot_doesnt_count_against_the_time_limit(self):
         self.fixing("0")
@@ -2781,6 +2819,8 @@ class TabTest(DbTest):
         self.assertNotIn("given up", out)
         self.assertRegex(out, r"Dark (One|Two) \| \S+ 13 \(\d+ ms, \d+ ms queued\)")
         self.assertIn("user.color_preset", self.variables)
+        queued = self.assert_timing_matches_the_console(out, "new")
+        self.assertGreaterEqual(queued, 250)  # the 0.3 s it waited, kept apart
 
     def test_two_tabs_colored_at_once_dont_get_the_same_discovery_preset(self):
         self.fixing("0")  # dark discovery: Dark One and Dark Two only
@@ -2999,6 +3039,48 @@ class TabTest(DbTest):
         self.assertRegex(out, r"favorite profile 4 ★: Dark One \| Monaco 13(, [^(]+)? \(\d+ ms\)")
         rows = self.db.execute("SELECT preset, source, end_reason FROM launches").fetchall()
         self.assertEqual(rows, [("Dark One", "favorite", None)])
+        self.assert_timing_matches_the_console(out, "new", queued=None)  # no slots given
+
+    def test_coloring_ms_spans_the_pre_check_to_the_variables(self):
+        self.fixing("0")
+        self.tab({})
+        real_get = self.session.async_get_variable.side_effect
+        set_one = self.session.async_set_variable
+
+        async def slow_get(name):  # the pre-check, the first call in the span
+            await asyncio.sleep(0.05)
+            return real_get(name)
+
+        async def slow_set(name, value):  # set_variables, the last (once per variable)
+            await asyncio.sleep(0.01)
+            await set_one(name, value)
+
+        self.session.async_get_variable.side_effect = slow_get
+        self.session.async_set_variable = slow_set
+        color_once = self.main["color_one_at_a_time"]
+        out = self.run_quietly(color_once(None, self.app, self.store, self.session))
+        coloring_ms = self.db.execute("SELECT coloring_ms FROM launches").fetchone()[0]
+        self.assertGreaterEqual(coloring_ms, 100, out)
+
+    def test_the_time_limit_covers_the_pre_check_too(self):
+        self.fixing("0")
+        self.tab({})
+        self.main["COLOR_TIMEOUT_S"] = 0.2
+        real_get = self.session.async_get_variable.side_effect
+
+        async def slow_get(name):  # most of the limit spent before the coloring starts
+            await asyncio.sleep(0.15)
+            return real_get(name)
+
+        async def slow(*_args, **_kwargs):
+            await asyncio.sleep(0.1)  # within the limit alone, not with the pre-check
+
+        self.session.async_get_variable.side_effect = slow_get
+        self.main["color_session"] = slow
+        out = self.run_quietly(
+            self.main["color_one_at_a_time"](None, self.app, self.store, self.session)
+        )
+        self.assertIn("was given up", out)
 
     def test_a_reroll_waits_until_the_previous_one_is_recorded(self):
         self.fixing("0")
