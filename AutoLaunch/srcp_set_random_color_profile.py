@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import calendar
 import contextlib
+import contextvars
 import fcntl
 import json
 import os
@@ -74,7 +75,7 @@ except ImportError as e:
     )
     sys.exit(1)
 
-VERSION = "0.13.2"  # bump on every change, so the Console shows which code is running
+VERSION = "0.14.0"  # bump on every change, so the Console shows which code is running
 LOCK_PATH = os.path.join(DATA_DIR, ".lock")
 # How often the running script checks whether a snapshot is due. asyncio's clock stops while
 # the Mac sleeps, so check often (it's a few file stats) to keep it close to daily.
@@ -921,17 +922,34 @@ async def keep_favorite_profile(
 
 # Coloring a session: at most one at a time per session, and never forever. The iterm2 module
 # sends a request before it listens for the reply, so a reply can in rare cases be lost and
-# its call never return; the timeout frees the session (and the next tab) instead. Its DB calls
+# its call never return; the timeout frees the session (and its slot) instead. Its DB calls
 # are reads, which WAL never makes wait on a writer, but each can queue behind another call
 # on Store.lock (a write waits up to 5 s on a busy DB); each coloring logs its time.
 COLOR_TIMEOUT_S = 15
+# Tabs colored at once, per queue (the tabs open at startup, and new tabs): with one RPC per
+# look, 2 colored 32 tabs in 1.5 s against 2.5 s one at a time (measured 2026-11-06), and
+# while one waits on a lost reply the queue goes on through the other slot.
+COLOR_SLOTS = 2
 MISSING_PICKS = 3  # picks in a row of presets no longer installed before giving up
-_coloring: dict[str, asyncio.Task[None]] = {}
+_coloring: dict[str, asyncio.Task[str | None]] = {}
 _touched: set[str] = set()  # sessions whose coloring has started changing them
+_picked: dict[str, str] = {}  # session -> discovery preset picked, until its row is recorded
+_ended: set[str] = set()  # sessions closed while being colored: the coloring records the end
+_queued = contextvars.ContextVar("queued", default=0.0)  # this coloring's wait for a slot, s
+# The reason color_one_at_a_time gives for a tab given up after its look was sent.
+UNRECORDED = "it took too long, and may show a new look that wasn't recorded"
+
+
+class LeftAsIs(Exception):
+    """color_session couldn't give the tab a look (already logged); the reason, as a clause
+    for the Change alert."""
 
 
 def took(started: float) -> str:
-    return f" ({(time.monotonic() - started) * 1000:.0f} ms)"
+    """' (84 ms)', or ' (84 ms, 312 ms queued)' after a wait for a coloring slot."""
+    queued = _queued.get()
+    wait = f", {queued * 1000:.0f} ms queued" if queued >= 0.01 else ""
+    return f" ({(time.monotonic() - started) * 1000:.0f} ms{wait})"
 
 
 def skips_separate_colors(profile: iterm2.Profile, reroll: bool) -> bool:
@@ -956,18 +974,17 @@ async def color_session(
     store: Store,
     session: iterm2.Session,
     reroll: bool = False,
-) -> Launch | None:
-    """Give the session a look; the launch row to record, or None if it got none.
+) -> Launch:
+    """Give the session a look; the launch row to record. Raises LeftAsIs (already logged)
+    when it can't have one.
 
     reroll: replace the session's look (the menu's Change), even a favorite profile's. The row
     is recorded by the caller, after the time limit, so a busy DB can't run the coloring out.
     """
     started = time.monotonic()
-    current = await session.async_get_variable("user.color_preset")
-    # Already has a look: a restored window, or one startup() colored while it was also
-    # queued as new. Coloring again would change it and log a second launch.
-    if current and not reroll:
-        return None
+    # A new tab's caller has checked it has no look yet (color_one_at_a_time, before taking a
+    # slot); a re-roll reads the look it replaces.
+    current = await session.async_get_variable("user.color_preset") if reroll else None
     theme, profile = await asyncio.gather(app.async_get_theme(), session.async_get_profile())
     mode = "dark" if "dark" in theme else "light"
     if not reroll:
@@ -985,18 +1002,37 @@ async def color_session(
             )
             return launch
     if skips_separate_colors(profile, reroll):
-        return None
+        raise LeftAsIs(
+            f'its profile "{profile.name}" has "Use separate colors for light and dark mode" '
+            "on (Settings > Profiles > Colors)"
+        )
     exclude: set[str] = {current} if current else set()  # a re-roll never gives the same back
+    sid = session.session_id
+
+    def pick_unlike_others(db: sqlite3.Connection) -> Look | None:
+        # A tab colored alongside this one isn't given the same discovery preset: neither has
+        # its launches row yet, which the recent rule reads. Read and noted under Store.lock,
+        # so two picks can't miss each other.
+        # A copy (the loop thread may drop an entry meanwhile); only live colorings count, not
+        # an entry a pick wrote after its coloring was given up.
+        others = {p for s, p in list(_picked.items()) if s != sid and s in _coloring}
+        look = pick_look(db, mode, exclude | others)
+        if look is None and others:  # only the other tabs' presets left: repeat one
+            look = pick_look(db, mode, exclude)
+        if look and look.source == "discovery":
+            _picked[sid] = look.preset  # until its row is recorded
+        return look
+
     for _ in range(MISSING_PICKS):
         # A DB failure raises DbUnavailable, which color_one_at_a_time handles.
-        look = await store.call(pick_look, mode, exclude)
+        look = await store.call(pick_unlike_others)
         if look is None:
             if reroll:
                 why = f"nothing left to pick: no {mode} presets; this tab keeps its look"
             else:
                 why = f"no {mode} presets to pick from; sessions left as is"
             warn(f"empty-{mode}", why, every=reroll)
-            return None
+            raise LeftAsIs(f"no other {mode} preset is left to pick")
         preset = await get_preset(connection, look.preset)
         if preset:
             break
@@ -1009,20 +1045,15 @@ async def color_session(
             f"left as is; rebuild the DB ({REBUILD}) after adding or "
             "removing presets",
         )
-        return None
+        raise LeftAsIs("the presets it picked aren't installed in iTerm2 (rebuild the database)")
 
     adjusted = adjust_preset(look.preset, preset, look.fixes_json, look.built_hash)
     _, size = split_font(profile.normal_font)
-
-    async def icon_font(name: str) -> None:  # set the font before switching it on
-        await profile.async_set_non_ascii_font(f"{name} {size}")
-        await profile.async_set_use_non_ascii_font(True)
-
     _touched.add(session.session_id)
-    await asyncio.gather(
-        profile.async_set_color_preset(preset),
-        *([profile.async_set_normal_font(f"{look.font} {size}")] if look.font else []),
-        *([icon_font(look.nonascii)] if look.nonascii else []),
+    # One RPC for the whole look (iTerm2 handles one call per color ~5x slower, measured
+    # 2026-11-06), to the session's copy of its profile, as the per-color setters write.
+    await session.async_set_profile_properties(
+        look_properties(preset, look.font, look.nonascii, size)
     )
 
     label = f"favorite {look.stars} ★" if look.source == "favorite" else "discovery"
@@ -1054,60 +1085,108 @@ async def color_session(
     )
 
 
+def look_properties(
+    preset: iterm2.ColorPreset, font: str | None, nonascii: str | None, size: float
+) -> iterm2.LocalWriteOnlyProfile:
+    """A look's profile writes, for one async_set_profile_properties call: each of the
+    preset's colors as async_set_color_preset sends it (adjusted, alpha and color space
+    kept), then the font, then the icon font before the switch that turns it on."""
+    props = iterm2.LocalWriteOnlyProfile()
+    for v in preset.values:
+        color = iterm2.Color(v.red, v.green, v.blue, v.alpha, v.color_space)
+        props.values[v.key] = json.dumps(color.get_dict())
+    if font:
+        props.set_normal_font(f"{font} {size}")
+    if nonascii:
+        props.set_non_ascii_font(f"{nonascii} {size}")
+        props.set_use_non_ascii_font(True)
+    return props
+
+
 def colors_adjusted(n: int) -> str:
     return "1 color adjusted" if n == 1 else f"{n} colors adjusted"
 
 
-async def color_one_at_a_time(
+async def color_one_at_a_time(  # noqa: PLR0913  (the four every coloring takes, plus reroll and slots)
     connection: iterm2.Connection,
     app: iterm2.App,
     store: Store,
     session: iterm2.Session,
+    *,
     reroll: bool = False,
-) -> None:
+    slots: asyncio.Semaphore | None = None,
+) -> str | None:
     """color_session, unless this session is already being colored (a re-roll waits for that
-    first), given up after COLOR_TIMEOUT_S; then record the launch it returns."""
+    first) or, for a new one, already has a look; in one of `slots` if given; given up after
+    COLOR_TIMEOUT_S; then record the launch it returns, and the session's end if it closed
+    meanwhile. Why the tab got no new look (a clause for the alerts), or None."""
     sid = session.session_id
     running = _coloring.get(sid)
     if running and not running.done() and not reroll:
-        return  # startup and the new-session watcher both saw it
+        return None  # startup and the new-session watcher both saw it
     # A re-roll waits for whatever is coloring the session now, even another re-roll that
-    # started while it waited, so two never run at once.
+    # started while it waited, so two never run at once. Shielded: this wait being cancelled
+    # mustn't cancel the other's coloring.
     while (running := _coloring.get(sid)) and not running.done():
         with contextlib.suppress(Exception):  # its own caller logs how it went
-            await running
+            await asyncio.shield(running)
 
-    async def color_then_record() -> None:
-        limit = COLOR_TIMEOUT_S  # read now, so a test can shorten it
+    async def color_then_record() -> str | None:
+        limit = COLOR_TIMEOUT_S  # read now, so a test can shorten it; a slot wait isn't counted
         _touched.discard(sid)
         try:
-            launch = await asyncio.wait_for(
-                color_session(connection, app, store, session, reroll), limit
-            )
-        except TimeoutError:
-            # Not recorded either way: a tab given up after its colors were set keeps them,
-            # without the user.* variables, until it's re-rolled.
-            if sid in _touched:
-                what = "if the tab looks half-done, right-click > Change to another profile"
-            else:
-                what = "nothing was changed (the DB or iTerm2 was busy); the tab keeps its look"
-            log("warn", f"coloring session {sid} took over {limit} s and was given up; {what}")
-            return
-        except DbUnavailable:  # store.call logged why
-            log("warn", "couldn't read the DB; session left as is")
-            return
-        finally:
-            _touched.discard(sid)
-        # Outside the time limit (a locked DB delays this row, and every DB call queued behind
-        # it, up to 5 s), but inside this session's slot, so a re-roll's row can't land first.
-        if launch:
+            try:
+                # Already has a look (a restored window, or one startup colored while it was
+                # also queued as new): no slot, and no second launch.
+                if not reroll and await asyncio.wait_for(
+                    session.async_get_variable("user.color_preset"), limit
+                ):
+                    return None
+                queued = time.monotonic()
+                async with slots or contextlib.nullcontext():
+                    _queued.set(time.monotonic() - queued)  # for color_session's Console line
+                    launch = await asyncio.wait_for(
+                        color_session(connection, app, store, session, reroll), limit
+                    )
+            except TimeoutError:
+                # Not recorded either way: a tab given up after its look was sent may show it,
+                # without the user.* variables, until it's re-rolled.
+                if sid in _touched:
+                    what = (
+                        "the tab may show a new look that wasn't recorded; right-click > "
+                        "Change to another profile"
+                    )
+                    why = UNRECORDED
+                else:
+                    what = "nothing was changed (the DB or iTerm2 was busy); the tab keeps its look"
+                    why = "it took too long (the database or iTerm2 was busy)"
+                log("warn", f"coloring session {sid} took over {limit} s and was given up; {what}")
+                return why
+            except DbUnavailable:  # store.call logged why
+                log("warn", "couldn't read the DB; session left as is")
+                return "the database couldn't be read"
+            except LeftAsIs as e:  # logged where it was raised
+                return str(e)
+            finally:
+                _touched.discard(sid)
+            # Outside the time limit and the slot (a locked DB delays this row, and every DB
+            # call queued behind it, up to 5 s), but inside this session's own coloring, so a
+            # re-roll's row can't land first.
             with contextlib.suppress(DbUnavailable):  # store.call logged it
                 await store.call(record_change if reroll else record_launch, launch)
+            return None
+        finally:
+            _picked.pop(sid, None)
+            # Closed meanwhile: watch_ended left the end to this, after the row. Nothing awaits
+            # between this check and the task finishing, so watch_ended can't miss it.
+            if sid in _ended:
+                _ended.discard(sid)
+                await session_ended(store, sid)
 
     task = asyncio.ensure_future(color_then_record())
     _coloring[sid] = task
     try:
-        await task
+        return await task
     finally:
         if _coloring.get(sid) is task:
             del _coloring[sid]
@@ -1390,17 +1469,28 @@ async def change_from_menu(
         log("warn", f"change: session {session_id} not found")
         return
     before = await session.async_get_variable("user.color_preset")
-    await color_one_at_a_time(connection, app, store, session, reroll=True)  # logs failures
+    # Not in a coloring slot: asked for by hand, it shouldn't queue behind new tabs.
+    why = await color_one_at_a_time(connection, app, store, session, reroll=True)
     if await session.async_get_variable("user.color_preset") == before:
         window, _ = app.get_window_and_tab_for_session(session)
-        text = (
-            "This tab couldn't switch to another look, so it keeps this one. Scripts > Manage > "
-            "Console says why (usually: the database was busy, or no other preset of this "
-            "light/dark mode is left)."
-        )
+        text = kept_look_text(why, "This tab")
         await iterm2.Alert(CHANGE_TITLE, text, window.window_id if window else None).async_run(
             connection
         )
+
+
+def kept_look_text(why: str | None, subject: str) -> str:
+    """The alert for a re-roll that left the tab's look as it was; why from
+    color_one_at_a_time."""
+    console = "Scripts > Manage > Console has the details."
+    if why == UNRECORDED:  # it may have switched after all
+        return (
+            f"{subject}'s new look may not have been recorded: it took too long. Right-click > "
+            f"Change to another profile to get one that is. {console}"
+        )
+    if why:
+        return f"{subject} couldn't switch to another look: {why}. {console}"
+    return f"{subject} couldn't switch to another look, so it keeps this one. {console}"
 
 
 async def alert_choice(
@@ -1437,17 +1527,13 @@ async def reroll_after_hide(
     window, _ = app.get_window_and_tab_for_session(session)
     window_id = window.window_id if window else None
     try:
-        await color_one_at_a_time(connection, app, store, session, reroll=True)
+        why = await color_one_at_a_time(connection, app, store, session, reroll=True)
         new = await session.async_get_variable("user.color_preset")
     except iterm2.RPCException as e:  # closed while the question was up: it's hidden anyway
         log("info", f"never show: {preset} hidden; its tab closed before the new look ({e})")
         return
-    if new == preset:  # no other preset left, or the DB failed (color_session logged which)
-        text = (
-            f"{preset} is hidden, but this tab couldn't switch to another look, so it keeps "
-            "this one until you close it. Scripts > Manage > Console says why (usually: "
-            "no other preset of this light/dark mode is left)."
-        )
+    if new == preset:  # color_one_at_a_time says why (and logged it)
+        text = kept_look_text(why, f"{preset} is hidden, but this tab")
         await iterm2.Alert(NEVER_TITLE, text, window_id).async_run(connection)
 
 
@@ -1606,12 +1692,17 @@ async def startup(
         if backup:
             log("info", f"DB snapshot: {backup}")
     # Windows iTerm2 opened before this script connected (the one at launch) got no look.
-    # Restored windows keep theirs: iTerm2 saves user.* variables with them.
-    for session in open_sessions:
+    # Restored windows keep theirs: iTerm2 saves user.* variables with them. COLOR_SLOTS at a
+    # time, in their own slots, so a new tab never queues behind them.
+    slots = asyncio.Semaphore(COLOR_SLOTS)  # made here: it belongs to the running loop
+
+    async def color_open(session: iterm2.Session) -> None:
         try:
-            await color_one_at_a_time(connection, app, store, session)
+            await color_one_at_a_time(connection, app, store, session, slots=slots)
         except Exception as e:  # one session must not stop the rest, or startup
             log("warn", f"coloring open session failed: {e!r}")
+
+    await asyncio.gather(*(color_open(s) for s in open_sessions))
     # Last: parsing iTerm2's settings (0.4-0.6 s, holding Python's GIL) slows every coloring
     # that overlaps it, so the tabs open at launch go first. With no DB it syncs nothing.
     await sync_and_log(store)
@@ -1623,27 +1714,40 @@ async def watch_new(
     store: Store,
     mon: iterm2.NewSessionMonitor,
 ) -> None:
+    slots = asyncio.Semaphore(COLOR_SLOTS)  # made here: it belongs to the running loop
+
+    async def color_new(session: iterm2.Session) -> None:
+        try:
+            await color_one_at_a_time(connection, app, store, session, slots=slots)
+        except Exception as e:  # logged here, so spawn() never prints a traceback for it
+            log("warn", f"coloring session failed: {e!r}")
+
     while True:
         session_id = await mon.async_get()
         session = app.get_session_by_id(session_id)
         if not session:
             log("warn", f"new session {session_id} not found; left as is")
             continue
-        try:
-            await color_one_at_a_time(connection, app, store, session)
-        except Exception as e:  # never stop watching over one session
-            log("warn", f"coloring session failed: {e!r}")
+        spawn("coloring", color_new(session))  # a slow tab doesn't hold up the watcher
 
 
 async def watch_ended(store: Store, mon: iterm2.SessionTerminationMonitor) -> None:
     while True:
         session_id = await mon.async_get()
-        try:
-            await store.call(record_end, session_id)
-        except DbUnavailable:  # logged; that launch stays open (startup's close_stale ends it)
-            pass
-        except Exception as e:
-            log("warn", f"recording session end failed: {e!r}")
+        coloring = _coloring.get(session_id)
+        if coloring and not coloring.done():
+            _ended.add(session_id)  # its coloring records the end after its row
+            continue
+        await session_ended(store, session_id)
+
+
+async def session_ended(store: Store, session_id: str) -> None:
+    try:
+        await store.call(record_end, session_id)
+    except DbUnavailable:  # logged; that launch stays open (startup's close_stale ends it)
+        pass
+    except Exception as e:
+        log("warn", f"recording session end failed: {e!r}")
 
 
 async def exit_on_disconnect(connection: iterm2.Connection, store: Store | None = None) -> None:

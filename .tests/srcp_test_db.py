@@ -183,6 +183,33 @@ class DbTest(unittest.TestCase):
         """Add a launches row: values as the fields of the main script's Launch."""
         self.main["record_launch"](self.db, self.main["Launch"](*values))
 
+    def assert_applied(self, preset):
+        """The tab got one look, in one profile write, and names it."""
+        self.session.async_set_profile_properties.assert_called_once()
+        self.assertEqual(self.variables["user.color_preset"], preset)
+
+    def applied(self):
+        """The profile values the tab's one write sent, decoded."""
+        props = self.session.async_set_profile_properties.call_args.args[0]
+        return {k: json.loads(v) for k, v in props.values.items()}
+
+    def fake_preset(self, colors):
+        values = [
+            types.SimpleNamespace(
+                key=k,
+                red=v["Red Component"] * 255,
+                green=v["Green Component"] * 255,
+                blue=v["Blue Component"] * 255,
+                alpha=v.get("Alpha Component", 1) * 255,
+                # As the API reports it: a color with no space comes back Calibrated.
+                color_space=self.main["iterm2"].color.ColorSpace(
+                    v.get("Color Space", "Calibrated")
+                ),
+            )
+            for k, v in colors.items()
+        ]
+        return types.SimpleNamespace(values=values)
+
     def write_profiles(self):
         """Write the favorites' profiles file now; the count, or None if it was current."""
         return self.main["write_favorite_profiles"](self.main["read_favorites"](self.db))
@@ -932,9 +959,9 @@ class MainScriptTest(DbTest):
         color = self.main["color_one_at_a_time"]  # colors, then records the launch
         self.record("Dark One", "Monaco", 13, "dark", "discovery", None, "Default", "s1")
         self.run_quietly(color(None, self.app, self.store, self.session))  # has a look: left alone
-        self.profile.async_set_color_preset.assert_not_called()
+        self.session.async_set_profile_properties.assert_not_called()
         self.run_quietly(color(None, self.app, self.store, self.session, reroll=True))
-        self.profile.async_set_color_preset.assert_called_once_with("Dark Two")
+        self.assert_applied("Dark Two")
         self.assertEqual(self.variables["user.color_preset"], "Dark Two")
         rows = self.db.execute("SELECT preset, end_reason FROM launches ORDER BY id")
         self.assertEqual(rows.fetchall(), [("Dark One", "changed"), ("Dark Two", None)])
@@ -1930,22 +1957,6 @@ class ColorFixTest(DbTest):
         live = {k: build.rgb(UNREADABLE[k]) for k in build.HASH_KEYS}
         self.assertEqual(self.main["colors_hash"](live), build.color_hash(UNREADABLE))
 
-    def fake_preset(self, colors):
-        values = [
-            types.SimpleNamespace(
-                key=k,
-                red=v["Red Component"] * 255,
-                green=v["Green Component"] * 255,
-                blue=v["Blue Component"] * 255,
-                # As the API reports it: a color with no space comes back Calibrated.
-                color_space=self.main["iterm2"].color.ColorSpace(
-                    v.get("Color Space", "Calibrated")
-                ),
-            )
-            for k, v in colors.items()
-        ]
-        return types.SimpleNamespace(values=values)
-
     def test_an_untagged_preset_gets_its_fixes_in_tabs_and_profiles_and_stays_untagged(self):
         untagged = {
             k: {c: x for c, x in v.items() if c != "Color Space"} for k, v in UNREADABLE.items()
@@ -2029,9 +2040,10 @@ class ColorFixTest(DbTest):
         line = next(x for x in out.splitlines() if "Murky |" in x)  # random font
         self.assertRegex(line, rf" 13, {self.main['colors_adjusted'](n)} \(\d+ ms\)$")
         self.assertEqual(self.variables["user.adjusted"], n)
-        self.profile.async_set_color_preset.assert_called_once_with(preset)
-        fg = next(v for v in preset.values if v.key == "Foreground Color")
-        self.assertNotEqual(round(fg.red / 255, 4), UNREADABLE["Foreground Color"]["Red Component"])
+        sent = self.applied()["Foreground Color"]
+        expected = json.loads(self.scheme_fixes("Murky"))["Foreground Color"][:3]
+        self.assertEqual([round(sent[c], 4) for c in build.COMPONENTS], expected)
+        self.assertNotEqual(sent["Red Component"], UNREADABLE["Foreground Color"]["Red Component"])
 
     def test_a_favorite_profile_session_reports_its_adjustments(self):
         self.main["save_favorite"](self.db, "Murky", "Monaco", 13, 3)
@@ -2091,6 +2103,266 @@ class TabTest(DbTest):
             names = [p["Name"] for p in plistlib.load(f)["Profiles"]]
         self.assertEqual(names, ["Dark One - Monaco"])
 
+    def more_sessions(self, *ids):
+        """More fake tabs like self.session (same profile), each with its own variables."""
+        made = {}
+        for sid in ids:
+            variables = {}
+
+            async def set_variable(name, value, variables=variables):
+                variables[name] = value
+
+            session = mock.AsyncMock(session_id=sid, async_set_variable=set_variable)
+            session.async_get_variable.side_effect = variables.get
+            session.async_get_profile.return_value = self.profile
+            session.variables = variables
+            self.sessions[sid] = made[sid] = session
+        return made
+
+    def test_a_look_is_one_write_with_colors_then_font_then_icon_font(self):
+        self.fixing("0")
+        self.tab({})
+        self.main["get_preset"] = mock.AsyncMock(return_value=self.fake_preset(DARK))
+        self.main["nonascii_font"] = lambda db: "MesloLGSNF-Regular"
+        self.run_quietly(self.main["color_session"](None, self.app, self.store, self.session))
+        sent = self.applied()
+        keys = list(sent)
+        self.assertEqual(keys[-3:], ["Normal Font", "Non Ascii Font", "Use Non-ASCII Font"])
+        self.assertEqual(sorted(keys[:-3]), sorted(DARK))  # every color, before the fonts
+        self.assertEqual(sent["Non Ascii Font"], "MesloLGSNF-Regular 13")  # set before its switch
+        self.assertIs(sent["Use Non-ASCII Font"], True)
+        self.assertTrue(sent["Normal Font"].endswith(" 13"))
+        bg, raw = sent["Background Color"], DARK["Background Color"]
+        components = build.COMPONENTS
+        self.assertEqual(
+            [round(bg[c], 6) for c in components], [round(raw[c], 6) for c in components]
+        )
+        self.assertEqual(bg["Alpha Component"], 1)
+        self.assertEqual(bg["Color Space"], raw.get("Color Space", "Calibrated"))  # kept
+
+    def test_at_most_two_tabs_are_colored_at_once_per_queue(self):
+        self.tab({})
+        sessions = self.more_sessions("a", "b", "c", "d", "e")
+        busy = peak = 0
+
+        async def slow(connection, app, store, session, reroll=False):
+            nonlocal busy, peak
+            busy += 1
+            peak = max(peak, busy)
+            await asyncio.sleep(0.02)
+            busy -= 1
+            raise self.main["LeftAsIs"]("faked: nothing to record")
+
+        self.main["color_session"] = slow
+        color_once = self.main["color_one_at_a_time"]
+
+        async def scenario():
+            slots = asyncio.Semaphore(self.main["COLOR_SLOTS"])
+            await asyncio.gather(
+                *(color_once(None, self.app, self.store, s, slots=slots) for s in sessions.values())
+            )
+
+        self.run_quietly(scenario())
+        self.assertEqual(peak, 2)
+
+    def test_a_new_tab_isnt_held_up_behind_the_tabs_open_at_startup(self):
+        self.fixing("0")
+        self.tab({})
+        restored = self.more_sessions("r1", "r2", "r3")
+        tab = types.SimpleNamespace(all_sessions=list(restored.values()))
+        self.app.windows = [types.SimpleNamespace(tabs=[tab])]
+        real, release = self.main["color_session"], None
+
+        async def stuck_if_restored(connection, app, store, session, reroll=False):
+            if session.session_id in restored:
+                await release.wait()  # every startup slot taken, and one more queued
+            return await real(connection, app, store, session, reroll)
+
+        self.main["color_session"] = stuck_if_restored
+        main, new_tab = self.main, self.session
+
+        class Monitor:  # one new tab, then wait until it's colored
+            def __init__(self):
+                self.sent = False
+
+            async def async_get(self):
+                if not self.sent:
+                    self.sent = True
+                    return new_tab.session_id
+                await asyncio.gather(*main["_background"])
+                raise Stop
+
+        async def scenario():
+            nonlocal release
+            release = asyncio.Event()
+            startup = asyncio.ensure_future(main["startup"](None, self.app, self.store, "x"))
+            await asyncio.sleep(0.05)
+            with self.assertRaises(Stop):
+                await main["watch_new"](None, self.app, self.store, Monitor())
+            self.assertIn("user.color_preset", self.variables)  # while startup still waits
+            self.assertFalse(startup.done())
+            release.set()
+            await startup
+
+        self.run_quietly(scenario())
+        self.assertTrue(all("user.color_preset" in s.variables for s in restored.values()))
+
+    def test_time_waiting_for_a_slot_doesnt_count_against_the_time_limit(self):
+        self.fixing("0")
+        self.tab({})
+        self.main["COLOR_TIMEOUT_S"] = 0.1
+        color_once = self.main["color_one_at_a_time"]
+
+        async def scenario():
+            slots = asyncio.Semaphore(1)
+            async with slots:  # another tab holds the only slot for longer than the limit
+                waiting = asyncio.ensure_future(
+                    color_once(None, self.app, self.store, self.session, slots=slots)
+                )
+                await asyncio.sleep(0.3)
+            await waiting
+
+        out = self.run_quietly(scenario())
+        self.assertNotIn("given up", out)
+        self.assertRegex(out, r"Dark (One|Two) \| \S+ 13 \(\d+ ms, \d+ ms queued\)")
+        self.assertIn("user.color_preset", self.variables)
+
+    def test_two_tabs_colored_at_once_dont_get_the_same_discovery_preset(self):
+        self.fixing("0")  # dark discovery: Dark One and Dark Two only
+        self.tab({})
+        color_once = self.main["color_one_at_a_time"]
+        for _ in range(10):  # without the in-flight rule, a repeat would show half the time
+            self.db.execute("DELETE FROM launches")
+            pair = self.more_sessions("x", "y")
+
+            async def scenario(pair=pair):
+                await asyncio.gather(
+                    *(color_once(None, self.app, self.store, s) for s in pair.values())
+                )
+
+            self.run_quietly(scenario())
+            got = {s.variables["user.color_preset"] for s in pair.values()}
+            self.assertEqual(got, {"Dark One", "Dark Two"})
+        self.assertEqual(self.main["_picked"], {})
+
+    def test_a_tab_closed_while_being_colored_gets_its_end_recorded(self):
+        self.fixing("0")
+        self.tab({})
+        self.record("Dark One", "Monaco", 13, "dark", "discovery", None, "Default", "other")
+        real, release = self.main["color_session"], None
+
+        async def slow(connection, app, store, session, reroll=False):
+            await release.wait()
+            return await real(connection, app, store, session, reroll)
+
+        self.main["color_session"] = slow
+        main = self.main
+
+        class Monitor:  # s1 closes while it's being colored, then another tab closes
+            def __init__(self):
+                self.events = iter(["s1", "other"])
+
+            async def async_get(self):
+                event = next(self.events, None)
+                if event is None:
+                    await asyncio.Event().wait()  # no more ends
+                return event
+
+        async def scenario():
+            nonlocal release
+            release = asyncio.Event()
+            coloring = asyncio.ensure_future(
+                main["color_one_at_a_time"](None, self.app, self.store, self.session)
+            )
+            await asyncio.sleep(0)
+            watcher = asyncio.ensure_future(main["watch_ended"](self.store, Monitor()))
+            await asyncio.sleep(0.05)  # both ends seen; s1 still being colored
+            other = self.db.execute("SELECT ended_at FROM launches WHERE session_id = 'other'")
+            self.assertIsNotNone(other.fetchone()[0])  # not held up behind s1
+            self.assertEqual(main["_ended"], {"s1"})  # left to s1's coloring
+            release.set()
+            await coloring
+            watcher.cancel()
+
+        self.run_quietly(scenario())
+        row = self.db.execute("SELECT ended_at FROM launches WHERE session_id = 's1'").fetchone()
+        self.assertIsNotNone(row[0])  # its end recorded right after its row
+        self.assertEqual(self.main["_ended"], set())
+
+    def test_a_pick_left_by_a_given_up_coloring_doesnt_block_that_preset(self):
+        self.fixing("0")
+        self.tab({})
+        self.main["_picked"]["gone"] = "Dark One"  # written after its coloring was given up
+        excluded = []
+        pick_look = self.main["pick_look"]
+        self.main["pick_look"] = lambda db, mode, exclude: (
+            excluded.append(set(exclude)) or pick_look(db, mode, exclude)
+        )
+        self.run_quietly(self.main["color_one_at_a_time"](None, self.app, self.store, self.session))
+        self.assertEqual(excluded, [set()])  # "gone" isn't being colored: its pick doesn't count
+
+    def test_when_only_the_other_tabs_presets_are_left_one_is_repeated(self):
+        self.fixing("0")
+        self.main["never_show"](self.db, "Dark Two")
+        self.tab({})
+
+        async def scenario():
+            other = asyncio.ensure_future(asyncio.Event().wait())  # tab x, still being colored
+            self.main["_coloring"]["x"] = other
+            self.main["_picked"]["x"] = "Dark One"
+            try:
+                await self.main["color_one_at_a_time"](None, self.app, self.store, self.session)
+            finally:
+                other.cancel()
+
+        out = self.run_quietly(scenario())
+        self.assertEqual(self.variables["user.color_preset"], "Dark One")
+        self.assertNotIn("no dark presets", out)  # not a real "nothing to pick"
+
+    def test_a_tab_that_already_has_a_look_takes_no_slot(self):
+        self.tab({"user.color_preset": "Dark One"})  # a restored window
+        color_once = self.main["color_one_at_a_time"]
+
+        async def scenario():
+            slots = asyncio.Semaphore(1)
+            async with slots:  # every slot taken
+                await asyncio.wait_for(
+                    color_once(None, self.app, self.store, self.session, slots=slots), 1
+                )
+
+        self.run_quietly(scenario())  # returns at once instead of waiting for the slot
+        self.session.async_set_profile_properties.assert_not_called()
+
+    def test_the_never_show_reroll_alert_says_why_too(self):
+        self.fixing("0")
+        self.tab({"user.color_preset": "Dark One"})
+        self.profile.use_separate_colors_for_light_and_dark_mode = True
+        self.run_quietly(self.main["reroll_after_hide"](None, self.app, self.store, self.session))
+        self.assertIn("Dark One is hidden, but this tab couldn't switch", self.texts[0])
+        self.assertIn("Use separate colors for light and dark mode", self.texts[0])
+        self.assertNotIn("usually", self.texts[0])
+
+    def test_a_reroll_given_up_after_its_look_was_sent_says_it_may_have_switched(self):
+        self.tab({"user.color_preset": "Dark One"})
+        self.main["COLOR_TIMEOUT_S"] = 0.05
+
+        async def half_done(connection, app, store, session, reroll=False):
+            self.main["_touched"].add(session.session_id)
+            await asyncio.sleep(3600)
+
+        self.main["color_session"] = half_done
+        self.run_quietly(self.main["change_from_menu"](None, self.app, self.store, "s1"))
+        self.assertIn("This tab's new look may not have been recorded", self.texts[0])
+        self.assertNotIn("couldn't switch", self.texts[0])
+
+    def test_the_change_alert_says_why_the_tab_kept_its_look(self):
+        self.fixing("0")
+        self.tab({"user.color_preset": "Dark One"})
+        self.profile.use_separate_colors_for_light_and_dark_mode = True
+        self.run_quietly(self.main["change_from_menu"](None, self.app, self.store, "s1"))
+        self.assertIn("couldn't switch to another look: its profile", self.texts[0])
+        self.assertIn("Use separate colors for light and dark mode", self.texts[0])
+
     def test_a_session_is_colored_by_one_call_at_a_time(self):
         self.tab({})
         calls = []
@@ -2099,6 +2371,7 @@ class TabTest(DbTest):
         async def slow(connection, app, store, session, reroll=False):
             calls.append(reroll)
             await release.wait()
+            raise self.main["LeftAsIs"]("faked: nothing to record")
 
         self.main["color_session"] = slow
         color_once = self.main["color_one_at_a_time"]
@@ -2141,7 +2414,8 @@ class TabTest(DbTest):
 
         self.main["color_session"] = half_done
         out = self.run_quietly(color_once(None, self.app, self.store, self.session))
-        self.assertIn("Change to another profile", out)  # how to fix a half-done tab
+        self.assertIn("may show a new look that wasn't recorded", out)
+        self.assertIn("Change to another profile", out)  # how to fix it
         self.assertEqual(self.main["_touched"], set())
 
     def test_a_locked_db_while_recording_doesnt_give_the_tab_up(self):
@@ -2177,14 +2451,14 @@ class TabTest(DbTest):
         self.record("Dark One", "Monaco", 13, "dark", "discovery", None, "Default", "s1")
         main, real = self.main, self.store
         picks = []
+        pick_look = main["pick_look"]
+        main["pick_look"] = lambda *args: picks.append(1) or pick_look(*args)
 
         class GatedStore:  # the first re-roll's row waits, without holding the DB lock
             def __init__(self):
                 self.gate, self.recording = asyncio.Event(), asyncio.Event()
 
             async def call(self, fn, *args):
-                if fn is main["pick_look"]:
-                    picks.append(1)
                 if fn is main["record_change"] and not self.gate.is_set():
                     self.recording.set()
                     await self.gate.wait()
@@ -2278,7 +2552,7 @@ class TabTest(DbTest):
         out = self.run_quietly(color(None, self.app, self.store, self.session))
         out += self.run_quietly(color(None, self.app, self.store, self.session))
         self.assertEqual(out.count("Use separate colors for light and dark mode"), 1)
-        self.profile.async_set_color_preset.assert_not_called()
+        self.session.async_set_profile_properties.assert_not_called()
         self.assertEqual(self.variables, {})
         self.assertEqual(self.db.execute("SELECT count(*) FROM launches").fetchone(), (0,))
         out = self.run_quietly(color(None, self.app, self.store, self.session, reroll=True))
@@ -2346,16 +2620,18 @@ class TabTest(DbTest):
     def test_nothing_left_to_pick_on_a_reroll_is_said_every_time(self):
         self.tab({"user.color_preset": "Dark One"})
         self.main["pick_look"] = lambda db, mode, exclude: None
-        color = self.main["color_session"]
-        out = "".join(
-            self.run_quietly(color(None, self.app, self.store, self.session, reroll=True))
-            for _ in range(2)
-        )
+        color = self.main["color_one_at_a_time"]
+        whys = []
+
+        async def twice(**kwargs):
+            for _ in range(2):
+                whys.append(await color(None, self.app, self.store, self.session, **kwargs))
+
+        out = self.run_quietly(twice(reroll=True))
         self.assertEqual(out.count("nothing left to pick"), 2)  # the dialog says to look here
+        self.assertEqual(whys, ["no other dark preset is left to pick"] * 2)  # for the alert
         self.tab({})
-        out = "".join(
-            self.run_quietly(color(None, self.app, self.store, self.session)) for _ in range(2)
-        )
+        out = self.run_quietly(twice())
         self.assertEqual(out.count("no dark presets to pick from"), 1)  # new tabs: once
 
     def test_a_background_task_that_fails_is_logged(self):
@@ -2396,13 +2672,14 @@ class TabTest(DbTest):
         self.assertIn("no scheme DB", out)
         self.assertNotIn("Traceback", out)
         self.assertNotIn("user.color_preset", self.variables)
-        db = self.db
+        db, main = self.db, self.main
 
         class Monitor:  # two new-tab events; the DB is built between them
             def __init__(self):
                 self.events = iter(["s1", "build", "s1"])
 
             async def async_get(self):
+                await asyncio.gather(*main["_background"])  # colorings run in their own tasks
                 event = next(self.events, None)
                 if event == "build":
                     with sqlite3.connect(missing) as copy:
@@ -2524,7 +2801,7 @@ class TabTest(DbTest):
     def test_three_missing_presets_in_a_row_say_rebuild_once(self):
         self.tab({})
         self.main["get_preset"] = mock.AsyncMock(return_value=None)
-        color = self.main["color_session"]
+        color = self.main["color_one_at_a_time"]
         out = self.run_quietly(color(None, self.app, self.store, self.session))
         out += self.run_quietly(color(None, self.app, self.store, self.session))
         self.assertEqual(out.count("3 picks in a row"), 1)
@@ -2547,7 +2824,7 @@ class TabTest(DbTest):
         self.record("Dark One", "Monaco", 13, "dark", "discovery", None, "Default", "s1")
         self.run_quietly(self.main["save_dialog"](None, self.app, self.store, "s1"))
         self.assertNotIn("Dark One", self.discovery("dark"))
-        self.profile.async_set_color_preset.assert_called_once_with("Dark Two")
+        self.assert_applied("Dark Two")
 
     def test_never_show_from_the_rating_dialog_asks_first_for_a_favorite(self):
         self.main["save_favorite"](self.db, "Dark One", "Monaco", 13, 4)
@@ -2556,7 +2833,7 @@ class TabTest(DbTest):
         self.assertEqual(len(self.texts), 2)  # the rating dialog, then the question
         self.assertIn("is a favorite", self.texts[1])
         self.assertTrue(self.main["is_favorite"](self.db, "Dark One", "Monaco"))
-        self.profile.async_set_color_preset.assert_not_called()
+        self.session.async_set_profile_properties.assert_not_called()
 
     def test_saving_a_tab_with_no_font_of_ours_records_the_font_it_saved(self):
         self.tab({"user.color_preset": "Dark One"}, ["3 ★★★"])
@@ -2717,7 +2994,7 @@ class NeverShowTest(DbTest):
     def test_menu_hides_the_preset_and_rerolls_the_tab(self):
         self.assertEqual(self.menu("Dark One"), [])  # not a favorite: no question asked
         self.assertNotIn("Dark One", self.discovery("dark"))
-        self.profile.async_set_color_preset.assert_called_once_with("Dark Two")
+        self.assert_applied("Dark Two")
         rows = self.db.execute("SELECT preset, end_reason FROM launches ORDER BY id")
         self.assertEqual(rows.fetchall(), [("Dark One", "changed"), ("Dark Two", None)])
 
@@ -2728,7 +3005,7 @@ class NeverShowTest(DbTest):
         self.assertIn("4 ★★★★", texts[0])
         self.assertEqual(self.include("Dark One"), "no row")  # not hidden
         self.assertTrue(self.main["is_favorite"](self.db, "Dark One", "Monaco"))
-        self.profile.async_set_color_preset.assert_not_called()
+        self.session.async_set_profile_properties.assert_not_called()
         self.menu("Dark One")
         self.assertFalse(self.main["is_favorite"](self.db, "Dark One", "Monaco"))
         self.assertEqual(self.include("Dark One"), 0)
@@ -2736,7 +3013,7 @@ class NeverShowTest(DbTest):
     def test_menu_on_a_preset_already_hidden_elsewhere_still_rerolls(self):
         self.main["never_show"](self.db, "Dark One")  # hidden from another tab
         self.assertEqual(self.menu("Dark One"), [])
-        self.profile.async_set_color_preset.assert_called_once_with("Dark Two")
+        self.assert_applied("Dark Two")
 
     def test_menu_says_so_when_no_other_preset_is_left(self):
         self.main["never_show"](self.db, "Dark Two")
@@ -2755,7 +3032,7 @@ class NeverShowTest(DbTest):
         texts = self.menu("Dark One", never_show=broken)
         self.assertEqual(len(texts), 2)  # the question, then "didn't take"
         self.assertIn("didn't take", texts[1])
-        self.profile.async_set_color_preset.assert_not_called()
+        self.session.async_set_profile_properties.assert_not_called()
         self.assertTrue(self.main["is_favorite"](self.db, "Dark One", "Monaco"))
 
     def test_popup_output_never_wraps_to_the_last_name(self):
@@ -2776,7 +3053,7 @@ class NeverShowTest(DbTest):
         texts = self.menu("Dark One", fail=True)
         self.assertEqual(len(texts), 1)
         self.assertIn("didn't take", texts[0])
-        self.profile.async_set_color_preset.assert_not_called()
+        self.session.async_set_profile_properties.assert_not_called()
 
     @unittest.skipUnless(shutil.which("osascript"), "needs macOS")
     def test_popup_lists_the_choices(self):

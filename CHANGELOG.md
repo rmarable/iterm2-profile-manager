@@ -2,6 +2,12 @@
 
 What changed for someone using iTerm2 Profile Manager, newest first. Releases up to v0.7.1 are described on [GitHub releases](https://github.com/rmarable/iterm2-profile-manager/releases).
 
+## Unreleased
+
+- New tabs are colored much faster (32 tabs opened at once took 1.5 s instead of 12 s in a test), and a tab that iTerm2 is slow to answer no longer holds up the others. Two tabs opened together don't get the same preset from discovery.
+- When **Change to another profile** can't switch a tab, its alert now says why (for example, the profile's "Use separate colors for light and dark mode" setting). So does the re-roll after **Never show this profile**.
+- A tab closed while it was still being colored now gets its real end time, instead of being marked "unknown" at the next restart.
+
 ## v0.13.1 (2026-11-06)
 
 - The restore steps (docs/REFERENCE.md, Restore) now set the old database and its `-wal` changes aside in a dated folder instead of deleting them, so you can go back if the restore goes wrong.
