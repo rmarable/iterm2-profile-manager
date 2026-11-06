@@ -221,7 +221,7 @@ if $DATA; then
 	# Stop before anything in DATA_DIR is deleted, saying which step failed (and dropping what
 	# it left half written).
 	data_failed() {
-		rm -f "$keep_file" "$export_file"
+		rm -f "$keep_file" "$export_file" "$export_file.partial"
 		echo "  ! $1 failed, so nothing in $DATA_DIR was deleted, and the rest of this run" >&2
 		echo "    (--fonts, --repo) didn't happen. If the error above says the DB is damaged or" >&2
 		echo "    not a database, restore a snapshot (docs/REFERENCE.md, Restore); then run this again." >&2

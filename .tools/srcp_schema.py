@@ -3,17 +3,19 @@ the hash and the fix_colors rule, seed values, the oldest schema the readers acc
 (MIN_SCHEMA), the color space conversions to sRGB the color math uses (Display P3,
 Generic RGB), and WCAG contrast.
 
-Imported by the AutoLaunch script (under iTerm2's Python 3.12) and by the build,
-srcp_favorites.py, srcp_odds.py and srcp_export_curation.py in .tools/ (under
-/usr/bin/python3 3.9), so this stays 3.9-compatible and stdlib-only. setup.sh installs it
-into the Scripts folder's .tools/.
+Imported by the AutoLaunch script and the Scripts-menu scripts (under iTerm2's Python 3.12),
+and by the tools in .tools/ that touch the DB (under /usr/bin/python3 3.9), so this stays
+3.9-compatible and stdlib-only. setup.sh installs it into the Scripts folder's .tools/.
 """
 
 from __future__ import annotations
 
 import hashlib
+import math
 import os
+import sqlite3
 import struct
+from pathlib import Path
 
 # Where the scheme DB lives (its snapshots go to backups/ beside it).
 DATA_DIR = os.path.expanduser("~/.local/share/iterm2-color-schemes")
@@ -49,8 +51,22 @@ SEED_CONFIG = {
     "nonascii_font": "MesloLGSNFM-Regular",  # prompt icons; '' turns it off
     "fix_colors": "1",  # adjust hard-to-see colors; 0 turns it off
 }
-# The numeric config keys the main script's pick() reads (srcp_odds.py keeps its own copy for now).
+# The numeric config keys pick() reads (the main script, and srcp_odds.py, which mirrors it).
 NUMERIC_CONFIG = ("favorite_share", "favorite_target", "recent_window", "colorful_weight")
+CONFIG_MAX = 1e6  # a numeric setting above this is taken as a typo, like a non-number
+
+
+def config_number(value):
+    """A numeric config value as pick() uses it, or None if it isn't usable (the caller keeps
+    the default). inf, nan or a huge value would break every pick (int(inf), an SQL LIMIT past
+    64 bits, weights summing to inf) or quietly stop favorites (nan)."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) and abs(number) <= CONFIG_MAX else None
+
+
 # PostScript name -> font file names (any one present counts as installed).
 SEED_FONTS = {
     "SFMono-Regular": ["SF-Mono-Regular.otf"],
@@ -286,6 +302,13 @@ def relative_luminance(c):
 def contrast_ratio(c1, c2):
     l1, l2 = relative_luminance(c1) + 0.05, relative_luminance(c2) + 0.05
     return max(l1, l2) / min(l1, l2)
+
+
+def connect_rw(path, timeout=5.0):
+    """A connection in autocommit mode that never creates an empty DB (mode=rw). The tools
+    use it even to read: mode=ro can fail on a WAL DB that nothing else has open."""
+    uri = Path(path).resolve().as_uri() + "?mode=rw"
+    return sqlite3.connect(uri, uri=True, timeout=timeout, isolation_level=None)
 
 
 def is_busy(error):

@@ -16,12 +16,19 @@ import datetime as dt
 import os
 import sqlite3
 import sys
-from pathlib import Path
 from typing import NamedTuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # works under python3 -I too
 from srcp_schema import DB_PATH as DEFAULT_DB
-from srcp_schema import FIX_ON_SQL, REBUILD, UNHIDE, OldSchema, check_schema, is_busy
+from srcp_schema import (
+    FIX_ON_SQL,
+    REBUILD,
+    UNHIDE,
+    OldSchema,
+    check_schema,
+    connect_rw,
+    is_busy,
+)
 
 FAVORITES = """
 SELECT f.stars, f.preset, COALESCE(fo.label, f.font) AS font, e.mode,
@@ -212,14 +219,11 @@ def show_again(db, preset):
 
 
 def connect(path, timeout=5.0):
-    """Read-write connection in autocommit mode; mode=rw never creates an empty DB.
+    """srcp_schema.connect_rw, checked against this version's schema.
 
     Raises OldSchema (message: what to do) for a DB that doesn't fit these scripts.
     """
-    # mode=rw even to read: mode=ro can fail on a WAL DB that nothing else has open.
-    db = sqlite3.connect(
-        Path(path).resolve().as_uri() + "?mode=rw", uri=True, timeout=timeout, isolation_level=None
-    )
+    db = connect_rw(path, timeout)
     try:
         check_schema(db)
     except BaseException:

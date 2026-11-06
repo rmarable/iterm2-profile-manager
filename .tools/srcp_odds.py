@@ -12,28 +12,37 @@ Reads the scheme DB only; safe any time:
 from __future__ import annotations
 
 import argparse
-import contextlib
 import json
 import os
 import sqlite3
 import sys
-from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # works under python3 -I too
 from srcp_schema import DB_PATH as DEFAULT_DB
-from srcp_schema import REBUILD, SEED_CONFIG, OldSchema, check_schema, is_busy
+from srcp_schema import (
+    NUMERIC_CONFIG,
+    REBUILD,
+    SEED_CONFIG,
+    OldSchema,
+    check_schema,
+    config_number,
+    connect_rw,
+    default_font_label,
+    is_busy,
+)
 
-NUMERIC = ("favorite_share", "favorite_target", "recent_window", "colorful_weight")
 BAR = 30
 
 
 def read_config(db):
     """config as pick() reads it: numbers, with the seeded defaults for missing or bad values."""
-    cfg = {k: float(SEED_CONFIG[k]) for k in NUMERIC}
+    cfg = {k: float(SEED_CONFIG[k]) for k in NUMERIC_CONFIG}
     for key, value in db.execute("SELECT key, value FROM config"):
-        if key in cfg:
-            with contextlib.suppress(TypeError, ValueError):  # pick() keeps the default too
-                cfg[key] = float(value)
+        if key not in cfg:
+            continue
+        number = config_number(value)  # None: pick() keeps the default too
+        if number is not None:
+            cfg[key] = number
     return cfg
 
 
@@ -84,7 +93,7 @@ def odds(db, mode):
     font_share = {}
     for preset, font, stars in favs:
         p = p_fav * stars / star_total
-        label = labels.get(font) or font.removesuffix("-Regular")
+        label = labels.get(font) or default_font_label(font)
         favorites.append(
             {"preset": preset, "font": font, "label": label, "stars": stars, "chance": p}
         )
@@ -116,7 +125,7 @@ def odds(db, mode):
             "presets": {n: p_new * w / total for (n, _), w in zip(pool, weights)},
         },
         "fonts": dict(sorted(font_share.items(), key=lambda kv: (-kv[1], kv[0]))),
-        "font_labels": {f: labels.get(f) or f.removesuffix("-Regular") for f in font_share},
+        "font_labels": {f: labels.get(f) or default_font_label(f) for f in font_share},
     }
 
 
@@ -191,8 +200,7 @@ def main():
 
     if not os.path.exists(args.db):
         sys.exit(f"No database at {args.db}. Build it with {REBUILD}.")
-    # mode=rw (it only reads): mode=ro can fail on a WAL DB that nothing else has open.
-    db = sqlite3.connect(Path(args.db).resolve().as_uri() + "?mode=rw", uri=True)
+    db = connect_rw(args.db)
     try:
         check_schema(db)
         modes = [args.mode] if args.mode else ["light", "dark"]
