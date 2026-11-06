@@ -2,7 +2,7 @@
 
 What changed for someone using iTerm2 Profile Manager, newest first. Releases up to v0.7.1 are described on [GitHub releases](https://github.com/rmarable/iterm2-profile-manager/releases).
 
-## Unreleased
+## v0.14.4 (2026-11-06)
 
 - Three more fonts in the random pool: SF Mono Terminal, PT Mono and Andale Mono, which come with macOS or Terminal.app. They show up after the next `./setup.sh` or `python3 .tools/srcp_build_scheme_db.py`.
 - New `.tools/srcp_fonts.py`: opens a page comparing fixed-width fonts side by side; `--add "JetBrains Mono"` installs a Homebrew font and adds it to the pool, and `--remove` takes one out.
