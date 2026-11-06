@@ -74,7 +74,7 @@ except ImportError as e:
     )
     sys.exit(1)
 
-VERSION = "0.13.1"  # bump on every change, so the Console shows which code is running
+VERSION = "0.13.2"  # bump on every change, so the Console shows which code is running
 LOCK_PATH = os.path.join(DATA_DIR, ".lock")
 # How often the running script checks whether a snapshot is due. asyncio's clock stops while
 # the Mac sleeps, so check often (it's a few file stats) to keep it close to daily.
@@ -200,8 +200,9 @@ class Store:
         except FileNotFoundError:
             inode = None
         if self.db is not None and inode != self.inode:
-            # Deleted or replaced by a rename (docs/REFERENCE.md's restore does cp + mv): don't keep
-            # writing to the old file. A cp over the file keeps its inode and isn't noticed.
+            # Deleted, moved away or replaced by a rename: don't keep writing to the old file.
+            # A cp over the file keeps its inode and isn't noticed (stale() mostly misses it too;
+            # see its docstring).
             self.db.close()
             self.db = None
         if self.db is not None and stale(self.db):
