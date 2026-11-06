@@ -107,7 +107,7 @@ fi
 if [[ "$(defaults read com.googlecode.iterm2 LoadPrefsFromCustomFolder 2>/dev/null || true)" == 1 ]]; then
 	folder="$(defaults read com.googlecode.iterm2 PrefsCustomFolder 2>/dev/null || echo "unknown location")"
 	echo "iTerm2 loads its settings from a custom folder or URL ($folder), so it would" >&2
-	echo "overwrite changes made here. In iTerm2, turn off Settings > General > Settings >" >&2
+	echo "overwrite changes made here. In iTerm2, turn off Settings → General → Settings →" >&2
 	echo "Load settings from a custom folder or URL, quit it, run this again, then turn" >&2
 	echo "that setting back on and save the current settings to the folder." >&2
 	$DRYRUN || exit 1
@@ -191,7 +191,7 @@ python3 "$HERE/.tools/srcp_build_scheme_db.py" "${DRY_FLAG[@]+"${DRY_FLAG[@]}"}"
 echo "==> Key binding: Ctrl-Opt-Cmd-S saves the current profile"
 # Optional: a failure here must not stop the scripts from being installed below.
 if ! python3 "$HERE/.tools/srcp_add_key_binding.py" "${DRY_FLAG[@]+"${DRY_FLAG[@]}"}"; then
-	echo "  (key binding skipped; add it in Settings > Keys > Key Bindings: Ctrl-Opt-Cmd-S," \
+	echo "  (key binding skipped; add it in Settings → Keys → Key Bindings: Ctrl-Opt-Cmd-S," \
 		"action Invoke Script Function, function save_profile())"
 fi
 
@@ -230,9 +230,9 @@ $DRYRUN && exit 0
 cat <<'EOF'
 
 Done. If you haven't already, in iTerm2:
-  - Settings > General > Magic > Enable Python API
-  - Scripts > Manage > Install Python Runtime (first time only)
+  - Settings → General → Magic → Enable Python API
+  - Scripts → Manage → Install Python Runtime (first time only)
   - Relaunch iTerm2 so the new fonts appear and the AutoLaunch script starts.
     If an old random_profile_color.py is still running, the relaunch stops it
-    (or terminate it in Scripts > Manage > Console).
+    (or terminate it in Scripts → Manage → Console).
 EOF

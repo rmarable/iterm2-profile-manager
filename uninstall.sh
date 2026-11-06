@@ -140,7 +140,7 @@ fi
 if [[ "$(defaults read com.googlecode.iterm2 LoadPrefsFromCustomFolder 2>/dev/null || true)" == 1 ]]; then
 	folder="$(defaults read com.googlecode.iterm2 PrefsCustomFolder 2>/dev/null || echo "unknown location")"
 	echo "iTerm2 loads its settings from a custom folder or URL ($folder), so it would" >&2
-	echo "overwrite changes made here. In iTerm2, turn off Settings > General > Settings >" >&2
+	echo "overwrite changes made here. In iTerm2, turn off Settings → General → Settings →" >&2
 	echo "Load settings from a custom folder or URL, quit it, run this again, then turn" >&2
 	echo "that setting back on and save the current settings to the folder." >&2
 	$DRYRUN || exit 1

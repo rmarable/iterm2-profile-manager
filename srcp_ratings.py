@@ -44,7 +44,7 @@ def render(db: sqlite3.Connection, view: str) -> str:
             elif view == "History":
                 report.show_history(db, HISTORY_ROWS)
             else:
-                report.show_hidden(db, "Show one again: Scripts > srcp_never_show.py")
+                report.show_hidden(db, "Show one again: Scripts → srcp_never_show.py")
         except SystemExit as e:  # the report exits with a message when there's no data
             print(e)
         except sqlite3.OperationalError as e:

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Bind Ctrl-Opt-Cmd-S to save_profile() (srcp_set_random_color_profile.py's save dialog).
 
-Adds a global key binding in Settings > Keys > Key Bindings with the action
+Adds a global key binding in Settings → Keys → Key Bindings with the action
 "Invoke Script Function". An existing Ctrl-Opt-Cmd-S binding is left alone. If
 GlobalKeyMap isn't set yet, iTerm2 is using its built-in defaults, so those are
 copied in first and kept.
@@ -53,8 +53,8 @@ def main():
         if not os.path.exists(DEFAULT_KEY_MAP):
             sys.exit(
                 f"{KEY_MAP} isn't set and {DEFAULT_KEY_MAP} is missing, so adding a key "
-                "would drop iTerm2's default bindings. Add it by hand in Settings > Keys "
-                "(set ITERM_APP if iTerm2 isn't in /Applications or ~/Applications)."
+                "would drop iTerm2's default bindings. Add it by hand in Settings → Keys → "
+                "Key Bindings (set ITERM_APP if iTerm2 isn't in /Applications or ~/Applications)."
             )
         with open(DEFAULT_KEY_MAP, "rb") as f:
             keymap = plistlib.load(f)

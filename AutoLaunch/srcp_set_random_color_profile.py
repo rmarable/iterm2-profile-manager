@@ -12,7 +12,7 @@ minutes while it runs).
 current look; "Remove profile from favorites" (right-click; hidden on non-favorites only where
 iTerm2 supports API protocol 1.23+) un-stars it; "Change to another profile" (right-click)
 re-rolls the session's look; "Never show this profile" (right-click) hides the preset and
-re-rolls (Scripts > srcp_never_show.py undoes it). Every favorite is also an
+re-rolls (Scripts → srcp_never_show.py undoes it). Every favorite is also an
 iTerm2 profile ("Kibble - Menlo"), kept in a Dynamic Profiles file. Tabs of a profile with
 "Use separate colors for light and dark mode" on are left as they are (the Console says so).
 """
@@ -78,7 +78,7 @@ except ImportError as e:
     )
     sys.exit(1)
 
-VERSION = "0.14.4"  # bump on every change, so the Console shows which code is running
+VERSION = "0.14.6"  # bump on every change, so the Console shows which code is running
 LOCK_PATH = os.path.join(DATA_DIR, ".lock")
 # How often the running script checks whether a snapshot is due. asyncio's clock stops while
 # the Mac sleeps, so check often (it's a few file stats) to keep it close to daily.
@@ -1034,7 +1034,7 @@ async def slot(slots: asyncio.Semaphore | None, timing: Timing) -> AsyncIterator
 UNRECORDED = "it took too long, and may show a new look that wasn't recorded"
 # The Console's version, for a coloring stopped after its look was sent.
 UNRECORDED_WHAT = (
-    "the tab may show a new look that wasn't recorded; right-click > Change to another profile"
+    "the tab may show a new look that wasn't recorded; right-click → Change to another profile"
 )
 
 
@@ -1060,7 +1060,7 @@ def skips_separate_colors(profile: iterm2.Profile, reroll: bool) -> bool:
         return False
     why = (
         f'profile {profile.name!r} has "Use separate colors for light and dark mode" on '
-        "(Settings > Profiles > Colors), so its tabs are left as is; turn it off to have "
+        "(Settings → Profiles → Colors), so its tabs are left as is; turn it off to have "
         "them colored (see Troubleshooting in the README)"
     )
     warn(key, why, every=reroll)
@@ -1105,7 +1105,7 @@ async def color_session(
     if skips_separate_colors(profile, reroll):
         raise LeftAsIs(
             f'its profile "{profile.name}" has "Use separate colors for light and dark mode" '
-            "on (Settings > Profiles > Colors)"
+            "on (Settings → Profiles → Colors)"
         )
     exclude: set[str] = {current} if current else set()  # a re-roll never gives the same back
     sid = session.session_id
@@ -1550,7 +1550,7 @@ async def db_failed_alert(connection: iterm2.Connection, title: str, window_id: 
     await iterm2.Alert(
         title,
         "That didn't take: the database was busy or missing. Try again in a moment; "
-        "Scripts > Manage > Console has the details.",
+        "Scripts → Manage → Console has the details.",
         window_id,
     ).async_run(connection)
 
@@ -1605,10 +1605,10 @@ async def change_from_menu(
 def kept_look_text(why: str | None, subject: str) -> str:
     """The alert for a re-roll that left the tab's look as it was; why from
     color_one_at_a_time."""
-    console = "Scripts > Manage > Console has the details."
+    console = "Scripts → Manage → Console has the details."
     if why == UNRECORDED:  # it may have switched after all
         return (
-            f"{subject}'s new look may not have been recorded: it took too long. Right-click > "
+            f"{subject}'s new look may not have been recorded: it took too long. Right-click → "
             f"Change to another profile to get one that is. {console}"
         )
     if why:
@@ -1636,7 +1636,7 @@ async def confirm_never_show(
         return True
     lines = [f"{preset} is a favorite:"]
     lines += [f"  {label} {STAR_BUTTONS[stars - 1]}" for label, stars in favs]
-    lines.append("Never show removes it from your favorites and from Profiles > Favorites.")
+    lines.append("Never show removes it from your favorites and from Profiles → Favorites.")
     alert = iterm2.Alert(NEVER_TITLE, "\n".join(lines), window_id)
     buttons = [CANCEL, NEVER]  # Cancel first: Escape cancels and Return can't hide it
     return await alert_choice(connection, alert, buttons) == NEVER

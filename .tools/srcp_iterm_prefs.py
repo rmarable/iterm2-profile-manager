@@ -22,8 +22,8 @@ APP_DIRS = ["/Applications/iTerm.app", os.path.expanduser("~/Applications/iTerm.
 QUIT_FIRST = "iTerm2 is running. Quit it (Cmd-Q) and run this from Terminal.app."
 CUSTOM_FOLDER = (
     "iTerm2 loads its settings from a custom folder or URL ({}), so it would overwrite "
-    "changes written here the next time it starts. In iTerm2, turn off Settings > General > "
-    "Settings > Load settings from a custom folder or URL, quit it, run this again, then "
+    "changes written here the next time it starts. In iTerm2, turn off Settings → General → "
+    "Settings → Load settings from a custom folder or URL, quit it, run this again, then "
     "turn that setting back on and save the current settings to the folder."
 )
 
