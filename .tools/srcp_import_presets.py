@@ -20,10 +20,8 @@ import plistlib
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # works under python3 -I too
-from srcp_iterm_prefs import QUIT_FIRST, iterm_running, load_prefs, save_prefs
+from srcp_iterm_prefs import PRESETS_KEY, QUIT_FIRST, iterm_running, load_prefs, save_prefs
 from srcp_preset_history import past_versions, repo_root
-
-KEY = "Custom Color Presets"
 
 
 def main():
@@ -51,7 +49,7 @@ def main():
         sys.exit(f"No .itermcolors files in {args.schemes_dir}")
 
     prefs = load_prefs()
-    presets = prefs.setdefault(KEY, {})
+    presets = prefs.setdefault(PRESETS_KEY, {})
     root = repo_root(os.path.dirname(files[0]))
 
     added, replaced, current, kept = [], [], [], []
@@ -87,7 +85,7 @@ def main():
             print("(dry run: nothing written)")
         return
 
-    backup = save_prefs(prefs, [KEY])
+    backup = save_prefs(prefs, [PRESETS_KEY])
     print(f"Done. Backup of previous prefs: {backup}")
 
 

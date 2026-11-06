@@ -16,17 +16,21 @@ import plistlib
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # works under python3 -I too
-from srcp_iterm_prefs import QUIT_FIRST, iterm_app, iterm_running, load_prefs, save_prefs
-
-DEFAULT_MAP = os.path.join(iterm_app(), "Contents/Resources/DefaultGlobalKeyMap.plist")
-KEY_MAP = "GlobalKeyMap"
+from srcp_iterm_prefs import (
+    DEFAULT_KEY_MAP,
+    KEY_MAP,
+    QUIT_FIRST,
+    SAVE_BINDING,
+    iterm_running,
+    load_prefs,
+    save_prefs,
+)
 
 # 0x<character>-0x<modifiers>-0x<keycode>-0x1, as in iterm2.KeyBinding.key:
 # "s", Control|Option|Command (1<<18 | 1<<19 | 1<<20), kVK_ANSI_S = 1.
 # Format confirmed working in iTerm2 3.7.6.
 CHAR_MODS = "0x73-0x1c0000"
 BINDING_KEY = CHAR_MODS + "-0x1-0x1"
-BINDING = {"Action": 60, "Text": "save_profile()"}  # 60 = INVOKE_SCRIPT_FUNCTION
 
 
 def main():
@@ -46,31 +50,31 @@ def main():
     prefs = load_prefs()
     keymap = prefs.get(KEY_MAP)
     if keymap is None:
-        if not os.path.exists(DEFAULT_MAP):
+        if not os.path.exists(DEFAULT_KEY_MAP):
             sys.exit(
-                f"{KEY_MAP} isn't set and {DEFAULT_MAP} is missing, so adding a key "
+                f"{KEY_MAP} isn't set and {DEFAULT_KEY_MAP} is missing, so adding a key "
                 "would drop iTerm2's default bindings. Add it by hand in Settings > Keys "
                 "(set ITERM_APP if iTerm2 isn't in /Applications or ~/Applications)."
             )
-        with open(DEFAULT_MAP, "rb") as f:
+        with open(DEFAULT_KEY_MAP, "rb") as f:
             keymap = plistlib.load(f)
         print(f"  + {KEY_MAP}: start from iTerm2's {len(keymap)} default bindings")
 
     existing = [k for k in keymap if k == CHAR_MODS or k.startswith(CHAR_MODS + "-")]
     if existing:
         entry = keymap[existing[0]]
-        same = entry.get("Action") == BINDING["Action"] and entry.get("Text") == BINDING["Text"]
+        same = all(entry.get(k) == SAVE_BINDING[k] for k in ("Action", "Text"))
         print(
             f"  = Ctrl-Opt-Cmd-S already bound ({existing[0]}: {entry})"
             + ("" if same else "; left alone")
         )
         return
 
-    print(f"  + {KEY_MAP}: Ctrl-Opt-Cmd-S -> Invoke Script Function {BINDING['Text']}")
+    print(f"  + {KEY_MAP}: Ctrl-Opt-Cmd-S -> Invoke Script Function {SAVE_BINDING['Text']}")
     if args.dry_run:
         print("  (dry run: nothing written)")
         return
-    keymap[BINDING_KEY] = BINDING
+    keymap[BINDING_KEY] = SAVE_BINDING
     prefs[KEY_MAP] = keymap
     print(f"  Backup of previous iTerm2 prefs: {save_prefs(prefs, [KEY_MAP])}")
 

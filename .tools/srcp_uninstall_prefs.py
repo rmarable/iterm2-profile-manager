@@ -18,19 +18,24 @@ import plistlib
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # works under python3 -I too
-from srcp_iterm_prefs import DOMAIN, QUIT_FIRST, iterm_app, iterm_running, load_prefs, save_prefs
+from srcp_iterm_prefs import (
+    DEFAULT_KEY_MAP,
+    DOMAIN,
+    KEY_MAP,
+    PRESETS_KEY,
+    QUIT_FIRST,
+    SAVE_BINDING,
+    iterm_running,
+    load_prefs,
+    save_prefs,
+)
 from srcp_preset_history import from_repo, repo_root
-
-KEY_MAP = "GlobalKeyMap"
-PRESETS = "Custom Color Presets"
-SAVE_ACTION = {"Action": 60, "Text": "save_profile()"}  # as written by srcp_add_key_binding.py
-DEFAULT_MAP = os.path.join(iterm_app(), "Contents/Resources/DefaultGlobalKeyMap.plist")
 
 
 def is_default_keymap(keymap):
     """True if keymap is exactly iTerm2's built-in bindings (as srcp_add_key_binding copied)."""
     try:
-        with open(DEFAULT_MAP, "rb") as f:
+        with open(DEFAULT_KEY_MAP, "rb") as f:
             return keymap == plistlib.load(f)
     except (OSError, plistlib.InvalidFileException):
         return False
@@ -42,7 +47,7 @@ def remove_key_binding(prefs):
     ours = [
         k
         for k, v in keymap.items()
-        if v.get("Action") == SAVE_ACTION["Action"] and v.get("Text") == SAVE_ACTION["Text"]
+        if v.get("Action") == SAVE_BINDING["Action"] and v.get("Text") == SAVE_BINDING["Text"]
     ]
     for k in ours:
         print(f"  - {KEY_MAP}: {k} -> Invoke Script Function save_profile()")
@@ -65,7 +70,7 @@ def remove_key_binding(prefs):
 
 
 def remove_presets(prefs, schemes_dir):
-    presets = prefs.get(PRESETS) or {}
+    presets = prefs.get(PRESETS_KEY) or {}
     files = sorted(glob.glob(os.path.join(os.path.expanduser(schemes_dir), "*.itermcolors")))
     if not files:
         print(f"  (skipped presets: no .itermcolors files in {schemes_dir})")
@@ -115,7 +120,7 @@ def main():
     # None: no binding, so GlobalKeyMap is untouched; []: it changed; [KEY_MAP]: delete it.
     keys = [KEY_MAP] if delete == [] else []
     if args.presets and remove_presets(prefs, args.presets):
-        keys.append(PRESETS)
+        keys.append(PRESETS_KEY)
     if args.dry_run or not (keys or delete):
         if args.dry_run:
             print("  (dry run: nothing written)")

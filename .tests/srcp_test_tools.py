@@ -76,9 +76,9 @@ class HelperTest(unittest.TestCase):
         with tempfile.NamedTemporaryFile(suffix=".plist", delete=False) as f:
             plistlib.dump(defaults, f)
         self.addCleanup(os.remove, f.name)
-        real = srcp_uninstall_prefs.DEFAULT_MAP
-        srcp_uninstall_prefs.DEFAULT_MAP = f.name
-        self.addCleanup(setattr, srcp_uninstall_prefs, "DEFAULT_MAP", real)
+        real = srcp_uninstall_prefs.DEFAULT_KEY_MAP
+        srcp_uninstall_prefs.DEFAULT_KEY_MAP = f.name
+        self.addCleanup(setattr, srcp_uninstall_prefs, "DEFAULT_KEY_MAP", real)
         ours = {"Action": 60, "Text": "save_profile()"}
         out = io.StringIO()
         with contextlib.redirect_stdout(out):

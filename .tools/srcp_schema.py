@@ -205,7 +205,8 @@ SRGB_TO_P3 = _inverse(P3_TO_SRGB)
 
 # Generic RGB as NSColor converts it to sRGB: the D50 colorants in /System/Library/ColorSync/
 # Profiles/{Generic RGB,sRGB} Profile.icc (s15Fixed16 / 65536), gamma 461/256, linear (v / 16)
-# below 1/32. Within 4e-4 of NSColor (237 samples, 2026-11-05); a 0.3% step at the knee.
+# below 1/32. Within 6e-4 of NSColor (5.7e-4 worst of 250 random samples, 2026-11-05 review);
+# a 0.3% step at the knee.
 GENERIC_D50 = _columns(
     (29773 / 65536, 15854 / 65536, 976 / 65536),
     (23157 / 65536, 44147 / 65536, 5940 / 65536),

@@ -19,7 +19,10 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # works under python3 -I too
 from srcp_schema import DB_PATH as DEFAULT_DB
+from srcp_schema import REBUILD
 
+# Every table a rebuild keeps, except launches (history, left out on purpose); schemes is
+# rebuilt from the presets. A test holds this equal to the DB's tables, so a new one is a choice.
 TABLES = ["favorites", "ratings", "overrides", "config", "fonts"]
 
 
@@ -79,7 +82,7 @@ def export(db, out):
     out.write(".timeout 5000\n")
     out.write(
         f"-- A 'CHECK constraint failed' here means the DB is older than schema {version}:\n"
-        "-- rebuild it first (python3 .tools/srcp_build_scheme_db.py), then restore again. If the\n"
+        f"-- rebuild it first ({REBUILD}), then restore again. If the\n"
         "-- rebuild doesn't raise it to that, update that checkout first (git pull).\n"
     )
     out.write(f"CREATE TEMP TABLE srcp_schema_check (v INTEGER CHECK (v >= {version}));\n")

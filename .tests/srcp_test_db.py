@@ -53,6 +53,7 @@ from srcp_testlib import (  # noqa: E402  (after the sys.path line above)
     UNREADABLE,
     color,
     load_main,
+    preset,
 )
 
 BUILD = os.path.join(ROOT, ".tools", "srcp_build_scheme_db.py")
@@ -294,6 +295,18 @@ class BuildTest(DbTest):
         for path in (MAIN, BUILD, os.path.join(ROOT, ".tools", "srcp_favorites.py")):
             with open(path) as f, self.subTest(path=os.path.basename(path)):
                 self.assertEqual(copies.findall(f.read()), [])
+        # The prefs keys and the key binding live in srcp_iterm_prefs, the rebuild command in
+        # srcp_schema; the tools import them.
+        prefs_copies = re.compile(
+            r'"Custom Color Presets"|"GlobalKeyMap"|"save_profile\(\)"|DefaultGlobalKeyMap'
+            r"|\.tools/srcp_build_scheme_db\.py[),.]"
+        )
+        tools = ["build_scheme_db", "import_presets", "add_key_binding", "uninstall_prefs"]
+        tools += ["favorites", "odds", "export_curation"]
+        for name in tools:
+            path = os.path.join(ROOT, ".tools", f"srcp_{name}.py")
+            with open(path) as f, self.subTest(path=os.path.basename(path)):
+                self.assertEqual(prefs_copies.findall(f.read()), [])
 
     def test_a_missing_tools_folder_exits_with_a_clear_line(self):
         real_import = __import__
@@ -374,6 +387,57 @@ class DamagedDbTest(DbTest):
             timeout=60,
         )
 
+    def test_a_locked_db_stops_the_build_with_one_line_saying_what_happened(self):
+        real = sqlite3.connect
+
+        def quick(*args, **kwargs):  # the 5 s busy wait, made short
+            return real(*args, **{**kwargs, "timeout": 0.1})
+
+        holder = real(self.db_path, isolation_level=None)
+        self.addCleanup(holder.close)
+        holder.execute("PRAGMA locking_mode = EXCLUSIVE")  # WAL: this plus a read locks others out
+        holder.execute("SELECT count(*) FROM schemes")
+        argv = ["build", "--db", self.db_path, "--repo", self.repo]
+        backups = os.path.join(os.path.dirname(self.db_path), "backups")
+        before = set(os.listdir(backups)) if os.path.isdir(backups) else set()
+        locked_after = sqlite3.OperationalError("database is locked")
+        cases = {
+            "at the first check": ({}, build.LOCKED_BEFORE),
+            # Past the check (as if the lock came a moment later): the pre-write reads.
+            "before the write": ({"check_existing_db": lambda _p: None}, build.LOCKED_BEFORE),
+            "after the write": (
+                {"warn_included_duplicates": mock.Mock(side_effect=locked_after)},
+                build.LOCKED_AFTER,
+            ),
+        }
+        for name, (patches, then) in cases.items():
+            with self.subTest(name), contextlib.ExitStack() as stack:
+                if name == "after the write":
+                    holder.close()  # free for the write; the report's read fails instead
+                    with contextlib.closing(real(self.db_path)) as db, db:
+                        db.execute("DELETE FROM schemes")  # so the write shows
+                stack.enter_context(mock.patch.object(sqlite3, "connect", quick))
+                stack.enter_context(mock.patch.object(sys, "argv", argv))
+                stack.enter_context(
+                    mock.patch.object(build, "load_prefs", lambda: {build.PRESETS_KEY: PRESETS})
+                )
+                for attr, value in patches.items():
+                    stack.enter_context(mock.patch.object(build, attr, value))
+                stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+                with self.assertRaises(SystemExit) as caught:
+                    build.main()
+                self.assertEqual(
+                    str(caught.exception),
+                    f"{self.db_path} is locked (another sqlite3 session or a long write?). {then}",
+                )
+                if then == build.LOCKED_AFTER:  # the build itself went through
+                    with contextlib.closing(real(self.db_path)) as db:
+                        rows = db.execute("SELECT count(*) FROM schemes").fetchone()[0]
+                    self.assertEqual(rows, len(PRESETS))
+                if then == build.LOCKED_BEFORE:  # no snapshot of a DB it couldn't read
+                    now = set(os.listdir(backups)) if os.path.isdir(backups) else set()
+                    self.assertEqual(now, before)
+
     def test_a_damaged_db_is_left_alone_with_no_snapshot(self):
         junk = os.path.join(self.tmp, "junk", "schemes.db")
         os.makedirs(os.path.dirname(junk))
@@ -437,6 +501,27 @@ class MigrationTest(DbTest):
                 got = hashlib.sha1(" ".join(sql.split()).encode(), usedforsecurity=False)
                 self.assertEqual(got.hexdigest(), sha, "a shipped step changed: add a new one")
         self.assertEqual(len(self.SHIPPED), len(build.MIGRATIONS), "list a new step's sha1 here")
+
+    # sha1 of the schemes table and views as the build writes them (constants filled in, --
+    # comments dropped, whitespace collapsed), for the schema version they belong to.
+    SHAPE: ClassVar[dict[int, str]] = {8: "b0e67223c24ab81e166c78329b1205b330cfa040"}
+
+    def test_a_change_to_schemes_or_a_view_comes_with_a_new_schema_version(self):
+        sql = build.SCHEMES_TABLE + build.VIEWS.format(
+            colorful=build.COLORFUL_BG_CHROMA, fix_on=build.FIX_ON_SQL
+        )
+        sql = "\n".join(re.sub(r"--.*$", "", line) for line in sql.splitlines())
+        got = hashlib.sha1(" ".join(sql.split()).encode(), usedforsecurity=False).hexdigest()
+        self.assertEqual(
+            self.SHAPE.get(srcp_schema.MIN_SCHEMA),
+            got,
+            "schemes or a view changed: add a migration step, raise MIN_SCHEMA and pin this "
+            "sha1 for it (CLAUDE.md: any change to their shape or meaning adds a step)",
+        )
+
+    def test_scheme_rows_name_the_table_columns_in_order(self):
+        columns = [r[1] for r in self.db.execute("PRAGMA table_info(schemes)")]
+        self.assertEqual(list(build.SchemeRow._fields), columns)
 
     def db_at_version(self, n):
         """A DB as a build with only MIGRATIONS[:n] left it, holding some user data.
@@ -1178,6 +1263,14 @@ class ExportTest(DbTest):
     def restore(self, sql, db_path):
         subprocess.run(["sqlite3", db_path], input=sql + sql, text=True, check=True)
 
+    def test_every_kept_table_is_exported_but_launches(self):
+        tables = {
+            n
+            for (n,) in self.db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+            if not n.startswith("sqlite_")
+        }
+        self.assertEqual(set(srcp_export_curation.TABLES), tables - {"schemes", "launches"})
+
     def test_restore_twice_is_a_no_op_and_new_fonts_arrive_disabled(self):
         self.main["save_favorite"](self.db, "Dark One", "Monaco", 13, 4)
         self.db.execute(
@@ -1385,7 +1478,7 @@ class ColorFixTest(DbTest):
         # A P3 preset with the same numbers as an sRGB one isn't its twin.
         with contextlib.redirect_stdout(io.StringIO()):
             rows, _ = build.build_rows({"Plain": UNREADABLE, "Wide": p3}, self.repo)
-        duplicate_of = {r[0]: r[10] for r in rows}  # schemes.duplicate_of
+        duplicate_of = {r.name: r.duplicate_of for r in rows}  # schemes.duplicate_of
         self.assertEqual(duplicate_of, {"Plain": None, "Wide": None})
 
     # Mid-lightness colored backgrounds, as in Grass and Ocean (untagged presets): fixes there
@@ -1549,7 +1642,7 @@ class ColorFixTest(DbTest):
         # An untagged preset with the same numbers as an sRGB one isn't its twin.
         with contextlib.redirect_stdout(io.StringIO()):
             rows, _ = build.build_rows({"Plain": UNREADABLE, "Untagged": untagged}, self.repo)
-        self.assertEqual({r[0]: r[10] for r in rows}, {"Plain": None, "Untagged": None})
+        self.assertEqual({r.name: r.duplicate_of for r in rows}, {"Plain": None, "Untagged": None})
 
     def test_fixing_twice_changes_nothing(self):
         cases = {**self.CASES, **self.GENERIC_CASES}
@@ -1575,6 +1668,82 @@ class ColorFixTest(DbTest):
             fixes = build.fix_colors(colors)
             self.assertFalse(set(fixes) & set(build.ACCENT_KEYS))
             self.assertEqual(build.fix_colors(build.apply_fixes(colors, fixes)), {})
+
+    def test_identical_accents_at_the_top_of_the_gamut_move_down_instead(self):
+        # As in Aura: ANSI 2 == 6 and 4 == 5, same lightness, so "away" is up for both, and
+        # up is out of gamut at full chroma. Moving down (or losing a little chroma) separates them.
+        aura = preset(
+            (0.0824, 0.0784, 0.1059),
+            (0.9294, 0.9255, 0.9333),
+            [
+                *[(1.0, 0.4039, 0.4039), (0.3804, 1.0, 0.7922), (1.0, 0.7922, 0.5216)],
+                *[(0.6353, 0.4667, 1.0), (0.6353, 0.4667, 1.0), (0.3804, 1.0, 0.7922)],
+            ],
+        )
+        fixes = build.fix_colors(aura)
+        after = build.apply_fixes(aura, fixes)
+        labs = [build.oklab(build.rgb(after[k])) for k in build.ACCENT_KEYS]
+        self.assertGreaterEqual(build.distinct_accents(labs), build.MIN_DISTINCT_ACCENTS)
+        self.assertFalse(build.is_monochrome(labs))  # still colored, so the gate judges the same
+        judged = build.classify(after)
+        self.assertTrue(judged["text_ok"] and judged["accent_ok"] and judged["distinct_ok"])
+        self.assertEqual(build.fix_colors(after), {})
+
+    def test_separating_accents_gives_up_at_once_when_nothing_can_move(self):
+        # ANSI 1-4 white on a grey that leaves white just above the accents' contrast target:
+        # up is past white, down drops below the target. Nothing can move, so it stops at once
+        # (one try per direction per key of the pair) instead of using up its budget.
+        bg = (0.71, 0.71, 0.71)
+        palette = dict(
+            zip(build.ACCENT_KEYS, [*[(1.0, 1.0, 1.0)] * 4, (0, 0, 1), (1, 0, 0)], strict=True)
+        )
+        self.assertGreater(build.contrast_ratio((1, 1, 1), bg), build.FIX_TARGETS["Ansi 1 Color"])
+        spaces = dict.fromkeys(build.ACCENT_KEYS, "srgb")
+        calls = []
+        real = build.accent_step
+
+        def counting(*args):
+            calls.append(args)
+            return real(*args)
+
+        with mock.patch.object(build, "accent_step", counting):
+            self.assertIsNone(build.separate_accents(palette, bg, spaces))
+        self.assertEqual(len(calls), 4)
+
+    def test_separating_accents_never_goes_back_and_forth(self):
+        spaces = dict.fromkeys(build.ACCENT_KEYS, "srgb")
+        calls = []
+        real = build.accent_step
+
+        def counting(*args):
+            calls.append(args)
+            return real(*args)
+
+        # Three near-greys (the top one can't go up): moving the middle one toward the top
+        # one, then back, would repeat; it must move the middle one down instead.
+        greys = [build.lch_to_rgb(lt, 0.004, 1.0) for lt in (0.960, 0.975, 0.992)]
+        vivid = [(0.9, 0.2, 0.2), (0.2, 0.4, 1.0), (0.2, 0.8, 0.2)]
+        palette = dict(zip(build.ACCENT_KEYS, [*greys, *vivid], strict=True))
+        with mock.patch.object(build, "accent_step", counting):
+            got = build.separate_accents(palette, (0.1, 0.1, 0.1), spaces)
+        self.assertIsNotNone(got)
+        labs = [build.oklab(got[k]) for k in build.ACCENT_KEYS]
+        self.assertGreaterEqual(build.distinct_accents(labs), build.MIN_DISTINCT_ACCENTS)
+        # Six identical yellows on black: once no move keeps every distance, it falls back to
+        # one that only widens the pair (the old code stepped one accent up and down here
+        # until its budget ran out), and gets there.
+        yellow = dict.fromkeys(build.ACCENT_KEYS, (1.0, 1.0, 0.0))
+        got = build.separate_accents(yellow, (0, 0, 0), spaces)
+        self.assertIsNotNone(got)
+        labs = [build.oklab(got[k]) for k in build.ACCENT_KEYS]
+        self.assertGreaterEqual(build.distinct_accents(labs), build.MIN_DISTINCT_ACCENTS)
+        # Six identical cyans can't be: it gives up when every move left leads back to a
+        # palette it passed through, well inside its budget (up to 4 tries a move).
+        calls.clear()
+        cyan = dict.fromkeys(build.ACCENT_KEYS, (0.0, 1.0, 1.0))
+        with mock.patch.object(build, "accent_step", counting):
+            self.assertIsNone(build.separate_accents(cyan, (0, 0, 0), spaces))
+        self.assertLess(len(calls), build.DISTINCT_MAX_STEPS * len(build.ACCENT_KEYS))
 
     def test_a_bright_color_never_ends_up_identical_to_its_normal_one(self):
         colors = with_colors(DARK, Ansi_4_Color=(0.05, 0.05, 0.3), Ansi_12_Color=(0.06, 0.05, 0.3))

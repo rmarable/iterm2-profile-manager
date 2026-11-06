@@ -21,7 +21,7 @@ from typing import NamedTuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # works under python3 -I too
 from srcp_schema import DB_PATH as DEFAULT_DB
-from srcp_schema import FIX_ON_SQL, UNHIDE, OldSchema, check_schema, is_busy
+from srcp_schema import FIX_ON_SQL, REBUILD, UNHIDE, OldSchema, check_schema, is_busy
 
 FAVORITES = """
 SELECT f.stars, f.preset, COALESCE(fo.label, f.font) AS font, e.mode,
@@ -248,7 +248,7 @@ def main():
     args = ap.parse_args()
 
     if not os.path.exists(args.db):
-        sys.exit(f"No database at {args.db}. Build it with .tools/srcp_build_scheme_db.py.")
+        sys.exit(f"No database at {args.db}. Build it with {REBUILD}.")
     try:
         db = connect(args.db)
     except OldSchema as e:

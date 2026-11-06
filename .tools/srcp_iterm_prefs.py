@@ -56,6 +56,14 @@ def iterm_app():
     )
 
 
+# Prefs keys and values the tools share.
+PRESETS_KEY = "Custom Color Presets"
+KEY_MAP = "GlobalKeyMap"
+SAVE_BINDING = {"Action": 60, "Text": "save_profile()"}  # 60 = INVOKE_SCRIPT_FUNCTION
+# iTerm2's built-in key bindings, which GlobalKeyMap starts as when it's unset.
+DEFAULT_KEY_MAP = os.path.join(iterm_app(), "Contents/Resources/DefaultGlobalKeyMap.plist")
+
+
 def iterm_running():
     # Not `pgrep -x iTerm2`: it can miss iTerm2 (seen from a sandboxed shell).
     out = subprocess.run(["ps", "-axo", "comm="], capture_output=True, text=True, check=True).stdout

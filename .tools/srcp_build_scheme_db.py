@@ -15,6 +15,7 @@ Reads iTerm2's prefs without writing them, so it's safe with iTerm2 running:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import glob
 import itertools
 import json
@@ -23,10 +24,11 @@ import os
 import re
 import sqlite3
 import sys
+from typing import NamedTuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # works under python3 -I too
 from srcp_db_backup import snapshot
-from srcp_iterm_prefs import load_prefs
+from srcp_iterm_prefs import PRESETS_KEY, load_prefs
 from srcp_schema import (  # shared with the main script and srcp_favorites.py
     COMPONENTS,
     FIX_ON_SQL,
@@ -50,7 +52,6 @@ from srcp_schema import (
     DB_PATH as DEFAULT_DB,
 )
 
-KEY = "Custom Color Presets"
 DEFAULT_REPO = os.path.expanduser(
     os.path.join(os.environ.get("SRC_DIR", "~/src"), "iTerm2-Color-Schemes")
 )
@@ -212,6 +213,16 @@ def lch_to_rgb(lightness, chroma, hue, space="srgb"):
     return out if space == "srgb" or in_gamut(space, out) else None
 
 
+def lch_in_gamut(lightness, chroma, hue, floor, space):
+    """lch_to_rgb, with chroma lowered in FIX_STEPs only as far as needed to stay in gamut,
+    never below floor; None if even the floor is out of gamut."""
+    out = lch_to_rgb(lightness, chroma, hue, space)
+    while out is None and chroma > floor:
+        chroma = max(floor, chroma - FIX_STEP)
+        out = lch_to_rgb(lightness, chroma, hue, space)
+    return out
+
+
 def move_to_contrast(c, bg, target, floor, space="srgb"):
     """c moved in lightness (hue kept) until its contrast with bg reaches target.
 
@@ -234,10 +245,7 @@ def move_to_contrast(c, bg, target, floor, space="srgb"):
         lt = lightness + direction * step * FIX_STEP
         if not 0.0 <= lt <= 1.0:
             break
-        cc, rgb_ = chroma, lch_to_rgb(lt, chroma, hue, space)
-        while rgb_ is None and cc > floor:
-            cc = max(floor, cc - FIX_STEP)
-            rgb_ = lch_to_rgb(lt, cc, hue, space)
+        rgb_ = lch_in_gamut(lt, chroma, hue, floor, space)
         if rgb_ is None:  # even the chroma floor is out of gamut here: keep the best so far
             break
         contrast = contrast_ratio(rgb_, bg)
@@ -271,17 +279,36 @@ def adjust_one(c, bg, target, is_ansi, space="srgb"):
     return best
 
 
+def accent_step(lab, direction, space):
+    """lab moved DISTINCT_STEP in lightness (hue kept), with chroma lowered only as far as
+    needed to stay in gamut and never to the point of counting as grey; None if it can't."""
+    lightness, a, b = lab
+    lt = lightness + direction * DISTINCT_STEP
+    if not 0.0 <= lt <= 1.0:
+        return None
+    chroma, hue = math.hypot(a, b), math.atan2(b, a)
+    floor = min(chroma, CHROMA_MIN + GAMUT_FLOOR_MARGIN)  # as adjust_one's last-resort floor
+    return lch_in_gamut(lt, chroma, hue, floor, space)
+
+
 def separate_accents(palette, bg, spaces):
     """Nudge look-alike accents (ANSI 1-6) apart until 5 are distinct; None if it can't.
 
     Deterministic, at most DISTINCT_MAX_STEPS * 6 moves shared by all the accents (one accent
-    can take most of them): each move takes one of the closest pair DISTINCT_STEP in lightness
-    away from the other, preferring a move that also raises its contrast, and never below its
-    contrast target. So a readable accent can lose some contrast (down to its target) to
-    tell it from its look-alike. spaces: {key: its color space}, for the gamut check.
+    can take most of them): each move takes one of the closest pair DISTINCT_STEP in lightness,
+    away from the other if it can, else toward it (an accent at the top of its gamut, or two
+    of the same lightness, whose "away" is up), losing chroma only to stay in gamut. A move
+    must widen the pair's distance and never takes an accent below its contrast target.
+    Preferred, in order: a move that leaves the accent further than the pair's distance from
+    every other accent too (so the smallest distance doesn't shrink), one away from the
+    other, one that also raises the contrast. A palette already passed through is never
+    gone back to, so it ends, or gives up, without going back and forth. So a readable accent
+    can lose some contrast (down to its target) to tell it from its look-alike. spaces:
+    {key: its color space}, for the gamut check.
     """
     work = dict(palette)
     bg_lightness = oklab(bg)[0]
+    seen = {tuple(work[k] for k in ACCENT_KEYS)}
     for _ in range(DISTINCT_MAX_STEPS * len(ACCENT_KEYS)):
         labs = {k: oklab(work[k]) for k in ACCENT_KEYS}
         if distinct_accents(list(labs.values())) >= MIN_DISTINCT_ACCENTS:
@@ -289,23 +316,28 @@ def separate_accents(palette, bg, spaces):
         k1, k2 = min(
             itertools.combinations(ACCENT_KEYS, 2), key=lambda p: math.dist(labs[p[0]], labs[p[1]])
         )
+        gap = math.dist(labs[k1], labs[k2])
         options = []
         for k, other in ((k1, k2), (k2, k1)):
-            lightness, a, b = labs[k]
-            direction = 1 if lightness >= labs[other][0] else -1
-            candidate = lch_to_rgb(
-                lightness + direction * DISTINCT_STEP,
-                math.hypot(a, b),
-                math.atan2(b, a),
-                spaces[k],
-            )
-            if candidate and contrast_ratio(candidate, bg) >= FIX_TARGETS[k]:
-                raises = (lightness >= bg_lightness) == (direction > 0)
-                options.append((not raises, ACCENT_KEYS.index(k), k, candidate))
+            away = 1 if labs[k][0] >= labs[other][0] else -1
+            for toward, direction in ((False, away), (True, -away)):
+                candidate = accent_step(labs[k], direction, spaces[k])
+                if not candidate or contrast_ratio(candidate, bg) < FIX_TARGETS[k]:
+                    continue
+                lab = oklab(candidate)
+                if math.dist(lab, labs[other]) <= gap:
+                    continue
+                after = tuple(candidate if o == k else work[o] for o in ACCENT_KEYS)
+                if after in seen:
+                    continue
+                spread = min(math.dist(lab, labs[o]) for o in ACCENT_KEYS if o != k) > gap
+                raises = (labs[k][0] >= bg_lightness) == (direction > 0)
+                options.append((not spread, toward, not raises, ACCENT_KEYS.index(k), k, after))
         if not options:
             return None
-        _, _, k, candidate = min(options)
-        work[k] = candidate
+        *_, k, after = min(options)
+        work[k] = after[ACCENT_KEYS.index(k)]
+        seen.add(after)
     return None
 
 
@@ -393,6 +425,9 @@ def font_installed(files):
 
 # The database: migrations (one per schema version), the rebuild and its views.
 
+# A better fix_colors() alone adds no step when color_hash and the columns mean the same: the
+# old fixes stay valid and the new ones arrive with the next build (as separate_accents'
+# downward moves did; until a rebuild, passes_gate_fixed stays 0 for Aura and Aura Dark).
 MIGRATIONS = [
     # 1: tables that survive rebuilds; seeds are added in migrate().
     """
@@ -536,6 +571,26 @@ CREATE TABLE schemes (
 """
 
 
+class SchemeRow(NamedTuple):
+    """One schemes row, its fields in the table's column order (a test holds them equal)."""
+
+    name: str
+    mode: str
+    mode_source: str
+    fg_contrast: float
+    accent_contrast: float
+    distinct_accents: int
+    monochrome: int
+    passes_gate: int
+    in_repo: int
+    color_hash: str
+    duplicate_of: str | None
+    bg_chroma: float
+    fixes: str | None
+    fix_count: int
+    passes_gate_fixed: int
+
+
 def execute_all(db, sql):
     # Not executescript(): it commits first, ending the build's transaction.
     stmt = ""
@@ -602,7 +657,9 @@ def write_db(path, rows):
             migrate(db)
             db.execute("DROP TABLE IF EXISTS schemes")
             db.execute(SCHEMES_TABLE)
-            db.executemany("INSERT INTO schemes VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+            columns, marks = ", ".join(SchemeRow._fields), ", ".join("?" * len(SchemeRow._fields))
+            insert = f"INSERT INTO schemes ({columns}) VALUES ({marks})"  # noqa: S608  (our own column names, no input)
+            db.executemany(insert, rows)
             execute_all(db, VIEWS.format(colorful=COLORFUL_BG_CHROMA, fix_on=FIX_ON_SQL))
             db.execute("COMMIT")
         except BaseException:
@@ -645,7 +702,7 @@ def build_rows(presets, repo):
             fails[check] += not c[f"{check}_ok"]
         fixed = classify(apply_fixes(presets[name], fixes)) if fixes else c
         rows.append(
-            (
+            SchemeRow(
                 name,
                 mode,
                 source,
@@ -671,29 +728,32 @@ def build_rows(presets, repo):
 def print_report(rows, report):
     counts = {m: [0, 0] for m in ("light", "dark")}
     for r in rows:
-        counts[r[1]][0] += 1
-        counts[r[1]][1] += r[7]
+        counts[r.mode][0] += 1
+        counts[r.mode][1] += r.passes_gate
     print(
         f"{len(rows)} schemes: {counts['light'][0]} light / {counts['dark'][0]} dark "
-        f"({sum(r[2] == 'yaml' for r in rows)} yaml-labeled, "
+        f"({sum(r.mode_source == 'yaml' for r in rows)} yaml-labeled, "
         f"{len(report['disagree'])} disagree with luminance)"
     )
     for name in report["disagree"]:
         print(f"  yaml/luminance disagree: {name}")
     print(
         f"gate pass: {counts['light'][1]} light / {counts['dark'][1]} dark "
-        f"({sum(r[6] for r in rows)} monochrome)"
+        f"({sum(r.monochrome for r in rows)} monochrome)"
     )
     f = report["fails"]
     print(
         f"gate fails: text contrast {f['text']}, faint accents {f['accent']}, "
         f"repeated accents {f['distinct']}"
     )
-    print(f"duplicates (old spellings, repo twins): {sum(r[10] is not None for r in rows)}")
-    adjusted = [r for r in rows if r[13]]
-    still = sum(not r[14] for r in rows if r[10] is None)  # twins are never picked
+    twins = sum(r.duplicate_of is not None for r in rows)
+    print(f"duplicates (old spellings, repo twins): {twins}")
+    adjusted = [r for r in rows if r.fix_count]
+    # Twins are never picked, so they don't count.
+    still = sum(not r.passes_gate_fixed for r in rows if r.duplicate_of is None)
+    colors = sum(r.fix_count for r in rows)
     print(
-        f"colors adjusted for readability: {sum(r[13] for r in rows)} in {len(adjusted)} presets; "
+        f"colors adjusted for readability: {colors} in {len(adjusted)} presets; "
         f"{still} still fail the gate after adjusting (picked anyway unless config fix_colors = 0)"
     )
     for name in report["skipped"]:
@@ -776,6 +836,31 @@ def check_existing_db(path):
         )
 
 
+LOCKED_BEFORE = "The database wasn't changed; run this again."
+LOCKED_AFTER = (
+    "It was written, but the checks after it couldn't read it: the list of favorites whose "
+    "adjustments changed is lost (a rerun compares against the new build), and any warning "
+    "about duplicates shows again on the next run."
+)
+
+
+@contextlib.contextmanager
+def exit_if_busy(path, outcome):
+    """Exit with one line, not a traceback, if the DB at path stays locked past the timeout
+    (an sqlite3 session, or the main script mid-write); outcome says what that left behind.
+
+    Not the snapshot: sqlite3's backup() waits on a lock for as long as it lasts, never
+    raising, so a lock taken just before it holds the build until it's let go (seen with
+    an exclusive lock, which the main script never takes; 2026-11-05 review).
+    """
+    try:
+        yield
+    except sqlite3.OperationalError as e:
+        if not is_busy(e):
+            raise
+        sys.exit(f"{path} is locked (another sqlite3 session or a long write?). {outcome}")
+
+
 def main():
     ap = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
     ap.add_argument(
@@ -797,16 +882,21 @@ def main():
     if not os.path.exists(args.db) and any(os.path.exists(args.db + s) for s in ("-wal", "-shm")):
         sys.exit(
             f"{args.db} is missing but its -wal/-shm files are still there, so a build would "
-            f"write into them. Delete {args.db}-wal and {args.db}-shm, or restore a backup."
+            f"write into them. Move {args.db}-wal and {args.db}-shm out of the way, or restore "
+            "a backup."
         )
 
     if os.path.exists(args.db):
-        check_existing_db(args.db)
+        with exit_if_busy(args.db, LOCKED_BEFORE):
+            check_existing_db(args.db)
 
     # The DB checks above come first: they need no prefs and fail fast.
-    presets = load_prefs().get(KEY, {})
+    presets = load_prefs().get(PRESETS_KEY, {})
     if not presets:
-        msg = f"No {KEY!r} in iTerm2's prefs. Import presets first (.tools/srcp_import_presets.py)."
+        msg = (
+            f"No {PRESETS_KEY!r} in iTerm2's prefs. "
+            "Import presets first (.tools/srcp_import_presets.py)."
+        )
         if args.dry_run:  # e.g. setup.sh --dryrun on a fresh Mac, before any import
             print(f"  (skipped: {msg})")
             return
@@ -817,22 +907,16 @@ def main():
     if args.dry_run:
         print("(dry run: nothing written)")
         return
-    before = favorite_fixes(args.db)
-    backup = snapshot(args.db)
-    if backup:
-        print(f"Backup: {backup}")
-    try:
+    with exit_if_busy(args.db, LOCKED_BEFORE):
+        before = favorite_fixes(args.db)
+        backup = snapshot(args.db)
+        if backup:
+            print(f"Backup: {backup}")
         write_db(args.db, rows)
-    except sqlite3.OperationalError as e:
-        if "locked" not in str(e):
-            raise
-        sys.exit(
-            f"{args.db} is locked (another sqlite3 session or a long write?). "
-            "Nothing was changed; run this again."
-        )
-    warn_included_duplicates(args.db)
     print(f"Wrote {args.db}")
-    report_changed_favorites(before, favorite_fixes(args.db) or {})
+    with exit_if_busy(args.db, LOCKED_AFTER):
+        warn_included_duplicates(args.db)
+        report_changed_favorites(before, favorite_fixes(args.db) or {})
 
 
 if __name__ == "__main__":

@@ -21,7 +21,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # works under python3 -I too
 from srcp_schema import DB_PATH as DEFAULT_DB
-from srcp_schema import SEED_CONFIG, OldSchema, check_schema, is_busy
+from srcp_schema import REBUILD, SEED_CONFIG, OldSchema, check_schema, is_busy
 
 NUMERIC = ("favorite_share", "favorite_target", "recent_window", "colorful_weight")
 BAR = 30
@@ -190,7 +190,7 @@ def main():
     args = ap.parse_args()
 
     if not os.path.exists(args.db):
-        sys.exit(f"No database at {args.db}. Build it with .tools/srcp_build_scheme_db.py.")
+        sys.exit(f"No database at {args.db}. Build it with {REBUILD}.")
     # mode=rw (it only reads): mode=ro can fail on a WAL DB that nothing else has open.
     db = sqlite3.connect(Path(args.db).resolve().as_uri() + "?mode=rw", uri=True)
     try:

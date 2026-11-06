@@ -148,7 +148,7 @@ Kept: this repo, iTerm2 settings backups, shell config, and the Claude Code inte
 | A favorite is missing from the Profiles menu | Preset not installed, or marked **Never show**. |
 | ⌃⌥⌘S does nothing | Check Settings → Keys → Key Bindings for `save_profile()`, and the Console for the main script's startup line. |
 | Console: `[warn] DB pick_look: database is locked` (or another name after `DB`), then `couldn't read the DB; session left as is` | A rebuild or open `sqlite3` transaction held the lock over 5 s. A session opened then keeps the profile's colors, or isn't logged; a rating made then shows a "didn't take" alert: rate again. |
-| `srcp_build_scheme_db.py`: `schemes.db is missing but its -wal/-shm files are still there` | Delete `schemes.db-wal` and `schemes.db-shm`, or restore a snapshot. |
+| `srcp_build_scheme_db.py`: `schemes.db is missing but its -wal/-shm files are still there` | Move `schemes.db-wal` and `schemes.db-shm` out of the way (keep them until the new build works), or restore a snapshot. |
 | A tool says iTerm2 is running | Quit iTerm2 (⌘Q) and run the tool from Terminal.app. |
 | Setup says iTerm2 loads its settings from a custom folder | iTerm2 would overwrite the changes. Turn off Settings → General → Settings → **Load settings from a custom folder or URL**, run setup, then turn it back on and save the current settings to the folder. |
 
