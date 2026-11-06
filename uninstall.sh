@@ -12,10 +12,11 @@
 #              snapshots dated in the future, are kept
 #   --presets  remove color presets matching the schemes repo's .itermcolors files
 #              (current or earlier versions; ones you edited are kept)
-#   --fonts    remove the Terminal.app fonts and the MesloLGS Nerd Font Homebrew cask
-#              that setup.sh installed (its record says which; fonts you had stay)
+#   --fonts    remove the Terminal.app fonts setup.sh installed, while unchanged since,
+#              and the MesloLGS Nerd Font Homebrew cask if it installed it (its record
+#              says which; fonts you had stay)
 #   --repo     delete the iTerm2-Color-Schemes clone in $SRC_DIR (default ~/src), unless
-#              it holds changes, commits or stashes of yours
+#              it holds changes, commits, stashes, worktrees or ignored files of yours
 #   --all      all of the above
 #
 # Run from Terminal.app with iTerm2 quit (it refuses otherwise):

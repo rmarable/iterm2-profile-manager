@@ -103,7 +103,7 @@ Monochrome presets (one hue, or near-grey) need only the Text check. `overrides.
 - A bright color (ANSI 9-14) that would end up identical to its normal one gets a little more contrast, so the two stay apart.
 - If ANSI 1-6 still have fewer than 5 distinct colors, a color from the closest pair moves 0.01 in lightness away from the other, preferring a move that also raises its contrast (at most 40 moves per accent, shared among them: 240 in all; never below its target). If that doesn't reach 5, those moves are dropped. They can lower an already readable color's contrast a little.
 - Not adjusted: the background, ANSI 0, 7 and 15, cursor, bold, selection, and the separate `(Light)`/`(Dark)` colors a few presets carry for iTerm2's "separate colors for light and dark mode".
-- Each color is judged as iTerm2 draws it. iTerm2 draws a color by its `Color Space`: `sRGB` as sRGB, `P3` as Display P3, and anything else, a missing key included, as calibrated (Apple's Generic RGB; about 180 of the repo's presets have such colors). P3 and Generic RGB colors are converted to sRGB for the readability checks and the adjustments (CSS Color 4's P3 matrices; Generic RGB from macOS's own ICC profiles, which matches NSColor to within 4e-4); one outside sRGB's gamut is clipped per channel. An adjusted color keeps its own color space, stored back to 6 decimals, and is chosen inside that space's gamut (Generic RGB doesn't hold all of sRGB). `color_hash` marks P3 and Generic RGB colors, since the same numbers look different there.
+- Each color is judged as iTerm2 draws it. iTerm2 draws a color by its `Color Space`: `sRGB` as sRGB, `P3` as Display P3, and anything else, a missing key included, as calibrated (Apple's Generic RGB; about 180 of the repo's presets have such colors). P3 and Generic RGB colors are converted to sRGB for the readability checks and the adjustments (CSS Color 4's P3 matrices; Generic RGB from macOS's own ICC profiles, which matches NSColor to within 6e-4); one outside sRGB's gamut is clipped per channel. An adjusted color keeps its own color space, stored back to 6 decimals, and is chosen inside that space's gamut (Generic RGB doesn't hold all of sRGB). `color_hash` marks P3 and Generic RGB colors, since the same numbers look different there.
 - Adjustments are tied to the preset's colors at build time (`schemes.color_hash`, over 32-bit-rounded components, as iTerm2's API sends them). If a preset changes in iTerm2 after a build, its adjustments are skipped, with a Console warning, until the next rebuild.
 - A rebuild needs no restart (unless the scripts were updated too: then restart the main script, which refuses a database newer than it reads): it rewrites the database in place, the main script reads each new tab's adjustments as it opens, and favorites' profiles update within 30 seconds (the main script checks for changes that often).
 - `fix_colors = 0` turns all of this off: original colors, and only presets that pass the readability checks. Failing presets you showed again or rated while it was on then drop out too.
@@ -161,7 +161,7 @@ Safe any time:
 
 ```sh
 cd ~/.local/share/iterm2-color-schemes
-sqlite3 schemes.db ".backup backups/manual-$(date -u +%Y%m%dT%H%M%SZ).db"
+mkdir -p backups && sqlite3 schemes.db ".backup backups/manual-$(date -u +%Y%m%dT%H%M%SZ).db"
 ```
 
 Don't `cp` the database while iTerm2 runs: recent changes may still be in `schemes.db-wal`.
@@ -172,11 +172,13 @@ Quit iTerm2, then:
 
 ```sh
 cd ~/.local/share/iterm2-color-schemes
-ls -t backups/                      # newest first
-rm -f schemes.db-wal schemes.db-shm
-cp backups/schemes-<timestamp>.db schemes.db.new && mv schemes.db.new schemes.db
+ls -r backups/                      # by name, newest first (schemes-*, then manual-*)
+d=aside-$(date -u +%Y%m%dT%H%M%SZ)
+mkdir "$d" && mv schemes.db* "$d"/ && cp backups/schemes-<timestamp>.db schemes.db
 python3 <repo>/.tools/srcp_build_scheme_db.py   # resync with installed presets
 ```
+
+The `mv` sets the old database aside with its `-wal`/`-shm` files, names unchanged, so they stay paired: moving them back undoes the restore. If the build refuses the snapshot (damaged), don't repeat the `mkdir` line; `cp` the next older snapshot over `schemes.db` and build again. Keep the `aside-*` folder until the restored database works (tabs are colored, your favorites are there), then delete it; `uninstall.sh --data` leaves it in place. Never put a `-wal` or `-shm` file beside a different `schemes.db`: SQLite would replay it into that database.
 
 ### Export ratings
 
@@ -298,7 +300,7 @@ Double-clicking an `.itermcolors` file also imports it, with one dialog per file
 
 ## Database
 
-`PRAGMA user_version` is the schema version (`MIGRATIONS` in the build). The scripts read only a database at `srcp_schema.MIN_SCHEMA` (8, always the number of migrations) or later; an older one gets one Console line asking for a rebuild, and works as soon as it's rebuilt, without a restart. Every change to the shape of `schemes` or the views adds a migration, even an empty one (7 marks the P3 color math, 8 Generic RGB), so that check is all a reader needs.
+`PRAGMA user_version` is the schema version (`MIGRATIONS` in the build). The scripts read only a database at exactly `srcp_schema.MIN_SCHEMA` (8, always the number of migrations). An older one gets one Console line asking for a rebuild, and works as soon as it's rebuilt, without a restart. A newer one (rebuilt by newer scripts) gets one line asking to restart the main script; the main script checks the version on every database call, so it notices a rebuild while it runs. Every change to the shape of `schemes` or the views adds a migration, even an empty one (7 marks the P3 color math, 8 Generic RGB), so that check is all a reader needs.
 
 | Table or view | Contents |
 |---|---|
@@ -308,7 +310,7 @@ Double-clicking an `.itermcolors` file also imports it, with one dialog per file
 | `fonts` | `name` (PostScript name), `enabled`, `label`, `missing` (1: disabled only because its file wasn't found; a rebuild enables it once it is). |
 | `favorites` | `preset`, `font`, `size`, `stars`, `saved_at`. One row per preset and font. |
 | `ratings` | Every save, removal and Never show: `at`, `preset`, `font`, `action`, `stars`, `previous_stars`. The scripts never delete rows; migration 4 removed exact duplicates once, and `uninstall.sh --data` deletes the database. Older databases have none from before it existed. |
-| `launches` | One row per look shown in a session: `launched_at`, `preset`, `font`, `size`, `mode`, `source` (favorite or discovery), `stars`, `ended_at`, `duration_s`, `end_reason` (`closed`, `changed` or `unknown`). |
+| `launches` | One row per look shown in a session: `id`, `launched_at`, `preset`, `font`, `size`, `mode`, `source` (favorite or discovery), `stars`, `iterm_profile` (the session's profile), `session_id`, `ended_at`, `duration_s`, `end_reason` (`closed`, `changed` or `unknown`). |
 | `effective` (view) | `schemes` with `overrides` applied. |
 | `discovery` (view) | Presets eligible for discovery, with `colorful` (1 = colored background). |
 | `favorite_pool` (view) | Favorites that can be picked, with their mode. |
@@ -346,4 +348,4 @@ sqlite3 -cmd ".timeout 5000" ~/.local/share/iterm2-color-schemes/schemes.db \
 
 Needs [uv](https://docs.astral.sh/uv/) and shellcheck (`brew install shellcheck`). Config: `pyproject.toml`, `AutoLaunch/ruff.toml` (Black style, 100 columns). Targets: `.tools/` Python 3.9 (`/usr/bin/python3`), everything else 3.12; pyright checks the main script against the real `iterm2` module.
 
-Scripts run only inside iTerm2. `./lint.sh` also runs `.tests/srcp_test_db.py` under iTerm2's Python: build, migrations, picking, rating, export and helpers, against a temp folder. Try other database changes against a scratch database (`srcp_build_scheme_db.py --db /tmp/test.db`); use `--dryrun` for everything else.
+Scripts run only inside iTerm2. `./lint.sh` also runs the tests under iTerm2's Python, against temp folders: `.tests/srcp_test_db.py` (build, migrations, picking, rating, export, helpers) and `.tests/srcp_test_tools.py` (prefs helpers and writers, preset history, the menu scripts' setup, `setup.sh`/`uninstall.sh --dryrun`). Try other database changes against a scratch database (`srcp_build_scheme_db.py --db /tmp/test.db`); use `--dryrun` for everything else.

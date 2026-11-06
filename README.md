@@ -118,8 +118,8 @@ Quit iTerm2, then from Terminal.app in the repo:
 | ⌃⌥⌘S key binding (settings backed up first) | (default) |
 | Database, snapshots, launch history (ratings exported to `~/srcp-curation-<time>.sql` first, with a copy of the whole database beside it; other files there, and snapshots dated in the future, are kept) | `--data` |
 | Presets matching the repo's files, current or earlier versions (edited ones are kept) | `--presets` |
-| Terminal.app fonts and the MesloLGS Homebrew package that `setup.sh` installed (ones you had already stay) | `--fonts` |
-| iTerm2-Color-Schemes clone (kept if it has changes, commits, stashes or ignored files of yours) | `--repo` |
+| The Terminal.app fonts `setup.sh` installed, while unchanged since, and the MesloLGS Homebrew package if it installed it (fonts you had already stay) | `--fonts` |
+| iTerm2-Color-Schemes clone (kept if it has changes, commits, stashes, worktrees or ignored files of yours) | `--repo` |
 
 Kept: this repo, iTerm2 settings backups, shell config, and the Claude Code integration (`python3 .tools/srcp_enable_claude_integration.py --remove` undoes that). Open sessions keep their colors until closed. Re-run `setup.sh` to reinstall.
 
@@ -128,6 +128,7 @@ Kept: this repo, iTerm2 settings backups, shell config, and the Claude Code inte
 | Symptom | Cause and fix |
 |---|---|
 | Tabs don't change color | Check **Scripts → Manage → Console** for errors, and that the Python API is enabled. |
+| Console: `[error] missing or outdated .../.tools/srcp_schema.py, srcp_db_backup.py or srcp_iterm_prefs.py (...); run ./setup.sh again` | The main script couldn't load its helpers from its `.tools/` folder (not copied, or left from an older version). Run `./setup.sh` again from Terminal.app with iTerm2 quit; if the repo is the Scripts folder, `git pull` (or `git checkout .tools` if the folder is gone) and restart the main script from the Scripts menu instead. |
 | Console: `no scheme DB at ...` | Run `python3 .tools/srcp_build_scheme_db.py`. No restart needed. |
 | Console: `preset not found: X` | Preset renamed or deleted in iTerm2. Run `python3 .tools/srcp_build_scheme_db.py`. |
 | Console: `3 picks in a row weren't installed presets` | Same cause, for many presets at once (presets were removed). Run `python3 .tools/srcp_build_scheme_db.py`. |
@@ -137,7 +138,7 @@ Kept: this repo, iTerm2 settings backups, shell config, and the Claude Code inte
 | Console: `MesloLGSNFM-Regular isn't installed; icon font left as is` | Prompt icons (Powerlevel10k and the like) need MesloLGS Nerd Font: `brew install --cask font-meslo-lg-nerd-font`, or turn the icon font off ([Configuration](docs/REFERENCE.md#configuration)). Tabs are colored either way. |
 | Console: `favorite profiles not updated (tried again every 10 minutes): ...` | Reading iTerm2's settings failed or took over 30 s, so **Profiles → Favorites** wasn't refreshed. Tabs are still colored. The profiles are checked every 30 seconds; a failed write is tried again when your favorites change, or after 10 minutes. |
 | Console: `coloring session ... took over 15 s and was given up; ...` | iTerm2 stopped answering while the tab was being colored (rare; a lost reply), or the database was busy. The next tabs aren't held up any longer. If the message says `nothing was changed`, the tab keeps its profile's look; if it says `half-done`, re-roll it with right-click > Change to another profile. |
-| Console: `... is damaged (...); restore a snapshot: docs/REFERENCE.md, Restore` | The database file is damaged. Restore a snapshot ([Restore](docs/REFERENCE.md#restore)): quit iTerm2, move `schemes.db` and any `-wal`/`-shm` files beside it aside, copy the newest file from `backups/` in its place, then run `python3 .tools/srcp_build_scheme_db.py`. The build refuses a damaged database (and a damaged snapshot: then try the next older one). |
+| Console: `... is damaged (...); restore a snapshot: docs/REFERENCE.md, Restore` | The database file is damaged. Quit iTerm2 and restore a snapshot: [Restore](docs/REFERENCE.md#restore) has the commands. If the build refuses that snapshot too, try the next older one. |
 | Console: `favorite 'X' isn't an installed preset` | A favorite's preset was removed from iTerm2, so it's left out of **Profiles → Favorites**. Re-import it (`./setup.sh` for the repo's presets; open your own `.itermcolors` file again), or remove the favorite: `sqlite3 -cmd ".timeout 5000" ~/.local/share/iterm2-color-schemes/schemes.db "delete from favorites where preset = 'X'"` (picked up within 30 seconds). |
 | Console: `X changed since the DB was built; its color adjustments are skipped` | You edited or re-imported the preset after the last build, so its colors show unadjusted. Run `python3 .tools/srcp_build_scheme_db.py`. No restart needed, unless you also updated the scripts: then restart the main script too. |
 | Console: `the scheme DB is schema N, newer than this version reads ...` | The scripts were updated and the database rebuilt, but the main script running is still the old one. Restart it from the Scripts menu, or relaunch iTerm2. |

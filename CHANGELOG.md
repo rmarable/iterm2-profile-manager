@@ -4,6 +4,7 @@ What changed for someone using iTerm2 Profile Manager, newest first. Releases up
 
 ## Unreleased
 
+- The restore steps (docs/REFERENCE.md, Restore) now set the old database and its `-wal` changes aside in a dated folder instead of deleting them, so you can go back if the restore goes wrong.
 - `uninstall.sh --data` leaves database snapshots dated in the future (a clock set ahead, or copied from another Mac) in place and says so, instead of deleting them.
 - Tabs of a profile with "Use separate colors for light and dark mode" on are left as they are, with one Console line saying how to turn it off, instead of getting colors that don't show. Favorites' profiles have that setting off.
 - After you save or remove a favorite, **Remove profile from favorites** now shows or hides correctly in buried sessions (Session > Bury Session) too.
