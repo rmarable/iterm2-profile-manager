@@ -2,7 +2,7 @@
 
 What changed for someone using iTerm2 Profile Manager, newest first. Releases up to v0.7.1 are described on [GitHub releases](https://github.com/rmarable/iterm2-profile-manager/releases).
 
-## Unreleased
+## v0.14.3 (2026-11-06)
 
 - `.tools/srcp_export_curation.py` says the database is busy and to try again, instead of a traceback, and a failed export with `-o` leaves the earlier file as it was instead of a half-written one.
 - After a rebuild (`.tools/srcp_build_scheme_db.py`), text stays on its side of the background (lighter or darker) when that side nearly reaches the contrast target, instead of flipping: Hot Dog Stand keeps its white text on red. Monochrome presets whose six accent colors are all one color (HaX0R Blue, Gr33N and R3D, Pumpkin Spice, Retro) get distinct shades of it.
