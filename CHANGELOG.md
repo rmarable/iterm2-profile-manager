@@ -2,7 +2,7 @@
 
 What changed for someone using iTerm2 Profile Manager, newest first. Releases up to v0.7.1 are described on [GitHub releases](https://github.com/rmarable/iterm2-profile-manager/releases).
 
-## Unreleased
+## v0.14.6 (2026-11-06)
 
 - Messages from the scripts, tools, `setup.sh` and `uninstall.sh` write menu paths with arrows, as the README does (right-click → Change to another profile).
 
