@@ -71,7 +71,7 @@ For each new session, and at start for each open one with no look yet (buried on
    - **Favorite:** weighted by stars per saved preset + font (a 5 ★ is picked 5× as often as a 1 ★; a preset saved with three fonts has three chances), in its saved font. If that font has since been disabled, a random one.
    - **Discovery:** a preset of this mode (with `fix_colors` off: only one that passes the readability checks) that isn't a favorite, and isn't among the last 20 discovery picks in this mode. Colored-background presets (yellow, pink, teal rather than white, grey or black) get 3× weight. They are rare, so this lifts them to roughly a fifth of light and a third of dark sessions. Random font.
 4. **Applies the preset and font** to this session only, at the profile's font size, with the preset's [color adjustments](#color-adjustments) (the Console line ends ", N colors adjusted", then how long coloring the tab took, e.g. "(84 ms)"). Also sets the non-ASCII font to MesloLGS Nerd Font (`nonascii_font`), so prompt icons (Powerlevel10k etc.) render with any font.
-5. **Logs the launch**, and the close time when the session ends. Sessions open when iTerm2 quits get `end_reason = 'unknown'` at the next start. A look replaced by **Change to another profile** ends with `end_reason = 'changed'`.
+5. **Logs the launch** with how long the tab took, and the close time when the session ends. Sessions open when iTerm2 quits get `end_reason = 'unknown'` at the next start. A look replaced by **Change to another profile** ends with `end_reason = 'changed'`.
 
 ### Light or dark
 
@@ -301,7 +301,7 @@ Double-clicking an `.itermcolors` file also imports it, with one dialog per file
 
 ## Database
 
-`PRAGMA user_version` is the schema version (`MIGRATIONS` in the build). The scripts read only a database at exactly `srcp_schema.MIN_SCHEMA` (8, always the number of migrations). An older one gets one Console line asking for a rebuild, and works as soon as it's rebuilt, without a restart. A newer one (rebuilt by newer scripts) gets one line asking to restart the main script; the main script checks the version on every database call, so it notices a rebuild while it runs. Every change to the shape of `schemes` or the views adds a migration, even an empty one (7 marks the P3 color math, 8 Generic RGB), so that check is all a reader needs.
+`PRAGMA user_version` is the schema version (`MIGRATIONS` in the build). The scripts read only a database at exactly `srcp_schema.MIN_SCHEMA` (9, always the number of migrations). An older one gets one Console line asking for a rebuild, and works as soon as it's rebuilt, without a restart. A newer one (rebuilt by newer scripts) gets one line asking to restart the main script; the main script checks the version on every database call, so it notices a rebuild while it runs. Every change to the shape of `schemes` or the views, or to the columns the main script writes, adds a migration, even an empty one (7 marks the P3 color math, 8 Generic RGB; 9 adds the launch timing columns), so that check is all a reader needs. Going back to 0.14.3 or older: drop any view of yours that names the timing columns, then drop them and set the version back (`ALTER TABLE launches DROP COLUMN coloring_ms; ALTER TABLE launches DROP COLUMN queued_ms; ALTER TABLE launches DROP COLUMN queue; PRAGMA user_version = 8;`), which keeps everything else; or restore a snapshot from before the rebuild (the build takes one first; the newest 14 are kept, see [Restore](#restore)), which loses what changed since.
 
 | Table or view | Contents |
 |---|---|
@@ -311,11 +311,13 @@ Double-clicking an `.itermcolors` file also imports it, with one dialog per file
 | `fonts` | `name` (PostScript name), `enabled`, `label`, `missing` (1: disabled only because its file wasn't found; a rebuild enables it once it is). |
 | `favorites` | `preset`, `font`, `size`, `stars`, `saved_at`. One row per preset and font. |
 | `ratings` | Every save, removal and Never show: `id`, `at`, `preset`, `font`, `action`, `stars`, `previous_stars`. The scripts never delete rows; migration 4 removed exact duplicates once, and `uninstall.sh --data` deletes the database. Older databases have none from before it existed. |
-| `launches` | One row per look shown in a session: `id`, `launched_at`, `preset`, `font`, `size`, `mode`, `source` (favorite or discovery), `stars`, `iterm_profile` (the session's profile), `session_id`, `ended_at`, `duration_s`, `end_reason` (`closed`, `changed` or `unknown`). |
+| `launches` | One row per look shown in a session: `id`, `launched_at`, `preset`, `font`, `size`, `mode`, `source` (favorite or discovery), `stars`, `iterm_profile` (the session's profile), `session_id`, `ended_at`, `duration_s`, `end_reason` (`closed`, `changed` or `unknown`), `coloring_ms`, `queued_ms`, `queue` (`startup`, `new` or `reroll`); see below. |
 | `effective` (view) | `schemes` with `overrides` applied. |
 | `discovery` (view) | Presets eligible for discovery, with `colorful` (1 = colored background). |
 | `favorite_pool` (view) | Favorites that can be picked, with their mode. |
 | `launch_stats` (view) | Per preset: launch counts (`changed_launches`: re-rolled away from), first and last use, time open (`avg_duration_s` leaves out `changed` rows), stars. |
+
+Timing (0.14.4 on; NULL before): `coloring_ms` is the whole coloring, from the tab's first check until its variables are set, less the wait for a coloring slot (`queued_ms`; NULL for a re-roll, which takes none, and the Console shows it only from 10 ms); the number in its Console line. It leaves out a re-roll's wait for a coloring already running on the tab, and the `launches` write. A coloring given up at the 15 s limit (one limit for the whole span) gets no row, only its Console line, so the slowest tabs aren't here.
 
 Times are stored in UTC. A rebuild replaces only `schemes` and the four views; everything else, including views you add, is kept.
 
@@ -323,6 +325,7 @@ Times are stored in UTC. A rebuild replaces only `schemes` and the four views; e
 select mode, count(*), sum(passes_gate) from schemes group by mode;   -- installed and passing
 select mode, count(*), sum(colorful) from discovery group by mode;    -- discovery pool, colored backgrounds
 select * from launch_stats order by launches desc limit 10;
+select launched_at, preset, queue, coloring_ms, queued_ms from launches order by coloring_ms desc limit 10;  -- slowest tabs
 select preset, font, launched_at, duration_s from launches order by id desc limit 20;
 select name, fg_contrast, accent_contrast, distinct_accents from schemes where passes_gate = 0;
 select name, fix_count from schemes where fix_count > 0 order by fix_count desc limit 20;  -- most adjusted

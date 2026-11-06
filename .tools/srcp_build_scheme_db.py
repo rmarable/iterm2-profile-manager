@@ -555,6 +555,15 @@ MIGRATIONS = [
     """
     -- nothing to change either
     """,
+    # 9: how long each tab took, written by the main script from 0.14.4 (NULL before):
+    # coloring_ms the whole coloring less its wait for a slot (as its Console line shows),
+    # queued_ms that wait (NULL for a re-roll, which takes none), queue which one colored it.
+    # Can't run twice (ADD COLUMN), so the tests' older-DB helper drops them first.
+    """
+    ALTER TABLE launches ADD COLUMN coloring_ms INTEGER;
+    ALTER TABLE launches ADD COLUMN queued_ms INTEGER;
+    ALTER TABLE launches ADD COLUMN queue TEXT CHECK (queue IN ('startup', 'new', 'reroll'));
+    """,
 ]
 
 # Ours, dropped and recreated on every build; views a user adds are left alone.

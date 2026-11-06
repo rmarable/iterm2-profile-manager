@@ -2,6 +2,10 @@
 
 What changed for someone using iTerm2 Profile Manager, newest first. Releases up to v0.7.1 are described on [GitHub releases](https://github.com/rmarable/iterm2-profile-manager/releases).
 
+## Unreleased
+
+- Each tab's coloring time (the ms in its Console line, any wait behind other tabs, and whether it was colored at startup, as a new tab or by **Change to another profile**) is now kept in the database's `launches` table for later review. Restart the main script (Scripts menu, or relaunch iTerm2), then rebuild the database right away (`python3 .tools/srcp_build_scheme_db.py`); until the rebuild, new tabs are left as they are.
+
 ## v0.14.3 (2026-11-06)
 
 - `.tools/srcp_export_curation.py` says the database is busy and to try again, instead of a traceback, and a failed export with `-o` leaves the earlier file as it was instead of a half-written one.

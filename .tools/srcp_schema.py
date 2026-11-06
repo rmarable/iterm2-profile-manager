@@ -120,9 +120,10 @@ def colors_hash(rgb_by_key, spaces=None):
 # The oldest DB schema (PRAGMA user_version) the scripts read. Two changes to the shape of
 # `schemes` and the views (discovery.colorful in 0.6.0, schemes.fixes in 0.9.0) shipped without
 # a MIGRATIONS step, so the version alone can't tell a 0.6 DB from a 0.9 one below 6; every
-# DB at 6 or later was built by code that has all of them. Any later change to that shape
-# adds a MIGRATIONS step and raises this, so readers never need to probe for columns.
-MIN_SCHEMA = 8
+# DB at 6 or later was built by code that has all of them. Any later change to that shape,
+# or to the columns the main script writes (9: launch timing, which its INSERT names), adds a
+# MIGRATIONS step and raises this, so readers never need to probe for columns.
+MIN_SCHEMA = 9
 REBUILD = "python3 .tools/srcp_build_scheme_db.py"
 
 
