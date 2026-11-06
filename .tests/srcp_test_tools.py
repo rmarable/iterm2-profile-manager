@@ -1287,7 +1287,7 @@ class FontsToolTest(unittest.TestCase):
         self.assertFalse(by["Menlo"]["pool_known"])
         self.assertEqual([c["add"] for c in cards if c["add"]], [])
 
-    def test_page_embeds_small_regular_pool_fonts_only_and_escapes(self):
+    def test_page_embeds_your_own_small_fonts_pool_first_and_escapes(self):
         small = os.path.join(self.fonts_dir, "SF-Mono-Regular.otf")
         with open(small, "wb") as f:
             f.write(b"FONTBYTES")
@@ -1296,22 +1296,64 @@ class FontsToolTest(unittest.TestCase):
             f.truncate(srcp_fonts.EMBED_MAX + 1)
         ttc = os.path.join(self.fonts_dir, "Iosevka.ttc")
         open(ttc, "w").close()
+        meslo = os.path.join(self.fonts_dir, "MesloLGMNerdFontMono-Regular.ttf")
+        with open(meslo, "wb") as f:
+            f.write(b"MESLOBYTES")
         evil = "SF Mono <!--EMBEDS--></script><img src=x onerror=alert(1)>"
         self.faces[:0] = [
             ["SFMono-Regular", evil, small, 5, False],
             ["Iosevka-Term", "Iosevka Term", ttc, 5, False],
+            ["MesloLGMNFM-Regular", "MesloLGM Nerd Font Mono", meslo, 5, False],
         ]
         table = {
             n: (1, None)
             for n in ("SFMono-Regular", "Menlo-Regular", "Hack-Regular", "Iosevka-Term")
         }
         cards, embeds = srcp_fonts.page_fonts(srcp_fonts.scan(), table, embed=True)
-        self.assertEqual([cards[i]["label"] for i in embeds], ["SF Mono"])  # not Menlo, big, .ttc
+        # Your own fonts, in the pool or not (the Meslo variants' card); not Menlo (/System),
+        # not a file over EMBED_MAX, not a .ttc.
+        labels = [cards[i]["label"] for i in embeds]
+        self.assertEqual(sorted(labels), ["MesloLG M / L / DZ Nerd Font Mono", "SF Mono"])
+        by = {c["label"]: c for c in cards}
+        self.assertTrue(by["Iosevka Term"]["user_font"])  # not carried: the page explains why
+        self.assertFalse(by["Menlo"]["user_font"])
         page = srcp_fonts.render_page(cards, embeds, "note")
         self.assertIn(base64.b64encode(b"FONTBYTES").decode(), page)
         self.assertNotIn("<img", page)
-        self.assertEqual(page.count('id="emb-'), 1)
+        self.assertEqual(page.count('id="emb-'), 2)
         self.assertEqual(srcp_fonts.page_fonts(srcp_fonts.scan(), table, embed=False)[1], {})
+        self.assertIn(base64.b64encode(b"MESLOBYTES").decode(), page)  # the variant's own file
+        # Room for one: the pool font wins, though its card (Meslo's) comes last on the page.
+        table = {"MesloLGMNFM-Regular": (1, None)}
+        with mock.patch.object(srcp_fonts, "EMBED_TOTAL", len(b"MESLOBYTES")):
+            cards, embeds = srcp_fonts.page_fonts(srcp_fonts.scan(), table, embed=True)
+        self.assertEqual([cards[i]["label"] for i in embeds], ["MesloLG M / L / DZ Nerd Font Mono"])
+
+    def test_page_skips_a_font_file_that_disappears(self):
+        gone = os.path.join(self.fonts_dir, "SF-Mono-Regular.otf")
+        with open(gone, "wb") as f:
+            f.write(b"FONTBYTES")
+        self.faces[:0] = [["SFMono-Regular", "SF Mono", gone, 5, False]]
+        table = {"SFMono-Regular": (1, None)}
+        cards, embeds = srcp_fonts.page_fonts(srcp_fonts.scan(), table, embed=True)
+        os.remove(gone)  # between choosing and reading
+        page = srcp_fonts.render_page(cards, embeds, "")
+        self.assertNotIn('id="emb-', page)
+        self.assertIsNone(next(c for c in cards if c["label"] == "SF Mono")["embed"])
+        self.assertEqual(srcp_fonts.choose_embeds(cards, [gone] * len(cards)), {})
+
+    def test_meslo_card_shows_the_variant_in_the_pool(self):
+        for v in ("M", "L"):
+            path = os.path.join(self.fonts_dir, f"MesloLG{v}NerdFontMono-Regular.ttf")
+            open(path, "w").close()
+            self.faces.append(
+                [f"MesloLG{v}NFM-Regular", f"MesloLG{v} Nerd Font Mono", path, 5, False]
+            )
+        cards, _ = srcp_fonts.page_fonts(
+            srcp_fonts.scan(), {"MesloLGLNFM-Regular": (1, None)}, False
+        )
+        card = next(c for c in cards if c["label"].startswith("MesloLG M / L"))
+        self.assertEqual((card["family"], card["section"]), ("MesloLGL Nerd Font Mono", "pool"))
 
     def test_page_refuses_to_embed_inside_any_clone_and_reports_db_problems(self):
         clone = os.path.join(self.tmp, "clone")

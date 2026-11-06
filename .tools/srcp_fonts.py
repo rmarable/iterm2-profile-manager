@@ -356,28 +356,28 @@ def add_command(font):
 
 
 EMBED_MAX = 5_000_000  # bytes; bigger files (and collections) are drawn from a web copy, if any
+EMBED_TOTAL = 25_000_000  # font bytes for the whole page (about 4/3 that as base64); pool first
 EMBED_TYPES = {".ttf": "font/ttf", ".otf": "font/otf"}  # not .ttc: it would draw its first face
 
 
 def page_fonts(faces, fonts_table, embed):
     """The page's cards, one per catalog font (the Meslo variants share one), and
-    {card index: file} to embed: the regular face of pool fonts you installed yourself."""
+    {card index: file} to embed: the regular face of each installed font that isn't under
+    /System (Safari won't draw fonts you installed yourself), pool fonts first."""
     regular = {}
     for ps, family, path, _, italic in faces:
         if not italic:
             regular.setdefault(ps, (family, path))
-    cards, embeds, grouped = [], {}, {}
+    cards, paths, grouped = [], [], {}
     for font in catalog():
         if font.group:
             grouped.setdefault(font.group, []).append(font)
             continue
-        card = _card([font], regular, fonts_table)
-        cards.append(card)
-        path = regular.get(card["ps"], ("", ""))[1]
-        if embed and card["section"] == "pool" and embeddable(path):
-            embeds[len(cards) - 1] = path
+        cards.append(_card([font], regular, fonts_table))
+        paths.append(regular.get(cards[-1]["ps"], ("", ""))[1])
     for fonts in grouped.values():
         card = _card(fonts, regular, fonts_table)
+        paths.append(regular.get(card["ps"], ("", ""))[1])
         in_pool = [f.label for f in fonts if card_in_pool(f, fonts_table)]
         card["label"] = "MesloLG M / L / DZ Nerd Font Mono"
         card["note"] = (
@@ -388,16 +388,36 @@ def page_fonts(faces, fonts_table, embed):
         card["ps"] = ", ".join(f.names[0] for f in fonts)
         card["add"] = ""
         cards.append(card)
-    return cards, embeds
+    for card, path in zip(cards, paths):
+        card["user_font"] = bool(path) and not path.startswith("/System/")
+    return cards, choose_embeds(cards, paths) if embed else {}
 
 
-def embeddable(path):
+def choose_embeds(cards, paths):
+    """{card index: file}: user-installed fonts that fit (EMBED_MAX each, EMBED_TOTAL in all),
+    pool fonts first, then in page order."""
+    order = sorted(range(len(cards)), key=lambda i: cards[i]["section"] != "pool")
+    embeds, total, seen = {}, 0, set()
+    for i in order:
+        size = embed_size(paths[i]) if cards[i]["user_font"] else None
+        if size is None or paths[i] in seen:
+            continue
+        if total + size <= EMBED_TOTAL:
+            embeds[i] = paths[i]
+            total += size
+            seen.add(paths[i])
+    return embeds
+
+
+def embed_size(path):
+    """The file's size if the page can carry it, else None (wrong type, too big, or gone)."""
     if path.startswith("/System/") or os.path.splitext(path)[1].lower() not in EMBED_TYPES:
-        return False
+        return None
     try:
-        return os.path.getsize(path) <= EMBED_MAX
+        size = os.path.getsize(path)
     except OSError:
-        return False
+        return None
+    return size if size <= EMBED_MAX else None
 
 
 def card_in_pool(font, fonts_table):
@@ -408,8 +428,10 @@ def card_in_pool(font, fonts_table):
 
 
 def _card(fonts, regular, fonts_table):
-    """One card for fonts (one font, or variants sharing a card): the first installed one."""
-    font = next((f for f in fonts if any(n in regular for n in f.names)), fonts[0])
+    """One card for fonts (one font, or variants sharing a card): the first installed one
+    that's in the pool, else the first installed one."""
+    here = [f for f in fonts if any(n in regular for n in f.names)]
+    font = next((f for f in here if card_in_pool(f, fonts_table)), (here or fonts)[0])
     ps = next((n for n in font.names if n in regular), font.names[0])
     installed = ps in regular
     pooled = [card_in_pool(f, fonts_table) for f in fonts]
@@ -428,6 +450,7 @@ def _card(fonts, regular, fonts_table):
         "family": regular[ps][0] if installed else f"W {font.label}",
         "web": list(font.web) if not installed and font.web else None,
         "embed": None,
+        "user_font": False,  # page_fonts sets it: installed, and not under /System
     }
 
 
@@ -436,11 +459,14 @@ def render_page(cards, embeds, dbnote, now=None):
     blocks = []
     for i, path in sorted(embeds.items()):
         card = cards[i]
+        mime = EMBED_TYPES[os.path.splitext(path)[1].lower()]
+        try:
+            with open(path, "rb") as f:
+                data = base64.b64encode(f.read()).decode()
+        except OSError:  # gone since it was chosen: drawn by name instead
+            continue
         card["family"] = f"E {card['label']}"
         card["embed"] = f"emb-{i}"
-        mime = EMBED_TYPES[os.path.splitext(path)[1].lower()]
-        with open(path, "rb") as f:
-            data = base64.b64encode(f.read()).decode()
         blocks.append(f'<script type="text/plain" id="emb-{i}" data-mime="{mime}">{data}</script>')
     data = {
         "made": f"Made {now:%Y-%m-%d %H:%M} on this Mac by .tools/srcp_fonts.py.",
@@ -562,7 +588,7 @@ def write_page(args):
     stdout_table(cards)
     print(f"\nPage: {args.out}")
     if embeds:
-        print("It carries copies of your pool fonts (some are Apple's): keep it to yourself.")
+        print("It carries copies of fonts you installed (some are Apple's): keep it to yourself.")
     if not args.no_open:
         subprocess.run(["open", args.out], check=False)
 

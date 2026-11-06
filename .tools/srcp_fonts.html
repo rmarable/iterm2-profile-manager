@@ -92,7 +92,7 @@ footer li{margin:3px 0}
 
 <footer>
   <ul>
-    <li>A red <b>Not drawn in this browser</b> badge means the browser used a fallback font instead. Safari won't use fonts you installed yourself, so this page carries copies of the ones in the pool (regular face only, files up to 5 MB). Keep the page to yourself: some of them, such as SF Mono, are licensed by Apple.</li>
+    <li>A red <b>Not drawn</b> badge means the browser used a fallback font instead. Safari won't use fonts you installed yourself, so this page carries copies of most of them (very large files are left out, and fonts in the pool come first). Keep the page to yourself: some, such as SF Mono, are licensed by Apple.</li>
     <li>Fonts that aren't installed are previewed from web copies (Fontsource on jsDelivr; Hack and 0xProto from their own packages), Latin characters only. The installed fonts have the full character set.</li>
     <li>iTerm2 keeps ligatures off by default, so this page does too; use the button to see them.</li>
   </ul>
@@ -178,12 +178,18 @@ const seen = new IntersectionObserver(entries => entries.forEach(e => {
 }), {rootMargin: "400px"});
 
 // Not drawn: the text measures the same as with the fallback alone, against two fallbacks.
+const SAFARI = /Apple/.test(navigator.vendor) && !/CriOS|FxiOS|Chrome/.test(navigator.userAgent);
 const ctx = document.createElement("canvas").getContext("2d");
 const probe = "mmmmmmmmmmlli0O@#WiI1|.,";
 const width = fam => { ctx.font = `72px ${fam}`; return ctx.measureText(probe).width; };
 function check(f){
   const missing = ["monospace", "serif"].every(fb => width(`"${f.family}", ${fb}`) === width(fb));
-  f.el.querySelector(".render").hidden = !missing || ((f.web || f.embed) && !loaded.has(f.family + 400));
+  const badge = f.el.querySelector(".render");
+  badge.hidden = !missing || ((f.web || f.embed) && !loaded.has(f.family + 400));
+  // In Safari, a font you installed yourself that the page carries no copy of isn't drawn.
+  badge.textContent = SAFARI && f.user_font && !f.embed
+    ? "Not drawn: Safari skips fonts you installed. Try Chrome or Firefox."
+    : "Not drawn in this browser";
 }
 
 function card(f, i){
