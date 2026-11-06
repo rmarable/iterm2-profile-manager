@@ -19,7 +19,7 @@ Right-click → **Remove profile from favorites** does the same as **Remove favo
 
 ## Change to another profile
 
-Right-click a session → **Change to another profile** re-rolls its look on the spot: a new pick for the current light/dark mode, made exactly as for a new session (favorite or discovery, font included), never the preset it has now. Works on any session, including ones opened from a favorite profile (only that session changes). The old look's `launches` row ends with `end_reason = 'changed'`, and the new look gets its own row. A second click while one change is still running is ignored. Re-rolled looks still count as launches; reports show them as **Changed** (the rating dialog: "changed away from N") and leave them out of average time open.
+Right-click a session → **Change to another profile** re-rolls its look on the spot: a new pick for the current light/dark mode, made exactly as for a new session (favorite or discovery, font included), never the preset it has now or a byte-identical twin of it. Works on any session, including ones opened from a favorite profile (only that session changes). The old look's `launches` row ends with `end_reason = 'changed'`, and the new look gets its own row. A second click while one change is still running is ignored; a dialog or menu action still running after 10 minutes (a reply from iTerm2 got lost) is cancelled by the next one. Re-rolled looks still count as launches; reports show them as **Changed** (the rating dialog: "changed away from N") and leave them out of average time open.
 
 ## Favorite profiles
 
@@ -63,7 +63,7 @@ These are the odds, not what you actually got. A view of your launch history is 
 
 ## How a look is picked
 
-For each new session, the main script:
+For each new session, and at start for each open one with no look yet (buried ones too), the main script:
 
 1. **Skips sessions opened from a favorite profile.** They keep their look; the launch is still logged.
 2. **Reads the mode** from iTerm2 (follows macOS with the Regular, Minimal or Compact theme). Open sessions keep their colors when the mode changes.
@@ -112,7 +112,7 @@ A few installed presets are byte-identical copies under an older name (`base16 i
 
 ## Configuration
 
-Settings live in the database's `config` table. Edit with `sqlite3`; changes apply to the next new session.
+Settings live in the database's `config` table. Edit with `sqlite3`; changes apply to the next new session. A numeric setting that isn't a usable number (text, `inf`, `nan`, or beyond ±1,000,000) is ignored: its default is used, with one Console warning.
 
 ```sh
 sqlite3 ~/.local/share/iterm2-color-schemes/schemes.db

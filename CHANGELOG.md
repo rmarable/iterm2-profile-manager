@@ -4,6 +4,11 @@ What changed for someone using iTerm2 Profile Manager, newest first. Releases up
 
 ## Unreleased
 
+- Sessions buried with Session > Bury Session when the script starts are colored too.
+- If a dialog or right-click item on a tab never finishes (a reply from iTerm2 got lost), the next right-click item on that tab after 10 minutes replaces it, instead of the tab's items staying blocked until a restart.
+- **Change to another profile** on a favorite saved under an older preset name no longer lands on the same colors under the other name.
+- A `config` value that isn't a usable number (`inf`, `nan`, or a typo like `1e19`) is ignored with a Console warning, like text, instead of stopping new tabs from being colored or favorites from being picked.
+- A tab opened from a favorite's profile right after the script starts no longer shows a count of adjusted colors that may be wrong; the rating dialog leaves it out.
 - New tabs are colored much faster (32 tabs opened at once took 1.5 s instead of 12 s in a test), and a tab that iTerm2 is slow to answer no longer holds up the others. Two tabs opened together don't get the same preset from discovery.
 - When **Change to another profile** can't switch a tab, its alert now says why (for example, the profile's "Use separate colors for light and dark mode" setting). So does the re-roll after **Never show this profile**.
 - A tab closed while it was still being colored now gets its real end time, instead of being marked "unknown" at the next restart.

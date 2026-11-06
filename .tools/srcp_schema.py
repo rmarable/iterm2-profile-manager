@@ -49,6 +49,8 @@ SEED_CONFIG = {
     "nonascii_font": "MesloLGSNFM-Regular",  # prompt icons; '' turns it off
     "fix_colors": "1",  # adjust hard-to-see colors; 0 turns it off
 }
+# The numeric config keys the main script's pick() reads (srcp_odds.py keeps its own copy for now).
+NUMERIC_CONFIG = ("favorite_share", "favorite_target", "recent_window", "colorful_weight")
 # PostScript name -> font file names (any one present counts as installed).
 SEED_FONTS = {
     "SFMono-Regular": ["SF-Mono-Regular.otf"],
@@ -62,6 +64,11 @@ FONT_DIRS = [
     "/System/Library/Fonts",
     "/System/Library/Fonts/Supplemental",
 ]
+
+
+def default_font_label(font):
+    """A font's label when fonts.label has none: 'Menlo-Regular' -> 'Menlo'."""
+    return font.removesuffix("-Regular")
 
 
 def float32(v):

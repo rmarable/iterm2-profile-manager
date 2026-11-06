@@ -25,6 +25,7 @@ import contextlib
 import contextvars
 import fcntl
 import json
+import math
 import os
 import plistlib
 import random
@@ -56,11 +57,13 @@ try:
         FIX_ON_SQL,
         FONT_DIRS,
         MIN_SCHEMA,
+        NUMERIC_CONFIG,
         REBUILD,
         SEED_CONFIG,
         SEED_FONTS,
         UNHIDE,
         colors_hash,
+        default_font_label,
         is_busy,
         schema_problem,
         space_named,
@@ -75,17 +78,15 @@ except ImportError as e:
     )
     sys.exit(1)
 
-VERSION = "0.14.0"  # bump on every change, so the Console shows which code is running
+VERSION = "0.14.1"  # bump on every change, so the Console shows which code is running
 LOCK_PATH = os.path.join(DATA_DIR, ".lock")
 # How often the running script checks whether a snapshot is due. asyncio's clock stops while
 # the Mac sleeps, so check often (it's a few file stats) to keep it close to daily.
 SNAPSHOT_CHECK_S = 15 * 60
 DEFAULT_SIZE = 13
 # The numeric settings pick() reads, with the build's seed values when config lacks one.
-DEFAULT_CONFIG = {
-    k: float(SEED_CONFIG[k])
-    for k in ("favorite_share", "favorite_target", "recent_window", "colorful_weight")
-}
+DEFAULT_CONFIG = {k: float(SEED_CONFIG[k]) for k in NUMERIC_CONFIG}
+CONFIG_MAX = 1e6  # a numeric setting above this is taken as a typo, like a non-number
 # Font for characters the main font lacks, e.g. Powerlevel10k prompt icons; config overrides.
 DEFAULT_NONASCII_FONT = SEED_CONFIG["nonascii_font"]
 NONASCII_FONT_FILES = SEED_FONTS[DEFAULT_NONASCII_FONT]
@@ -104,7 +105,6 @@ REMOVE, NEVER, CANCEL = "Remove favorite", "Never show", "Cancel"
 PRESET_ERRORS = (iterm2.GetPresetException, iterm2.ListPresetsException)
 
 T = TypeVar("T")
-Pick = tuple[str, str | None, str, int | None]  # preset, font (saved favorite's), source, stars
 
 _warned: set[str] = set()
 
@@ -290,19 +290,48 @@ class Store:
 def read_config(db: sqlite3.Connection) -> dict[str, float]:
     cfg: dict[str, float] = dict(DEFAULT_CONFIG)
     for key, value in db.execute("SELECT key, value FROM config"):
-        if key in cfg:
-            try:
-                cfg[key] = float(value)
-            except (TypeError, ValueError):
-                warn_once(
-                    f"config-{key}", f"config {key}={value!r} isn't a number; using {cfg[key]}"
-                )
+        if key not in cfg:
+            continue
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            number = math.nan
+        # inf, nan or a huge value would break every pick (int(inf), an SQL LIMIT past 64 bits,
+        # weights summing to inf) or quietly stop favorites (nan).
+        if math.isfinite(number) and abs(number) <= CONFIG_MAX:
+            cfg[key] = number
+        else:
+            warn_once(
+                f"config-{key}", f"config {key}={value!r} isn't a usable number; using {cfg[key]}"
+            )
     return cfg
+
+
+class Pick(NamedTuple):
+    preset: str
+    font: str | None  # a favorite's saved font; None for discovery, or if it's disabled since
+    source: str  # 'favorite' or 'discovery'
+    stars: int | None
+
+
+def with_twins(db: sqlite3.Connection, names: set[str]) -> set[str]:
+    """names plus their byte-identical twins (old spellings, the repo's own; duplicate_of both
+    ways), so leaving out a look leaves it out under every name."""
+    if not names:
+        return names
+    twins = db.execute(
+        "SELECT name FROM schemes WHERE coalesce(duplicate_of, name) IN "
+        "(SELECT coalesce(duplicate_of, name) FROM schemes "
+        "WHERE name IN (SELECT value FROM json_each(?)))",
+        (json.dumps(sorted(names)),),
+    )
+    return names | {n for (n,) in twins}
 
 
 def pick(db: sqlite3.Connection, mode: str, exclude: set[str]) -> Pick | None:
     """Choose a favorite or a discovery preset for mode, or None if nothing fits."""
     cfg = read_config(db)
+    exclude = with_twins(db, exclude)
     favs: list[tuple[str, str, int]] = [
         r
         for r in db.execute("SELECT preset, font, stars FROM favorite_pool WHERE mode = ?", (mode,))
@@ -319,7 +348,7 @@ def pick(db: sqlite3.Connection, mode: str, exclude: set[str]) -> Pick | None:
         enabled = db.execute("SELECT enabled FROM fonts WHERE name = ?", (font,)).fetchone()
         if enabled is not None and not enabled[0]:
             font = None  # disabled since it was saved: a random font instead
-        return preset, font, "favorite", stars
+        return Pick(preset, font, "favorite", stars)
     if not disc:
         return None
     window = max(0, int(cfg["recent_window"]))
@@ -335,7 +364,7 @@ def pick(db: sqlite3.Connection, mode: str, exclude: set[str]) -> Pick | None:
     weight = max(0.0, cfg["colorful_weight"])
     weights = [weight if colorful else 1.0 for _, colorful in pool]
     preset = random.choices(pool, weights=weights if sum(weights) > 0 else None)[0][0]
-    return preset, None, "discovery", None
+    return Pick(preset, None, "discovery", None)
 
 
 def look_fixes(db: sqlite3.Connection, preset: str) -> tuple[str | None, str | None]:
@@ -374,18 +403,19 @@ def pick_look(db: sqlite3.Connection, mode: str, exclude: set[str]) -> Look | No
     if choice is None:
         look = None
     else:
-        preset, saved, source, stars = choice
-        font = saved or random_font(db)
-        font_off = source == "favorite" and saved is None  # pick() drops a disabled saved font
-        font_stars = favorite_stars(db, preset, font) if font else None
+        font = choice.font or random_font(db)
+        # pick() drops a disabled saved font.
+        font_off = choice.source == "favorite" and choice.font is None
+        font_stars = favorite_stars(db, choice.preset, font) if font else None
+        stars = choice.stars
         if font_off and font_stars is not None:
             stars = font_stars  # the random font is a favorite too: show its own stars
         look = Look(
-            preset,
+            choice.preset,
             font,
-            source,
+            choice.source,
             stars,
-            *look_fixes(db, preset),
+            *look_fixes(db, choice.preset),
             nonascii_font(db),
             font_stars is not None,
             font_off,
@@ -497,12 +527,15 @@ class Launch(NamedTuple):
     session_id: str
 
 
+# Built from Launch's fields, so the two can't drift apart (a test checks each is a column).
+LAUNCH_INSERT = (
+    f"INSERT INTO launches (launched_at, {', '.join(Launch._fields)}) "  # noqa: S608  (field names only)
+    f"VALUES (?{', ?' * len(Launch._fields)})"
+)
+
+
 def record_launch(db: sqlite3.Connection, launch: Launch) -> None:
-    db.execute(
-        "INSERT INTO launches (launched_at, preset, font, size, mode, source, stars, "
-        "iterm_profile, session_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (now(), *launch),
-    )
+    db.execute(LAUNCH_INSERT, (now(), *launch))
 
 
 def record_change(db: sqlite3.Connection, launch: Launch) -> None:
@@ -568,7 +601,7 @@ def log_rating(
     )
 
 
-def save_favorite(db: sqlite3.Connection, preset: str, font: str, size: float, stars: int) -> bool:
+def save_favorite(db: sqlite3.Connection, preset: str, font: str, size: float, stars: int) -> None:
     db.execute("BEGIN IMMEDIATE")  # Store.call rolls back if anything below fails
     # Starring a preset marked Never show (e.g. in a tab opened before) unhides it;
     # otherwise the favorite would never be picked or get a profile. Update rather than
@@ -583,7 +616,6 @@ def save_favorite(db: sqlite3.Connection, preset: str, font: str, size: float, s
         (preset, font, size, stars, now()),
     )
     db.execute("COMMIT")
-    return True
 
 
 def remove_favorite(db: sqlite3.Connection, preset: str, font: str) -> bool:
@@ -626,24 +658,21 @@ def favorite_guid(preset: str, font: str) -> str:
     return str(uuid.uuid5(GUID_NAMESPACE, f"{preset}\0{font}")).upper()
 
 
-def favorite_by_guid(
-    db: sqlite3.Connection, guid: str
-) -> tuple[str, str, int, str | None, int] | None:
-    """(preset, font, stars, mode or None, colors adjusted) of the favorite with this GUID."""
+def favorite_by_guid(db: sqlite3.Connection, guid: str) -> tuple[str, str, int, str | None] | None:
+    """(preset, font, stars, mode or None) of the favorite with this GUID."""
     rows = db.execute(
-        "SELECT f.preset, f.font, f.stars, e.mode, "
-        "CASE WHEN " + FIX_ON_SQL + " THEN e.fix_count ELSE 0 END "
+        "SELECT f.preset, f.font, f.stars, e.mode "
         "FROM favorites f LEFT JOIN effective e ON e.name = f.preset"
     ).fetchall()
-    for preset, font, stars, mode, adjusted in rows:
+    for preset, font, stars, mode in rows:
         if favorite_guid(preset, font) == guid:
-            return preset, font, stars, mode, adjusted or 0
+            return preset, font, stars, mode
     return None
 
 
 def font_label(db: sqlite3.Connection, font: str) -> str:
     row = db.execute("SELECT label FROM fonts WHERE name = ?", (font,)).fetchone()
-    return row[0] if row and row[0] else font.removesuffix("-Regular")
+    return row[0] if row and row[0] else default_font_label(font)
 
 
 # Favorites' iTerm2 profiles (Profiles > Favorites). sync_and_log reads what they're made of
@@ -892,19 +921,21 @@ async def set_variables(session: iterm2.Session, **values: Any) -> None:
 
 async def keep_favorite_profile(
     store: Store, session: iterm2.Session, profile: iterm2.Profile, theme_mode: str
-) -> tuple[Launch, int] | None:
+) -> tuple[Launch, int | None] | None:
     """A session opened from a favorite's profile keeps its look: (its launch row to record,
-    colors adjusted), or None if this isn't one."""
+    colors adjusted or None if not known yet), or None if this isn't one."""
     guid = profile.original_guid or profile.guid
     fav = await store.call(favorite_by_guid, guid) if guid else None
     if not fav:
         return None
-    preset, font, stars, preset_mode, adjusted = fav
+    preset, font, stars, preset_mode = fav
     # The preset's own mode, not the current theme: a dark favorite can be opened in light
     # mode. The theme's only if the preset is gone from the DB (not rebuilt since).
     mode = preset_mode or theme_mode
-    # What its profile file got (none if the preset changed since the build), when known.
-    adjusted = _profile_adjusted.get(preset, adjusted)
+    # What its profile file holds (none if the preset changed since the build). Unknown until
+    # this run has read or written the file (startup colors open tabs first), since a file from
+    # an earlier run may not match the DB; then the tab and its rating dialog don't say.
+    adjusted = _profile_adjusted.get(preset)
     _, size = split_font(profile.normal_font)
     _touched.add(session.session_id)
     await set_variables(
@@ -914,7 +945,7 @@ async def keep_favorite_profile(
         font_size=size,
         mode=mode,
         is_favorite=1,  # 1/0, not True/False: the menu's visible_when compares with 1
-        adjusted=adjusted,
+        **({} if adjusted is None else {"adjusted": adjusted}),
     )
     launch = Launch(preset, font, size, mode, "favorite", stars, profile.name, session.session_id)
     return launch, adjusted
@@ -938,6 +969,10 @@ _ended: set[str] = set()  # sessions closed while being colored: the coloring re
 _queued = contextvars.ContextVar("queued", default=0.0)  # this coloring's wait for a slot, s
 # The reason color_one_at_a_time gives for a tab given up after its look was sent.
 UNRECORDED = "it took too long, and may show a new look that wasn't recorded"
+# The Console's version, for a coloring stopped after its look was sent.
+UNRECORDED_WHAT = (
+    "the tab may show a new look that wasn't recorded; right-click > Change to another profile"
+)
 
 
 class LeftAsIs(Exception):
@@ -1152,11 +1187,7 @@ async def color_one_at_a_time(  # noqa: PLR0913  (the four every coloring takes,
                 # Not recorded either way: a tab given up after its look was sent may show it,
                 # without the user.* variables, until it's re-rolled.
                 if sid in _touched:
-                    what = (
-                        "the tab may show a new look that wasn't recorded; right-click > "
-                        "Change to another profile"
-                    )
-                    why = UNRECORDED
+                    what, why = UNRECORDED_WHAT, UNRECORDED
                 else:
                     what = "nothing was changed (the DB or iTerm2 was busy); the tab keeps its look"
                     why = "it took too long (the database or iTerm2 was busy)"
@@ -1167,6 +1198,10 @@ async def color_one_at_a_time(  # noqa: PLR0913  (the four every coloring takes,
                 return "the database couldn't be read"
             except LeftAsIs as e:  # logged where it was raised
                 return str(e)
+            except asyncio.CancelledError:  # its caller was cancelled, e.g. a stale menu action
+                if sid in _touched:
+                    log("warn", f"coloring session {sid} was cancelled; {UNRECORDED_WHAT}")
+                raise
             finally:
                 _touched.discard(sid)
             # Outside the time limit and the slot (a locked DB delays this row, and every DB
@@ -1194,7 +1229,8 @@ async def color_one_at_a_time(  # noqa: PLR0913  (the four every coloring takes,
 
 # How often the favorites' profiles are checked for changes made outside the dialogs (edits
 # in sqlite3, an export restored, a rebuild). Off the tab path: a rewrite reads all of
-# iTerm2's settings (0.4-0.6 s, measured 2026-11-05; up to 30 s if stuck).
+# iTerm2's settings (0.5-0.75 s with iTerm2 idle, measured 2026-11-06; up to 1.3 s under load
+# in the 2026-11-06 review; up to 30 s if stuck).
 SYNC_EVERY_S = 30
 
 
@@ -1321,8 +1357,9 @@ async def apply_choice(
     result = False
     if choice in STAR_BUTTONS:
         rating = STAR_BUTTONS.index(choice) + 1
-        if result := await store.call(save_favorite, preset, font, size, rating):
-            log("info", f"saved favorite {rating} ★: {preset} | {font} {size}")
+        await store.call(save_favorite, preset, font, size, rating)
+        log("info", f"saved favorite {rating} ★: {preset} | {font} {size}")
+        result = True
     elif choice == REMOVE:
         if result := await store.call(remove_favorite, preset, font):
             log("info", f"removed favorite: {preset} | {font} {size}")
@@ -1582,22 +1619,54 @@ async def menu_action(
         await db_failed_alert(connection, title, window.window_id if window else None)
 
 
+# An action still running after this long is taken as lost: a dialog's reply can go missing
+# (Alert.async_run has no time limit), and the tab's menu would stay dead until a restart.
+ACTION_STALE_S = 600
+
+
+class SessionActions:
+    """The dialogs and menu actions running, one per session at a time so they can't race."""
+
+    def __init__(self, connection: iterm2.Connection, app: iterm2.App) -> None:
+        self.connection, self.app = connection, app
+        self.running: dict[str, tuple[asyncio.Task[None], float]] = {}  # task, when started
+
+    def start(
+        self, action: str, title: str, session_id: str, coro: Coroutine[Any, Any, None]
+    ) -> None:
+        """Run coro through menu_action as a task (outside the RPC, so iTerm2's RPC timeout
+        can't cut a dialog off), unless another runs on this session: then it's ignored, or,
+        if that one is ACTION_STALE_S old, it's cancelled and this runs."""
+        held = self.running.get(session_id)
+        if held and not held[0].done():  # done, but its callback hasn't run yet: free
+            age = time.monotonic() - held[1]
+            if age < ACTION_STALE_S:
+                coro.close()  # never run: no "never awaited" warning
+                log("info", f"{action}: another action is still running on this session; ignored")
+                return
+            held[0].cancel()
+            log(
+                "warn",
+                f"{action}: an action started {age / 60:.0f} min ago on this session never "
+                "finished (a lost iTerm2 reply?); cancelled it",
+            )
+        task = spawn(action, menu_action(self.connection, self.app, title, session_id, coro))
+        self.running[session_id] = (task, time.monotonic())
+
+        def done(t: asyncio.Task[None]) -> None:
+            # Only its own entry: a cancelled stale task finishes after its replacement starts.
+            if (entry := self.running.get(session_id)) and entry[0] is t:
+                del self.running[session_id]
+
+        task.add_done_callback(done)
+
+
 async def register_save_handlers(
     connection: iterm2.Connection, app: iterm2.App, store: Store
 ) -> None:
     """Save (right-click and save_profile() key), and the right-click Remove profile from favorites,
     Change to another profile and Never show this profile."""
-    running: dict[str, asyncio.Task[None]] = {}
-
-    def start(action: str, title: str, session_id: str, coro: Coroutine[Any, Any, None]) -> None:
-        if session_id in running:
-            coro.close()  # one dialog or removal per session at a time, so they can't race
-            log("info", f"{action}: another action is still running on this session; ignored")
-            return
-        # Run outside the RPC so iTerm2's RPC timeout can't cut a dialog off.
-        task = spawn(action, menu_action(connection, app, title, session_id, coro))
-        running[session_id] = task
-        task.add_done_callback(lambda _t: running.pop(session_id, None))
+    start = SessionActions(connection, app).start
 
     def start_dialog(session_id: str) -> None:
         start("save", SAVE_TITLE, session_id, save_dialog(connection, app, store, session_id))
@@ -1680,13 +1749,13 @@ async def startup(
     connection: iterm2.Connection, app: iterm2.App, store: Store, started: str
 ) -> None:
     open_sessions = [s for w in app.windows for t in w.tabs for s in t.all_sessions]
+    open_sessions += app.buried_sessions  # Session > Bury Session
     live = {s.session_id for s in open_sessions}
-    live |= {s.session_id for s in app.buried_sessions}
     # No usable DB (DbUnavailable, logged) skips these; tabs are left as is until there is one.
     with contextlib.suppress(DbUnavailable):
-        stale = await store.call(close_stale, live, started)
-        if stale:
-            log("info", f"{stale} launches from a previous run ended as 'unknown'")
+        ended = await store.call(close_stale, live, started)
+        if ended:
+            log("info", f"{ended} launches from a previous run ended as 'unknown'")
     with contextlib.suppress(DbUnavailable):
         backup = await store.call(daily_snapshot)
         if backup:
@@ -1703,8 +1772,9 @@ async def startup(
             log("warn", f"coloring open session failed: {e!r}")
 
     await asyncio.gather(*(color_open(s) for s in open_sessions))
-    # Last: parsing iTerm2's settings (0.4-0.6 s, holding Python's GIL) slows every coloring
-    # that overlaps it, so the tabs open at launch go first. With no DB it syncs nothing.
+    # Last: parsing iTerm2's settings holds Python's GIL (0.2-0.25 s of a 0.5-0.75 s read with
+    # iTerm2 idle, measured 2026-11-06; the read took up to 1.3 s under load in the 2026-11-06
+    # review) and slows every coloring that overlaps it. With no DB it syncs nothing.
     await sync_and_log(store)
 
 
@@ -1750,7 +1820,7 @@ async def session_ended(store: Store, session_id: str) -> None:
         log("warn", f"recording session end failed: {e!r}")
 
 
-async def exit_on_disconnect(connection: iterm2.Connection, store: Store | None = None) -> None:
+async def exit_on_disconnect(connection: iterm2.Connection, store: Store) -> None:
     # The monitors never return once iTerm2 quits, so without this the process outlives it
     # and holds the lock, and the copy the next iTerm2 launch starts exits.
     if connection.websocket is not None:
@@ -1758,7 +1828,7 @@ async def exit_on_disconnect(connection: iterm2.Connection, store: Store | None 
     log("info", "iTerm2 closed the connection; exiting")
     # Close the DB, so SQLite folds in and deletes its -wal/-shm files; not past 1 s, in case
     # a call holds it (a locked DB's 5 s wait): WAL recovers at the next open anyway.
-    if store and store.lock.acquire(timeout=1) and store.db is not None:
+    if store.lock.acquire(timeout=1) and store.db is not None:
         with contextlib.suppress(sqlite3.Error):
             store.db.close()
     # os._exit, not sys.exit: unwinding would unsubscribe the monitors over the closed

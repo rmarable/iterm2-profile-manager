@@ -12,6 +12,7 @@ The dot keeps this folder out of iTerm2's Scripts menu, like .tools/.
 import asyncio
 import contextlib
 import fcntl
+import gc
 import glob
 import hashlib
 import io
@@ -29,6 +30,7 @@ import threading
 import time
 import types
 import unittest
+import warnings
 from typing import ClassVar
 from unittest import mock
 
@@ -322,15 +324,17 @@ class BuildTest(DbTest):
         self.assertIs(srcp_favorites.UNHIDE, srcp_schema.UNHIDE)
         self.assertIs(build.FIX_ON_SQL, srcp_schema.FIX_ON_SQL)
         self.assertIs(self.main["colors_hash"], srcp_schema.colors_hash)
-        seeded = {k: float(build.SEED_CONFIG[k]) for k in self.main["DEFAULT_CONFIG"]}
+        seeded = {k: float(build.SEED_CONFIG[k]) for k in srcp_schema.NUMERIC_CONFIG}
         self.assertEqual(seeded, self.main["DEFAULT_CONFIG"])
+        self.assertIs(self.main["default_font_label"], srcp_schema.default_font_label)
         nonascii = self.main["DEFAULT_NONASCII_FONT"]
         self.assertEqual(nonascii, build.SEED_CONFIG["nonascii_font"])
         self.assertEqual(self.main["NONASCII_FONT_FILES"], build.SEED_FONTS[nonascii])
 
     def test_no_hand_copies_left(self):
         names = "FIX_ON_SQL|UNHIDE|HASH_KEYS|COMPONENTS|FONT_DIRS|SEED_FONTS|SEED_CONFIG"
-        copies = re.compile(rf'^({names}) =|"schemes-\*\.db"', re.M)
+        names += "|NUMERIC_CONFIG"
+        copies = re.compile(rf'^({names}) =|"schemes-\*\.db"|removesuffix\("-Regular"\)', re.M)
         for path in (MAIN, BUILD, os.path.join(ROOT, ".tools", "srcp_favorites.py")):
             with open(path) as f, self.subTest(path=os.path.basename(path)):
                 self.assertEqual(copies.findall(f.read()), [])
@@ -867,6 +871,49 @@ class MainScriptTest(DbTest):
     def test_pick_with_nothing_left_is_none(self):
         # A DB failure raises DbUnavailable (store.call); None means nothing fits.
         self.assertIsNone(self.main["pick"](self.db, "light", {"Light One", "Yellow"}))
+
+    def test_leaving_out_a_look_leaves_out_its_twins_too(self):
+        with_twins = self.main["with_twins"]
+        self.assertEqual(with_twins(self.db, {"Dark One"}), {"Dark One", "dark one"})
+        self.assertEqual(with_twins(self.db, {"dark one"}), {"Dark One", "dark one"})
+        self.assertEqual(with_twins(self.db, {"Dark Two Copy"}), {"Dark Two", "Dark Two Copy"})
+        self.assertEqual(with_twins(self.db, {"Gone", "Yellow"}), {"Gone", "Yellow"})
+        # A favorite saved under the old spelling: a re-roll from it never lands on the repo
+        # name (discovery), and one from the repo name never on the favorite.
+        self.fixing("0")  # Murky (unreadable) stays out
+        self.main["save_favorite"](self.db, "dark one", "Monaco", 13, 5)
+        self.db.execute(
+            "UPDATE config SET value = '1' WHERE key IN ('favorite_share', 'favorite_target')"
+        )  # a favorite whenever there is one
+        for _ in range(50):
+            self.assertEqual(self.main["pick"](self.db, "dark", {"dark one"}).preset, "Dark Two")
+            self.assertEqual(self.main["pick"](self.db, "dark", {"Dark One"}).preset, "Dark Two")
+
+    def test_config_that_isnt_a_usable_number_is_ignored_with_one_warning(self):
+        for value in ("inf", "-inf", "nan", "lots", None, "1e19", "1e308"):
+            self.db.execute("UPDATE config SET value = ? WHERE key = 'recent_window'", (value,))
+            self.db.execute("UPDATE config SET value = ? WHERE key = 'favorite_share'", (value,))
+            self.db.execute("UPDATE config SET value = ? WHERE key = 'colorful_weight'", (value,))
+            self.db.execute("UPDATE config SET value = ? WHERE key = 'favorite_target'", (value,))
+            self.main["_warned"].clear()
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                cfg = self.main["read_config"](self.db)
+                cfg = self.main["read_config"](self.db)
+            self.assertEqual(cfg, self.main["DEFAULT_CONFIG"], value)
+            self.assertEqual(out.getvalue().count("isn't a usable number"), 4, value)  # each once
+            self.assertIsNotNone(self.main["pick"](self.db, "dark", set()))
+        # The cap itself is still a usable number.
+        self.db.execute("UPDATE config SET value = '1000000' WHERE key = 'recent_window'")
+        self.assertEqual(self.main["read_config"](self.db)["recent_window"], 1e6)
+
+    def test_every_launch_field_is_a_launches_column(self):
+        columns = [r[1] for r in self.db.execute("PRAGMA table_info(launches)")]
+        self.assertLessEqual(set(self.main["Launch"]._fields), set(columns))
+        launch = ("Dark One", "Monaco", 13, "dark", "favorite", 4, "Default", "s1")
+        self.record(*launch)
+        names = ", ".join(self.main["Launch"]._fields)
+        row = self.db.execute(f"SELECT {names} FROM launches").fetchone()  # noqa: S608  (field names only)
+        self.assertEqual(row, launch)
 
     def test_icon_font_follows_its_file_not_the_random_font_pool(self):
         fonts = os.path.join(self.tmp, "fonts")
@@ -2045,19 +2092,36 @@ class ColorFixTest(DbTest):
         self.assertEqual([round(sent[c], 4) for c in build.COMPONENTS], expected)
         self.assertNotEqual(sent["Red Component"], UNREADABLE["Foreground Color"]["Red Component"])
 
-    def test_a_favorite_profile_session_reports_its_adjustments(self):
+    def favorite_profile_tab(self, preset):
+        """Color a tab opened from preset's favorite profile (Monaco); the Console output."""
+        self.tab({})
+        self.profile.original_guid = self.main["favorite_guid"](preset, "Monaco")
+        color_once = self.main["color_one_at_a_time"]
+        return self.run_quietly(color_once(None, self.app, self.store, self.session))
+
+    def test_a_favorite_profile_session_reports_what_its_profile_holds_once_known(self):
         self.main["save_favorite"](self.db, "Murky", "Monaco", 13, 3)
-        guid = self.main["favorite_guid"]("Murky", "Monaco")
-        fav = self.main["favorite_by_guid"](self.db, guid)
-        self.assertEqual(fav[4], len(json.loads(self.scheme_fixes("Murky"))))
+        # Before this run has read or written the profiles file (startup's tabs): not said,
+        # since a file from an earlier run may not hold what the DB says.
+        out = self.favorite_profile_tab("Murky")
+        self.assertNotIn("adjusted", out)
+        self.assertNotIn("user.adjusted", self.variables)
+        self.export_prefs({"Custom Color Presets": {"Murky": UNREADABLE}})
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.write_profiles()
+        n = len(json.loads(self.scheme_fixes("Murky")))
+        self.assertGreater(n, 0)
+        out = self.favorite_profile_tab("Murky")
+        self.assertIn(self.main["colors_adjusted"](n), out)
+        self.assertEqual(self.variables["user.adjusted"], n)
         # Its profile got none (the preset changed since the build): the session says none.
         changed = with_colors(UNREADABLE, Ansi_1_Color=(0.5, 0.1, 0.1))
         self.export_prefs({"Custom Color Presets": {"Murky": changed}})
         with contextlib.redirect_stdout(io.StringIO()):
             self.write_profiles()
         self.assertEqual(self.main["_profile_adjusted"]["Murky"], 0)
-        self.fixing("0")
-        self.assertEqual(self.main["favorite_by_guid"](self.db, guid)[4], 0)
+        self.favorite_profile_tab("Murky")
+        self.assertEqual(self.variables["user.adjusted"], 0)
 
     def test_the_float32_round_trip_keeps_the_hash(self):
         # Values on a .4f boundary (Sandstone presets) format differently after iTerm2's 32-bit
@@ -2505,7 +2569,7 @@ class TabTest(DbTest):
         self.main["save_favorite"](self.db, "Dark One", "Monaco", 13, 4)
         self.main["save_favorite"](self.db, "Dark One", "Menlo-Regular", 13, 2)
         self.db.execute("UPDATE fonts SET enabled = (name = 'Menlo-Regular')")  # Monaco off
-        self.main["pick"] = lambda db, mode, exclude: ("Dark One", None, "favorite", 4)  # Monaco's
+        self.main["pick"] = lambda db, mode, exclude: self.main["Pick"]("Dark One", None, "favorite", 4)  # Monaco's
         look = self.main["pick_look"](self.db, "dark", set())
         self.assertEqual(
             (look.font, look.is_favorite, look.font_off), ("Menlo-Regular", True, True)
@@ -2515,7 +2579,7 @@ class TabTest(DbTest):
     def test_a_favorite_in_a_random_font_that_isnt_saved_keeps_the_picked_stars(self):
         self.main["save_favorite"](self.db, "Dark One", "Monaco", 13, 4)
         self.db.execute("UPDATE fonts SET enabled = (name = 'Menlo-Regular')")  # Monaco off
-        self.main["pick"] = lambda db, mode, exclude: ("Dark One", None, "favorite", 4)
+        self.main["pick"] = lambda db, mode, exclude: self.main["Pick"]("Dark One", None, "favorite", 4)
         look = self.main["pick_look"](self.db, "dark", set())
         self.assertEqual((look.font, look.is_favorite, look.stars), ("Menlo-Regular", False, 4))
 
@@ -2646,6 +2710,127 @@ class TabTest(DbTest):
         self.assertIn("[warn] the check failed: RuntimeError('boom')", out)
         self.assertIn("Traceback", out)  # a bug: where it happened, too
         self.assertEqual(self.main["_background"], set())
+
+    def test_an_action_that_never_finishes_is_replaced_after_ten_minutes(self):
+        self.tab({})
+        actions = self.main["SessionActions"](None, self.app)
+        ran = []
+        release = None
+
+        async def hang():
+            ran.append("hang")
+            await asyncio.Event().wait()  # a dialog whose reply never comes
+
+        async def slow():
+            ran.append("slow")
+            await release.wait()
+
+        async def quick():
+            ran.append("quick")
+
+        async def scenario():
+            nonlocal release
+            release = asyncio.Event()
+            actions.start("save", "Save", "s1", hang())
+            await asyncio.sleep(0)
+            stuck = actions.running["s1"][0]
+            actions.start("change", "Change", "s1", quick())  # still running: ignored
+            stale_since = time.monotonic() - self.main["ACTION_STALE_S"] - 1
+            actions.running["s1"] = (stuck, stale_since)
+            actions.start("change", "Change", "s1", slow())
+            new = actions.running["s1"][0]
+            await asyncio.sleep(0.01)
+            self.assertTrue(stuck.cancelled())
+            # The cancelled one finished after its replacement started: its end leaves the
+            # replacement's entry alone, so a third action still waits.
+            self.assertIs(actions.running["s1"][0], new)
+            release.set()
+            await asyncio.sleep(0.01)
+            self.assertEqual(actions.running, {})
+            actions.start("save", "Save", "s1", quick())
+            await asyncio.sleep(0.01)
+
+        out = self.run_quietly(scenario())
+        self.assertEqual(ran, ["hang", "slow", "quick"])
+        self.assertIn("another action is still running on this session; ignored", out)
+        self.assertIn("[warn] change: an action started 10 min ago", out)
+        self.assertNotIn("Traceback", out)
+
+    def test_a_reroll_cancelled_after_its_look_was_sent_says_so(self):
+        self.tab({"user.color_preset": "Dark One"})
+        sent = asyncio.Event()
+
+        async def stuck(_connection, _app, _store, session, reroll=False):
+            self.main["_touched"].add(session.session_id)  # the look went out
+            sent.set()
+            await asyncio.Event().wait()  # then a reply never comes (inside the time limit)
+
+        self.main["color_session"] = stuck
+        color_once = self.main["color_one_at_a_time"]
+
+        async def scenario():
+            task = asyncio.ensure_future(
+                color_once(None, self.app, self.store, self.session, reroll=True)
+            )
+            await sent.wait()
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+        out = self.run_quietly(scenario())
+        self.assertIn("coloring session s1 was cancelled; the tab may show a new look", out)
+        self.assertEqual(self.main["_coloring"], {})
+
+    def test_an_ignored_menu_action_is_closed_not_left_unawaited(self):
+        connection = types.SimpleNamespace(iterm2_protocol_version=(1, 21))  # iTerm2 3.7.6
+        handlers = {}
+
+        def rpc(fn):  # the iterm2 decorators: keep the handler, fake its registration
+            handlers[fn.__name__] = fn
+            fn.async_register = mock.AsyncMock()
+            return fn
+
+        hang = asyncio.Event()
+
+        async def dialog(*_args):
+            await hang.wait()
+
+        self.tab({})
+        self.main["save_dialog"] = dialog
+        self.main["change_from_menu"] = dialog
+        iterm2 = self.main["iterm2"]
+
+        async def scenario():
+            with (
+                mock.patch.object(iterm2, "RPC", rpc),
+                mock.patch.object(iterm2, "ContextMenuProviderRPC", rpc),
+            ):
+                await self.main["register_save_handlers"](connection, self.app, self.store)
+            await handlers["save_profile"](session_id="s1")
+            await asyncio.sleep(0)
+            await handlers["change_profile_menu"](session_id="s1")  # ignored, and closed
+            hang.set()
+            await asyncio.sleep(0.01)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            out = self.run_quietly(scenario())
+            gc.collect()
+        self.assertIn("change: another action is still running", out)
+        self.assertEqual([w for w in caught if "never awaited" in str(w.message)], [])
+
+    def test_startup_colors_buried_sessions_too(self):
+        self.tab({})
+        self.app.windows = []
+        self.app.buried_sessions = [self.session]  # Session > Bury Session
+        colored = []
+
+        async def color(_connection, _app, _store, session, **_kwargs):
+            colored.append(session.session_id)
+
+        self.main["color_one_at_a_time"] = color
+        self.run_quietly(self.main["startup"](None, self.app, self.store, "2026-11-05 12:00:00"))
+        self.assertEqual(colored, ["s1"])
 
     def test_a_tab_closed_under_a_dialog_is_one_line_not_a_traceback(self):
         async def closed():
