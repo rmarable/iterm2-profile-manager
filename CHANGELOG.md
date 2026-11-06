@@ -4,6 +4,11 @@ What changed for someone using iTerm2 Profile Manager, newest first. Releases up
 
 ## Unreleased
 
+- A tab closed while one of the script's dialogs was open no longer prints a traceback in the Console.
+- A database rebuilt by newer scripts while the main script runs is noticed right away, and the Console says to restart the script, instead of the database being read as if nothing had changed. This also works after an earlier "rebuild it" message.
+- "Change to another profile" says so in a dialog when the tab couldn't get a new look, instead of only in the Console.
+- When coloring a tab is given up after the time limit, the Console says whether the tab was changed at all.
+- A new tab that can't be colored is given up after 15 seconds, not 30.
 - The database build says the database is locked, and whether it was written, instead of stopping with an error when another program holds it.
 - Presets with identical accent colors (Aura, Aura Dark) now get distinct ones after a rebuild.
 

@@ -303,8 +303,8 @@ class BuildTest(DbTest):
         )
         tools = ["build_scheme_db", "import_presets", "add_key_binding", "uninstall_prefs"]
         tools += ["favorites", "odds", "export_curation"]
-        for name in tools:
-            path = os.path.join(ROOT, ".tools", f"srcp_{name}.py")
+        paths = [MAIN, *(os.path.join(ROOT, ".tools", f"srcp_{name}.py") for name in tools)]
+        for path in paths:
             with open(path) as f, self.subTest(path=os.path.basename(path)):
                 self.assertEqual(prefs_copies.findall(f.read()), [])
 
@@ -633,9 +633,81 @@ class OldSchemaTest(DbTest):
         self.assertIn("Restart the main script", problem)
         store = self.main["Store"](self.db_path)
         out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            self.assertIsNone(asyncio.run(store.call(self.main["look_fixes"], "Murky")))
+        with contextlib.redirect_stdout(out), self.assertRaises(self.main["DbUnavailable"]):
+            asyncio.run(store.call(self.main["look_fixes"], "Murky"))
         self.assertIn("Restart the main script", out.getvalue())  # not its fixes, half-read
+
+    def test_a_newer_schema_under_an_open_store_is_noticed_on_the_next_call(self):
+        store = self.main["Store"](self.db_path)
+        look_fixes = self.main["look_fixes"]
+        with contextlib.redirect_stdout(io.StringIO()):
+            asyncio.run(store.call(look_fixes, "Murky"))  # connected, schema checked
+        self.db.execute(f"PRAGMA user_version = {srcp_schema.MIN_SCHEMA + 1}")  # rebuilt, newer
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(self.main["DbUnavailable"]):
+            asyncio.run(store.call(look_fixes, "Murky"))
+        self.assertIn("Restart the main script", out.getvalue())
+        self.assertIsNone(store.db)
+
+    def test_a_rebuild_by_newer_scripts_after_rebuild_it_says_restart(self):
+        self.make_old()
+        store = self.main["Store"](self.db_path)
+        look_fixes = self.main["look_fixes"]
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            with self.assertRaises(self.main["DbUnavailable"]):
+                asyncio.run(store.call(look_fixes, "Murky"))
+            self.db.execute(f"PRAGMA user_version = {srcp_schema.MIN_SCHEMA + 1}")
+            with self.assertRaises(self.main["DbUnavailable"]):
+                asyncio.run(store.call(look_fixes, "Murky"))
+        self.assertIn("rebuild it", out.getvalue())
+        self.assertIn("Restart the main script", out.getvalue())  # not just the stale advice
+
+    def connected_store_whose_check_fails(self, error):
+        """A Store connected to this DB, whose next schema check (PRAGMA user_version) raises
+        error. Mocked: a real WAL connection mostly reads a file damaged in place from its
+        cache (checked 2026-11-05), so this covers the error path, not how often it's hit."""
+        store = self.main["Store"](self.db_path)
+        with contextlib.redirect_stdout(io.StringIO()):
+            asyncio.run(store.call(self.main["look_fixes"], "Murky"))  # connected
+
+        class Failing:
+            def __init__(self, real):
+                self.real = real
+
+            def execute(self, sql, *args):
+                if sql == "PRAGMA user_version":
+                    raise error
+                return self.real.execute(sql, *args)
+
+            def __getattr__(self, name):
+                return getattr(self.real, name)
+
+        store.db = Failing(store.db)
+        return store
+
+    def test_a_db_damaged_under_an_open_store_says_restore_once(self):
+        store = self.connected_store_whose_check_fails(sqlite3.DatabaseError("not a database"))
+        with open(self.db_path, "r+b") as f:  # same inode, garbage header: reconnecting fails
+            f.write(b"this is not SQLite" * 10)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            for _ in range(3):
+                with self.assertRaises(self.main["DbUnavailable"]):
+                    asyncio.run(store.call(self.main["look_fixes"], "Murky"))
+        self.assertEqual(out.getvalue().count("is damaged"), 1, out.getvalue())
+        self.assertIn("restore a snapshot", out.getvalue())
+
+    def test_a_db_locked_under_an_open_store_is_busy_not_damaged(self):
+        store = self.connected_store_whose_check_fails(
+            sqlite3.OperationalError("database is locked")
+        )
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(self.main["DbUnavailable"]):
+            asyncio.run(store.call(self.main["look_fixes"], "Murky"))
+        self.assertIn("DB look_fixes: database is locked", out.getvalue())
+        self.assertNotIn("is damaged", out.getvalue())
+        self.assertIsNotNone(store.db)  # kept: busy isn't a reason to reconnect
 
     def test_the_main_script_asks_once_for_a_rebuild_then_works_without_a_restart(self):
         self.make_old()
@@ -643,8 +715,9 @@ class OldSchemaTest(DbTest):
         look_fixes = self.main["look_fixes"]
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            self.assertIsNone(asyncio.run(store.call(look_fixes, "Murky")))
-            self.assertIsNone(asyncio.run(store.call(look_fixes, "Murky")))
+            for _ in range(2):
+                with self.assertRaises(self.main["DbUnavailable"]):
+                    asyncio.run(store.call(look_fixes, "Murky"))
         self.assertEqual(out.getvalue().count("rebuild it: python3 .tools/srcp_build"), 1)
         self.build()  # what the message says to do: same file, same inode, same open Store
         with contextlib.redirect_stdout(io.StringIO()):
@@ -669,8 +742,8 @@ class OldSchemaTest(DbTest):
         holder.execute("SELECT count(*) FROM schemes")
         store = self.main["Store"](self.db_path)
         out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            self.assertIsNone(asyncio.run(store.call(self.main["look_fixes"], "Murky")))
+        with contextlib.redirect_stdout(out), self.assertRaises(self.main["DbUnavailable"]):
+            asyncio.run(store.call(self.main["look_fixes"], "Murky"))
         self.assertIn("DB look_fixes: database is locked", out.getvalue())
         self.assertNotIn("is damaged", out.getvalue())  # busy is not damage
         self.assertNotIn("bad-db", self.main["_warned"])
@@ -689,7 +762,8 @@ class OldSchemaTest(DbTest):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             for _ in range(3):
-                self.assertIsNone(asyncio.run(store.call(self.main["look_fixes"], "Murky")))
+                with self.assertRaises(self.main["DbUnavailable"]):
+                    asyncio.run(store.call(self.main["look_fixes"], "Murky"))
         self.assertEqual(out.getvalue().count("is damaged"), 1)
         self.assertIn("restore a snapshot", out.getvalue())
 
@@ -724,9 +798,9 @@ class MainScriptTest(DbTest):
             name, font, source, _stars = self.main["pick"](self.db, "dark", {"Dark Two"})
             self.assertEqual((name, font, source), ("Dark One", None, "discovery"))
 
-    def test_pick_with_nothing_left_is_empty_not_none(self):
-        # None means the DB call failed (store.call); () means nothing fits.
-        self.assertEqual(self.main["pick"](self.db, "light", {"Light One", "Yellow"}), ())
+    def test_pick_with_nothing_left_is_none(self):
+        # A DB failure raises DbUnavailable (store.call); None means nothing fits.
+        self.assertIsNone(self.main["pick"](self.db, "light", {"Light One", "Yellow"}))
 
     def test_icon_font_follows_its_file_not_the_random_font_pool(self):
         fonts = os.path.join(self.tmp, "fonts")
@@ -1111,8 +1185,8 @@ class AsyncHelpersTest(DbTest):
             raise sqlite3.OperationalError("database is locked")
 
         out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            self.assertIsNone(asyncio.run(store.call(locked)))
+        with contextlib.redirect_stdout(out), self.assertRaises(self.main["DbUnavailable"]):
+            asyncio.run(store.call(locked))
         self.assertIn("DB locked: database is locked", out.getvalue())
         self.assertNotIn("rebuild", out.getvalue())
 
@@ -1140,8 +1214,8 @@ class AsyncHelpersTest(DbTest):
                 self.real.close()
 
         out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            self.assertIsNone(asyncio.run(store.call(boom)))
+        with contextlib.redirect_stdout(out), self.assertRaises(self.main["DbUnavailable"]):
+            asyncio.run(store.call(boom))
         self.assertIn("disk I/O error", out.getvalue())  # the original error, not the rollback's
         self.assertIn("rollback failed", out.getvalue())
         self.assertIsNone(store.db)  # the next call reconnects
@@ -2008,8 +2082,17 @@ class TabTest(DbTest):
         self.main["COLOR_TIMEOUT_S"] = 0.05
         out = self.run_quietly(color_once(None, self.app, self.store, self.session))
         self.assertIn("took over 0.05 s", out)
-        self.assertIn("Change to another profile", out)  # how to fix a half-done tab
+        self.assertIn("nothing was changed", out)  # given up before touching the tab
         self.assertEqual(self.main["_coloring"], {})  # freed for the next try
+
+        async def half_done(connection, app, store, session, reroll=False):
+            self.main["_touched"].add(session.session_id)  # as color_session does
+            await asyncio.sleep(3600)
+
+        self.main["color_session"] = half_done
+        out = self.run_quietly(color_once(None, self.app, self.store, self.session))
+        self.assertIn("Change to another profile", out)  # how to fix a half-done tab
+        self.assertEqual(self.main["_touched"], set())
 
     def test_a_locked_db_while_recording_doesnt_give_the_tab_up(self):
         self.fixing("0")
@@ -2146,7 +2229,7 @@ class TabTest(DbTest):
 
     def test_nothing_left_to_pick_on_a_reroll_is_said_every_time(self):
         self.tab({"user.color_preset": "Dark One"})
-        self.main["pick_look"] = lambda db, mode, exclude: ()
+        self.main["pick_look"] = lambda db, mode, exclude: None
         color = self.main["color_session"]
         out = "".join(
             self.run_quietly(color(None, self.app, self.store, self.session, reroll=True))
@@ -2171,6 +2254,55 @@ class TabTest(DbTest):
         self.assertIn("[warn] the check failed: RuntimeError('boom')", out)
         self.assertIn("Traceback", out)  # a bug: where it happened, too
         self.assertEqual(self.main["_background"], set())
+
+    def test_a_tab_closed_under_a_dialog_is_one_line_not_a_traceback(self):
+        async def closed():
+            raise self.main["iterm2"].RPCException("SESSION_NOT_FOUND")
+
+        async def scenario():
+            self.main["spawn"]("save", closed())
+            await asyncio.sleep(0.01)
+
+        out = self.run_quietly(scenario())
+        self.assertIn("[warn] save failed: RPCException('SESSION_NOT_FOUND')", out)
+        self.assertNotIn("Traceback", out)
+
+    def test_no_db_at_startup_leaves_tabs_alone_and_the_next_tab_after_it_is_colored(self):
+        self.fixing("0")
+        missing = os.path.join(self.tmp, "later.db")
+        sync = self.main["sync_and_log"]  # the real one: tab() replaces it
+        self.tab({}, db_path=missing)
+        self.main["sync_and_log"] = sync
+        tab = types.SimpleNamespace(all_sessions=[self.session])
+        self.app.windows = [types.SimpleNamespace(tabs=[tab])]
+        self.app.buried_sessions = []
+        out = self.run_quietly(self.main["startup"](None, self.app, self.store, "2026-11-05"))
+        self.assertIn("no scheme DB", out)
+        self.assertNotIn("Traceback", out)
+        self.assertNotIn("user.color_preset", self.variables)
+        db = self.db
+
+        class Monitor:  # two new-tab events; the DB is built between them
+            def __init__(self):
+                self.events = iter(["s1", "build", "s1"])
+
+            async def async_get(self):
+                event = next(self.events, None)
+                if event == "build":
+                    with sqlite3.connect(missing) as copy:
+                        db.backup(copy)
+                    copy.close()
+                    event = next(self.events)
+                if event is None:
+                    raise Stop
+                return event
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(Stop):
+            asyncio.run(self.main["watch_new"](None, self.app, self.store, Monitor()))
+        self.assertEqual(out.getvalue().count("couldn't read the DB; session left as is"), 1)
+        self.assertNotIn("coloring session failed", out.getvalue())
+        self.assertIn(self.variables.get("user.color_preset"), {"Dark One", "Dark Two"})
 
     def test_startup_colors_open_tabs_before_reading_the_settings(self):
         self.tab({})
@@ -2265,8 +2397,11 @@ class TabTest(DbTest):
 
         self.main["record_launch"] = broken_insert
         store = self.main["Store"](self.db_path)
-        with contextlib.redirect_stdout(io.StringIO()):
-            self.assertIsNone(asyncio.run(store.call(self.main["record_change"], launch)))
+        with (
+            contextlib.redirect_stdout(io.StringIO()),
+            self.assertRaises(self.main["DbUnavailable"]),
+        ):
+            asyncio.run(store.call(self.main["record_change"], launch))
         rows = self.db.execute("SELECT preset, end_reason FROM launches").fetchall()
         self.assertEqual(rows, [("Dark One", None)])  # still open: neither change happened
 
@@ -2328,9 +2463,31 @@ class TabTest(DbTest):
     def test_remove_when_the_db_fails_says_so_instead_of_not_a_favorite(self):
         missing = os.path.join(self.tmp, "none.db")
         self.tab({"user.color_preset": "Dark One", "user.font": "Monaco"}, db_path=missing)
-        self.run_quietly(self.main["remove_from_menu"](None, self.app, self.store, "s1"))
+        remove = self.main["remove_from_menu"](None, self.app, self.store, "s1")
+        self.run_quietly(self.main["menu_action"](None, self.app, "Remove", "s1", remove))
         self.assertEqual(len(self.texts), 1)
         self.assertIn("didn't take", self.texts[0])
+
+    def test_the_save_dialog_without_a_db_says_it_didnt_take(self):
+        missing = os.path.join(self.tmp, "none.db")
+        self.tab({"user.color_preset": "Dark One", "user.font": "Monaco"}, db_path=missing)
+        save = self.main["save_dialog"](None, self.app, self.store, "s1")
+        self.run_quietly(self.main["menu_action"](None, self.app, "Save", "s1", save))
+        self.assertEqual(len(self.texts), 1)  # no rating dialog, just the alert
+        self.assertIn("didn't take", self.texts[0])
+
+    def test_change_from_the_menu_says_so_when_the_tab_keeps_its_look(self):
+        missing = os.path.join(self.tmp, "none.db")
+        self.tab({"user.color_preset": "Dark One"}, db_path=missing)
+        out = self.run_quietly(self.main["change_from_menu"](None, self.app, self.store, "s1"))
+        self.assertIn("couldn't read the DB", out)
+        self.assertEqual(len(self.texts), 1)
+        self.assertIn("couldn't switch to another look", self.texts[0])
+        self.fixing("0")
+        self.tab({"user.color_preset": "Dark One"})  # a working DB: changed, no dialog
+        self.run_quietly(self.main["change_from_menu"](None, self.app, self.store, "s1"))
+        self.assertEqual(self.texts, [])
+        self.assertEqual(self.variables["user.color_preset"], "Dark Two")
 
     def test_remove_on_a_tab_with_no_font_of_ours_says_why(self):
         self.tab({"user.color_preset": "Dark One", "user.font": ""})
@@ -2437,7 +2594,8 @@ class NeverShowTest(DbTest):
         missing = os.path.join(self.tmp, "none") if fail else None
         self.tab({"user.color_preset": preset, "user.font": "Monaco"}, [button] * 3, missing)
         self.record(preset, "Monaco", 13, "dark", "discovery", None, "Default", "s1")
-        self.run_quietly(self.main["never_show_from_menu"](None, self.app, self.store, "s1"))
+        hide = self.main["never_show_from_menu"](None, self.app, self.store, "s1")
+        self.run_quietly(self.main["menu_action"](None, self.app, "Never", "s1", hide))
         return self.texts
 
     def test_menu_hides_the_preset_and_rerolls_the_tab(self):
