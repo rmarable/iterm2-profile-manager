@@ -86,6 +86,16 @@ GAMUT_EPS = 1e-6
 # A color this close below its contrast target counts as reaching it: a P3 or Generic RGB
 # color stored to 6 decimals can show a hair under the sRGB value it was moved to.
 CONTRAST_EPS = 1e-4
+# A color that can't reach its target takes the best point on the way only if it beats the
+# one before by this much: smaller gains are invisible, and a second build could find them
+# again by rounding (a Generic RGB near-black lands 1.3e-4 short of black), which would break
+# the fixed point.
+MIN_GAIN = 1e-3
+# Text stays on its side of the background (lighter or darker) when that side gets within this
+# much of its target: white text on red stays white at 4.2 rather than turn black at 4.5.
+TEXT_SIDE_SLACK = 0.5
+# Text below this contrast with the background has no side to keep (it can barely be seen).
+NO_SIDE_CONTRAST = 1.1
 GAMUT_FLOOR_MARGIN = 0.001  # last-resort chroma floor above CHROMA_MIN: still counts as colored
 
 # Old-rotation presets just under the gate, included on the first build.
@@ -184,8 +194,9 @@ def classify(colors):
         "accent_contrast": round(accent_contrast, 2),
         "distinct_accents": distinct,
         "monochrome": int(mono),
-        "text_ok": contrast_ratio(fg, bg) >= MIN_TEXT_CONTRAST,
-        "accent_ok": mono or accent_contrast >= MIN_ACCENT_CONTRAST,
+        # CONTRAST_EPS as in fix_colors: a color it counts as fixed passes here too.
+        "text_ok": contrast_ratio(fg, bg) >= MIN_TEXT_CONTRAST - CONTRAST_EPS,
+        "accent_ok": mono or accent_contrast >= MIN_ACCENT_CONTRAST - CONTRAST_EPS,
         "distinct_ok": mono or distinct >= MIN_DISTINCT_ACCENTS,
     }
 
@@ -223,43 +234,50 @@ def lch_in_gamut(lightness, chroma, hue, floor, space):
     return out
 
 
-def move_to_contrast(c, bg, target, floor, space="srgb"):
+def move_to_contrast(c, bg, target, floor, space="srgb", *, slack=0.0):  # noqa: PLR0913  (the side rule needs target and slack both)
     """c moved in lightness (hue kept) until its contrast with bg reaches target.
 
-    Steps toward whichever end (white or black) can reach the target, preferring the side c
-    is already on (one of them always reaches 4.5, the highest target). Chroma drops only as
-    far as needed to stay in gamut, never below floor. Returns the first point that reaches
-    the target, else the best point found (the floor ran out of gamut first), or None if
-    nothing beat c.
+    Steps toward the end (white or black) on c's side of bg if that end gets within slack of
+    the target, else toward the other end (with no slack, one of them always reaches 4.5, the
+    highest target; with slack, c may stay short of it on its own side). Text below
+    NO_SIDE_CONTRAST with bg has no side, so gets no slack. Chroma drops only as far as needed
+    to stay in gamut, never below floor. The last step lands on the end itself (L 0 or 1).
+    Returns the first point that reaches the target, else the last point that beat the one
+    kept before it by more than MIN_GAIN (so up to MIN_GAIN short of the best, and a second
+    pass from it finds nothing further), or None if nothing beat c.
     """
     lightness, a, b = oklab(c)
     chroma, hue = math.hypot(a, b), math.atan2(b, a)
     up, down = contrast_ratio((1, 1, 1), bg), contrast_ratio((0, 0, 0), bg)
     lighter = relative_luminance(c) >= relative_luminance(bg)
-    if (up if lighter else down) >= target:
+    if contrast_ratio(c, bg) < NO_SIDE_CONTRAST:
+        slack = 0.0
+    if (up if lighter else down) >= target - slack:
         direction = 1 if lighter else -1
     else:
         direction = -1 if lighter else 1
     best, best_contrast = None, contrast_ratio(c, bg)
     for step in range(1, FIX_MAX_STEPS + 1):
         lt = lightness + direction * step * FIX_STEP
-        if not 0.0 <= lt <= 1.0:
-            break
-        rgb_ = lch_in_gamut(lt, chroma, hue, floor, space)
+        last = not 0.0 < lt < 1.0
+        rgb_ = lch_in_gamut(min(1.0, max(0.0, lt)), chroma, hue, floor, space)
         if rgb_ is None:  # even the chroma floor is out of gamut here: keep the best so far
             break
         contrast = contrast_ratio(rgb_, bg)
         if contrast >= target:
             return rgb_
-        if contrast > best_contrast:
+        if contrast > best_contrast + MIN_GAIN:
             best, best_contrast = rgb_, contrast
+        if last:
+            break
     return best
 
 
 def adjust_one(c, bg, target, is_ansi, space="srgb"):
     """move_to_contrast with the chroma floors in order: a colored ANSI color first keeps a
     margin above CHROMA_MIN; if that misses the target, just above it (still colored, so the
-    gate's monochrome check can't flip). Text may go grey. None if nothing beat c."""
+    gate's monochrome check can't flip). Text may go grey, and keeps its side of the background
+    within TEXT_SIDE_SLACK. None if nothing beat c."""
     chroma = math.hypot(*oklab(c)[1:])
     if not is_ansi:  # text may go grey: one pass, no floor
         floors = [0.0]
@@ -267,9 +285,10 @@ def adjust_one(c, bg, target, is_ansi, space="srgb"):
         floors = [min(chroma, CHROMA_MIN + FIX_STEP), 0.0]
     else:
         floors = [CHROMA_MIN + FIX_STEP, CHROMA_MIN + GAMUT_FLOOR_MARGIN]
+    slack = 0.0 if is_ansi else TEXT_SIDE_SLACK
     best = None
     for floor in floors:
-        moved = move_to_contrast(c, bg, target, min(chroma, floor), space)
+        moved = move_to_contrast(c, bg, target, min(chroma, floor), space, slack=slack)
         if moved is not None and (
             best is None or contrast_ratio(moved, bg) > contrast_ratio(best, bg)
         ):
@@ -280,8 +299,9 @@ def adjust_one(c, bg, target, is_ansi, space="srgb"):
 
 
 def accent_step(lab, direction, space):
-    """lab moved DISTINCT_STEP in lightness (hue kept), with chroma lowered only as far as
-    needed to stay in gamut and never to the point of counting as grey; None if it can't."""
+    """lab moved direction * DISTINCT_STEP in lightness (hue kept), with chroma lowered only as
+    far as needed to stay in gamut and never to the point of counting as grey; None if it
+    can't."""
     lightness, a, b = lab
     lt = lightness + direction * DISTINCT_STEP
     if not 0.0 <= lt <= 1.0:
@@ -289,6 +309,24 @@ def accent_step(lab, direction, space):
     chroma, hue = math.hypot(a, b), math.atan2(b, a)
     floor = min(chroma, CHROMA_MIN + GAMUT_FLOOR_MARGIN)  # as adjust_one's last-resort floor
     return lch_in_gamut(lt, chroma, hue, floor, space)
+
+
+def spread_identical(palette, bg, spaces):
+    """Six accents that all look the same, spread in lightness for separate_accents to start
+    from: ANSI 2-6 move 1, 2, 3, 4, 5 DISTINCT_STEPs from where they are, toward more contrast
+    and away from it in turn (each turns round if it would leave the gamut or drop below its
+    contrast target; one that can do neither stays). From six ties separate_accents gives up
+    on some (R3D, Pumpkin Spice)."""
+    work = dict(palette)
+    raises = 1 if oklab(palette[ACCENT_KEYS[0]])[0] >= oklab(bg)[0] else -1
+    for i, k in enumerate(ACCENT_KEYS[1:], 1):
+        steps = i * (raises if i % 2 else -raises)
+        for direction in (steps, -steps):
+            candidate = accent_step(oklab(palette[k]), direction, spaces[k])
+            if candidate and contrast_ratio(candidate, bg) >= FIX_TARGETS[k]:
+                work[k] = candidate
+                break
+    return work
 
 
 def separate_accents(palette, bg, spaces):
@@ -365,9 +403,14 @@ def fix_colors(colors):
             )
             if nudged is not None:
                 palette[bright] = nudged
+    # Look-alike accents are told apart, except in a monochrome theme, where they are meant to
+    # be shades of one hue. Six that all look the same (HaX0R, Retro), monochrome or not, are
+    # spread first (ANSI 1 stays), then told apart into shades.
     labs = [oklab(palette[k]) for k in ACCENT_KEYS]
-    if not is_monochrome(labs) and distinct_accents(labs) < MIN_DISTINCT_ACCENTS:
-        palette = separate_accents(palette, bg, spaces) or palette  # best effort: keep fixes
+    distinct = distinct_accents(labs)
+    if distinct < MIN_DISTINCT_ACCENTS and (distinct == 1 or not is_monochrome(labs)):
+        start = spread_identical(palette, bg, spaces) if distinct == 1 else palette
+        palette = separate_accents(start, bg, spaces) or palette  # best effort: keep fixes
     out = {}
     for k, v in palette.items():
         before = shown_before[k]
@@ -754,7 +797,8 @@ def print_report(rows, report):
     colors = sum(r.fix_count for r in rows)
     print(
         f"colors adjusted for readability: {colors} in {len(adjusted)} presets; "
-        f"{still} still fail the gate after adjusting (picked anyway unless config fix_colors = 0)"
+        f"{still} still fail the gate with any adjustments (picked while config fix_colors "
+        "isn't 0, unless overrides.include = 0; or with overrides.include = 1)"
     )
     for name in report["skipped"]:
         print(f"[warn] skipped {name!r}: missing ANSI/fg/bg colors")

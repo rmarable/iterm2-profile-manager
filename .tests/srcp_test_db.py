@@ -1783,9 +1783,9 @@ class ColorFixTest(DbTest):
         ),
         "dark ANSI 8 on dark": with_colors(DARK, Ansi_8_Color=(0.05, 0.05, 0.05)),
         "ANSI 8 equal to bg": with_colors(DARK, Ansi_8_Color=(0.1, 0.1, 0.1)),
-        # White text on red, as in Hot Dog Stand: white tops out at 4.0, black reaches 5.25.
+        # White text on a light red: white tops out at 3.88, past TEXT_SIDE_SLACK; black, 5.41.
         "black beats white": with_colors(
-            DARK, Background_Color=(1.0, 0.0, 0.0), Foreground_Color=(1.0, 1.0, 1.0)
+            DARK, Background_Color=(1.0, 0.1, 0.1), Foreground_Color=(1.0, 1.0, 1.0)
         ),
         "saturated accent leaves gamut": with_colors(
             DARK, Background_Color=(0.05, 0.05, 0.25), Ansi_4_Color=(0.0, 0.0, 1.0)
@@ -2111,6 +2111,142 @@ class ColorFixTest(DbTest):
         judged = build.classify(after)
         self.assertTrue(judged["text_ok"] and judged["accent_ok"] and judged["distinct_ok"])
         self.assertEqual(build.fix_colors(after), {})
+
+    def test_text_keeps_its_side_when_it_gets_within_the_slack(self):
+        # Hot Dog Stand: white on red tops out at 4.2. Black would reach 4.5, but white stays
+        # (nothing on its side beats it), so no fix, and the gate still fails it.
+        hot_dog = with_colors(
+            DARK, Background_Color=(0.9176, 0.2, 0.1373), Foreground_Color=(1.0, 1.0, 1.0)
+        )
+        bg = build.rgb(hot_dog["Background Color"])
+        self.assertGreater(build.contrast_ratio((0, 0, 0), bg), build.MIN_TEXT_CONTRAST)
+        fixes = build.fix_colors(hot_dog)
+        self.assertNotIn("Foreground Color", fixes)
+        self.assertFalse(build.classify(build.apply_fixes(hot_dog, fixes))["text_ok"])
+        with mock.patch.object(build, "TEXT_SIDE_SLACK", 0.0):  # without it, black text
+            moved = build.fix_colors(hot_dog)["Foreground Color"]
+        self.assertLess(build.relative_luminance(moved[:3]), build.relative_luminance(bg))
+        # Grey text on the dark side of a mid grey keeps darkening toward its target instead.
+        grey = with_colors(DARK, Background_Color=(0.6, 0.6, 0.6), Foreground_Color=(0.3, 0.3, 0.3))
+        r, *_, after = build.fix_colors(grey)["Foreground Color"]
+        self.assertLess(r, 0.3)
+        self.assertGreaterEqual(after, build.MIN_TEXT_CONTRAST)
+        # Text that can barely be seen (as bright as the background, or a hair off) has no
+        # side: it goes to whichever end reaches 4.5.
+        for fg in ((0.5, 0.5, 0.47), (0.52, 0.5, 0.47)):
+            hidden = with_colors(DARK, Background_Color=(0.5, 0.5, 0.47), Foreground_Color=fg)
+            *_, after = build.fix_colors(hidden)["Foreground Color"]
+            self.assertGreaterEqual(after, build.MIN_TEXT_CONTRAST, fg)
+
+    def test_text_short_of_its_target_ends_at_white_or_black_once(self):
+        # On the slack path text can't reach 4.5 and takes the best point on the way. That
+        # ends on (or within MIN_GAIN of) white or black, so a second build finds nothing
+        # further (it used to stop a step short, and the next build took that step).
+        cases = {
+            "white": ((0.355, 0.5132, 0.1856), (0.0589, 0.5542, 0.557), (1, 1, 1)),
+            "black": ((0.5968, 0.4144, 0.2733), (0.0196, 0.1222, 0.284), (0, 0, 0)),
+        }
+        for name, (bg, fg, end) in cases.items():
+            with self.subTest(name):
+                colors = with_colors(DARK, Background_Color=bg, Foreground_Color=fg)
+                fixes = build.fix_colors(colors)
+                for got, want in zip(fixes["Foreground Color"][:3], end, strict=True):
+                    self.assertAlmostEqual(got, want, delta=0.001)  # MIN_GAIN: close enough
+                self.assertEqual(build.fix_colors(build.apply_fixes(colors, fixes)), {})
+        # Stopping just short of black (0, 0, 0.0001), a second build would take the last
+        # invisible gain to black, but for MIN_GAIN.
+        colors = with_colors(
+            DARK, Background_Color=(0.3901, 0.4631, 0.3989), Foreground_Color=(0.5531, 0.213, 0.8002)
+        )
+        for gain, fixed_point in ((build.MIN_GAIN, True), (0.0, False)):
+            with mock.patch.object(build, "MIN_GAIN", gain):
+                fixes = build.fix_colors(colors)
+                again = build.fix_colors(build.apply_fixes(colors, fixes))
+            self.assertIn("Foreground Color", fixes)
+            self.assertEqual(again == {}, fixed_point, gain)
+
+    def test_six_identical_accents_get_shades_of_their_hue(self):
+        # As in Retro (one green) and Pumpkin Spice (near-greys, on orange): monochrome, so
+        # the gate passes them, but every accent looks the same. They get 5 distinct shades,
+        # stay monochrome, and the gate's verdict doesn't change.
+        cases = {
+            "Retro": preset((0, 0, 0), (0.0745, 0.6314, 0.0549), [(0.0745, 0.6314, 0.0549)] * 6),
+            "Pumpkin Spice": preset(
+                (0.6039, 0.2392, 0.0314),
+                (0.9, 0.85, 0.8),
+                [
+                    *[(0.8588, 0.8196, 0.8078), (0.8196, 0.8431, 0.8118), (0.851, 0.8314, 0.7843)],
+                    *[(0.8078, 0.8353, 0.851), (0.8549, 0.8275, 0.8588), (0.7961, 0.8353, 0.8431)],
+                ],
+            ),
+        }
+        for name, colors in cases.items():
+            with self.subTest(name):
+                fixes = build.fix_colors(colors)
+                after = build.apply_fixes(colors, fixes)
+                labs = [build.oklab(build.rgb(after[k])) for k in build.ACCENT_KEYS]
+                self.assertGreaterEqual(build.distinct_accents(labs), build.MIN_DISTINCT_ACCENTS)
+                self.assertTrue(build.is_monochrome(labs))
+                bg = build.rgb(colors["Background Color"])
+                for k in build.ACCENT_KEYS:
+                    got = build.contrast_ratio(build.rgb(after[k]), bg)
+                    self.assertGreaterEqual(got, build.FIX_TARGETS[k], k)
+                judged = build.classify(after)
+                self.assertTrue(judged["text_ok"] and judged["accent_ok"] and judged["distinct_ok"])
+                self.assertEqual(build.fix_colors(after), {})
+        # A monochrome theme of a few distinct shades (as in Charcoal) is left as it is.
+        for shades in (
+            [(0.2, 0.5, 0.2), (0.3, 0.7, 0.3), (0.5, 0.9, 0.5)] * 2,
+            [(0.2, 0.5, 0.2), (0.3, 0.7, 0.3)] * 3,
+        ):
+            labs = [build.oklab(c) for c in shades]
+            self.assertTrue(build.is_monochrome(labs))
+            self.assertEqual(build.distinct_accents(labs), len(set(shades)))
+            fixes = build.fix_colors(preset((0, 0, 0), (0.6, 0.9, 0.6), shades))
+            self.assertFalse(set(fixes) & set(build.ACCENT_KEYS))
+
+    def test_spreading_identical_accents(self):
+        spaces = dict.fromkeys(build.ACCENT_KEYS, "srgb")
+        # Retro's green on black: ANSI 2 moves first, toward more contrast (lighter here).
+        green = dict.fromkeys(build.ACCENT_KEYS, (0.0745, 0.6314, 0.0549))
+        spread = build.spread_identical(green, (0, 0, 0), spaces)
+        lightness = [build.oklab(spread[k])[0] for k in build.ACCENT_KEYS]
+        self.assertGreater(lightness[1], lightness[0])
+        self.assertLess(lightness[2], lightness[0])
+        # Greys just over their target on black: ANSI 3 and 5 would drop below it going
+        # darker, so they turn round and go lighter. None ends below its target.
+        v = build.encode_srgb(2.1 * 0.05 - 0.05)
+        greys = dict.fromkeys(build.ACCENT_KEYS, (v, v, v))
+        spread = build.spread_identical(greys, (0, 0, 0), spaces)
+        for k in build.ACCENT_KEYS:
+            got = build.contrast_ratio(spread[k], (0, 0, 0))
+            self.assertGreaterEqual(got, build.FIX_TARGETS[k], k)
+        for k in ("Ansi 3 Color", "Ansi 5 Color"):
+            self.assertGreater(build.oklab(spread[k])[0], build.oklab(greys["Ansi 1 Color"])[0], k)
+
+    def test_the_gate_counts_a_hair_under_its_target_as_reached(self):
+        # The fixer's CONTRAST_EPS: a fixed P3 or Generic RGB color can show a hair under.
+        def grey_text(contrast):  # grey text on black at this contrast
+            v = build.encode_srgb(contrast * 0.05 - 0.05)
+            return with_colors(DARK, Background_Color=(0, 0, 0), Foreground_Color=(v, v, v))
+
+        target = build.MIN_TEXT_CONTRAST
+        self.assertTrue(build.classify(grey_text(target - build.CONTRAST_EPS / 2))["text_ok"])
+        # The same for the accents: four reds at a hair under 2 against black, two at 1.
+        def red(contrast):
+            return (build.encode_srgb((contrast * 0.05 - 0.05) / 0.2126), 0.0, 0.0)
+
+        for under, ok in ((build.CONTRAST_EPS / 2, True), (build.CONTRAST_EPS * 2, False)):
+            hues = [red(2 - under), (0, 0.02, 0.0), (0, 0, 0.02), red(2 - under)]
+            accents = [*hues, red(2 - under), red(2 - under)]
+            colors = preset((0, 0, 0), (0.9, 0.9, 0.9), accents)
+            judged = build.classify(colors)
+            self.assertFalse(judged["monochrome"])
+            self.assertEqual(judged["accent_ok"], ok, under)
+        self.assertFalse(build.classify(grey_text(target - build.CONTRAST_EPS * 2))["text_ok"])
+        self.assertNotIn(
+            "Foreground Color", build.fix_colors(grey_text(target - build.CONTRAST_EPS / 2))
+        )
 
     def test_separating_accents_gives_up_at_once_when_nothing_can_move(self):
         # ANSI 1-4 white on a grey that leaves white just above the accents' contrast target:
