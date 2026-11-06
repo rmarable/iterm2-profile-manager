@@ -12,3 +12,4 @@ docs/archived-decisions.md
 
 # Personal curation exports (.tools/srcp_export_curation.py); keep them outside this repo
 curation*.sql
+curation*.sql.partial

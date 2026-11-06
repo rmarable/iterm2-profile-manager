@@ -61,10 +61,7 @@ async def main(connection: iterm2.Connection) -> None:
     while True:
         names: list[str] = []
         if not os.path.exists(report.DEFAULT_DB):
-            text = (
-                f"No database at {report.DEFAULT_DB}.\n"
-                "Build it with .tools/srcp_build_scheme_db.py."
-            )
+            text = f"No database at {report.DEFAULT_DB}.\nBuild it with {report.REBUILD}."
         else:
             try:
                 db = report.connect(report.DEFAULT_DB)

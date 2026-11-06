@@ -57,7 +57,7 @@ def view_text(view: str) -> str:
     import srcp_favorites as report  # noqa: PLC0415  (main() checks it is installed first)
 
     if not os.path.exists(report.DEFAULT_DB):
-        return f"No database at {report.DEFAULT_DB}.\nBuild it with .tools/srcp_build_scheme_db.py."
+        return f"No database at {report.DEFAULT_DB}.\nBuild it with {report.REBUILD}."
     try:
         db = report.connect(report.DEFAULT_DB)  # it only reads
     except report.OldSchema as e:

@@ -11,15 +11,15 @@ of INSERT OR REPLACE statements; restore it into a built DB with
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import sqlite3
 import sys
 import time
-from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # works under python3 -I too
 from srcp_schema import DB_PATH as DEFAULT_DB
-from srcp_schema import REBUILD
+from srcp_schema import REBUILD, connect_rw, is_busy
 
 # Every table a rebuild keeps, except launches (history, left out on purpose); schemes is
 # rebuilt from the presets. A test holds this equal to the DB's tables, so a new one is a choice.
@@ -110,15 +110,32 @@ def main():
 
     if not os.path.exists(args.db):
         sys.exit(f"No database at {args.db}")
-    # mode=rw (it only reads): mode=ro can fail on a WAL DB that nothing else has open.
-    db = sqlite3.connect(Path(args.db).resolve().as_uri() + "?mode=rw", uri=True)
+    db = connect_rw(args.db)
     try:
-        if args.output:
-            with open(args.output, "w", encoding="utf-8") as f:
+        out = args.output
+        if out and (os.path.islink(out) or (os.path.exists(out) and not os.path.isfile(out))):
+            # A link, /dev/stdout or the like: written through, as given.
+            with open(out, "w", encoding="utf-8") as f:
                 export(db, f)
-            print(f"Wrote {args.output}", file=sys.stderr)
+            print(f"Wrote {out}", file=sys.stderr)
+        elif out:
+            # Written beside it and renamed when complete, so a failure leaves no half file.
+            partial = out + ".partial"
+            try:
+                with open(partial, "w", encoding="utf-8") as f:
+                    export(db, f)
+                os.replace(partial, out)
+            except BaseException:
+                with contextlib.suppress(OSError):
+                    os.remove(partial)
+                raise
+            print(f"Wrote {out}", file=sys.stderr)
         else:
             export(db, sys.stdout)
+    except sqlite3.OperationalError as e:
+        if is_busy(e):
+            sys.exit(f"The DB is busy ({e}). Try again in a moment.")
+        raise
     finally:
         db.close()
 

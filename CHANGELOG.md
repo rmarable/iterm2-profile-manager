@@ -6,6 +6,10 @@ What changed for someone using iTerm2 Profile Manager, newest first. Releases up
 
 - Three more fonts in the random pool: SF Mono Terminal, PT Mono and Andale Mono, which come with macOS or Terminal.app. They show up after the next `./setup.sh` or `python3 .tools/srcp_build_scheme_db.py`.
 - New `.tools/srcp_fonts.py`: opens a page comparing fixed-width fonts side by side; `--add "JetBrains Mono"` installs a Homebrew font and adds it to the pool, and `--remove` takes one out.
+
+## v0.14.3 (2026-11-06)
+
+- `.tools/srcp_export_curation.py` says the database is busy and to try again, instead of a traceback, and a failed export with `-o` leaves the earlier file as it was instead of a half-written one.
 - After a rebuild (`.tools/srcp_build_scheme_db.py`), text stays on its side of the background (lighter or darker) when that side nearly reaches the contrast target, instead of flipping: Hot Dog Stand keeps its white text on red. Monochrome presets whose six accent colors are all one color (HaX0R Blue, Gr33N and R3D, Pumpkin Spice, Retro) get distinct shades of it.
 - `uninstall.sh --data` no longer takes an empty (0-byte) database as the one to keep and then deletes every snapshot: it keeps the newest snapshot instead, and deletes nothing if the database is empty or missing but its `-wal` file holds data (and says so at the end, exiting with an error). When copying or exporting the database fails, it now says which step failed and what to do, and removes the half-written copy.
 - The daily snapshot skips a damaged database (one Console warning) instead of copying the damage into `backups/`, where it would push the good snapshots out over two weeks.
@@ -16,7 +20,7 @@ What changed for someone using iTerm2 Profile Manager, newest first. Releases up
 - Sessions buried with Session > Bury Session when the script starts are colored too.
 - If a dialog or right-click item on a tab never finishes (a reply from iTerm2 got lost), the next right-click item on that tab after 10 minutes replaces it, instead of the tab's items staying blocked until a restart.
 - **Change to another profile** on a favorite saved under an older preset name no longer lands on the same colors under the other name.
-- A `config` value that isn't a usable number (`inf`, `nan`, or a typo like `1e19`) is ignored with a Console warning, like text, instead of stopping new tabs from being colored or favorites from being picked.
+- A `config` value that isn't a usable number (`inf`, `nan`, or a typo like `1e19`) is ignored with a Console warning, like text, instead of stopping new tabs from being colored or favorites from being picked. `.tools/srcp_odds.py` ignores it the same way, instead of crashing or showing odds the script doesn't use.
 - A tab opened from a favorite's profile right after the script starts no longer shows a count of adjusted colors that may be wrong; the rating dialog leaves it out.
 - New tabs are colored much faster (32 tabs opened at once took 1.5 s instead of 12 s in a test), and a tab that iTerm2 is slow to answer no longer holds up the others. Two tabs opened together don't get the same preset from discovery.
 - When **Change to another profile** can't switch a tab, its alert now says why (for example, the profile's "Use separate colors for light and dark mode" setting). So does the re-roll after **Never show this profile**.

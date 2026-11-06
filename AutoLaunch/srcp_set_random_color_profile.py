@@ -25,7 +25,6 @@ import contextlib
 import contextvars
 import fcntl
 import json
-import math
 import os
 import plistlib
 import random
@@ -63,6 +62,7 @@ try:
         SEED_FONTS,
         UNHIDE,
         colors_hash,
+        config_number,
         default_font_label,
         is_busy,
         schema_problem,
@@ -78,7 +78,7 @@ except ImportError as e:
     )
     sys.exit(1)
 
-VERSION = "0.14.2"  # bump on every change, so the Console shows which code is running
+VERSION = "0.14.3"  # bump on every change, so the Console shows which code is running
 LOCK_PATH = os.path.join(DATA_DIR, ".lock")
 # How often the running script checks whether a snapshot is due. asyncio's clock stops while
 # the Mac sleeps, so check often (it's a few file stats) to keep it close to daily.
@@ -86,7 +86,6 @@ SNAPSHOT_CHECK_S = 15 * 60
 DEFAULT_SIZE = 13
 # The numeric settings pick() reads, with the build's seed values when config lacks one.
 DEFAULT_CONFIG = {k: float(SEED_CONFIG[k]) for k in NUMERIC_CONFIG}
-CONFIG_MAX = 1e6  # a numeric setting above this is taken as a typo, like a non-number
 # Font for characters the main font lacks, e.g. Powerlevel10k prompt icons; config overrides.
 DEFAULT_NONASCII_FONT = SEED_CONFIG["nonascii_font"]
 NONASCII_FONT_FILES = SEED_FONTS[DEFAULT_NONASCII_FONT]
@@ -292,13 +291,8 @@ def read_config(db: sqlite3.Connection) -> dict[str, float]:
     for key, value in db.execute("SELECT key, value FROM config"):
         if key not in cfg:
             continue
-        try:
-            number = float(value)
-        except (TypeError, ValueError):
-            number = math.nan
-        # inf, nan or a huge value would break every pick (int(inf), an SQL LIMIT past 64 bits,
-        # weights summing to inf) or quietly stop favorites (nan).
-        if math.isfinite(number) and abs(number) <= CONFIG_MAX:
+        number = config_number(value)  # None for inf, nan, a huge value or a non-number
+        if number is not None:
             cfg[key] = number
         else:
             warn_once(

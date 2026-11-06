@@ -8,7 +8,7 @@ Press ⌃⌥⌘S to rate the current preset and font from 1 to 5 stars. Rated co
 
 ![One iTerm2 window split three ways: two Claude Code sessions and a shell, each with its own color scheme](images/profile-chooser.jpg)
 
-Only iTerm2's colors and fonts change. Your shell and prompt are left alone. Installation is a single script.
+Only iTerm2's colors and fonts change. Your shell and prompt are left alone. Set up three things in iTerm2, then installation is a single script.
 
 ## Why it helps with AI agents
 

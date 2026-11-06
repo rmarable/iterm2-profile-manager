@@ -334,6 +334,9 @@ class BuildTest(DbTest):
         seeded = {k: float(build.SEED_CONFIG[k]) for k in srcp_schema.NUMERIC_CONFIG}
         self.assertEqual(seeded, self.main["DEFAULT_CONFIG"])
         self.assertIs(self.main["default_font_label"], srcp_schema.default_font_label)
+        self.assertIs(self.main["config_number"], srcp_schema.config_number)
+        self.assertIs(srcp_odds.config_number, srcp_schema.config_number)
+        self.assertIs(srcp_odds.NUMERIC_CONFIG, srcp_schema.NUMERIC_CONFIG)
         nonascii = self.main["DEFAULT_NONASCII_FONT"]
         self.assertEqual(nonascii, build.SEED_CONFIG["nonascii_font"])
         self.assertEqual(self.main["NONASCII_FONT_FILES"], build.SEED_FONTS[nonascii])
@@ -341,11 +344,20 @@ class BuildTest(DbTest):
     def test_no_hand_copies_left(self):
         names = "FIX_ON_SQL|UNHIDE|HASH_KEYS|COMPONENTS|FONT_DIRS|SEED_FONTS|SEED_CONFIG"
         names += "|NUMERIC_CONFIG|SEED_FONT_LABELS"
+        names += "|NUMERIC|CONFIG_MAX"
         copies = re.compile(rf'^({names}) =|"schemes-\*\.db"|removesuffix\("-Regular"\)', re.M)
-        tools = [os.path.join(ROOT, ".tools", f) for f in ("srcp_favorites.py", "srcp_fonts.py")]
-        for path in (MAIN, BUILD, *tools):
+        readers = [
+            os.path.join(ROOT, ".tools", f"srcp_{n}.py") for n in ("favorites", "odds", "fonts")
+        ]
+        readers.append(os.path.join(ROOT, ".tools", "srcp_export_curation.py"))
+        for path in (MAIN, BUILD, *readers):
             with open(path) as f, self.subTest(path=os.path.basename(path)):
                 self.assertEqual(copies.findall(f.read()), [])
+        # The .tools/ readers open the DB through srcp_schema.connect_rw (srcp_db_backup and the
+        # main script's Store build their own).
+        for path in readers:
+            with open(path) as f, self.subTest(path=os.path.basename(path)):
+                self.assertNotIn("mode=rw", f.read())
         # The prefs keys and the key binding live in srcp_iterm_prefs, the rebuild command in
         # srcp_schema; the tools import them.
         prefs_copies = re.compile(
@@ -355,6 +367,7 @@ class BuildTest(DbTest):
         tools = ["build_scheme_db", "import_presets", "add_key_binding", "uninstall_prefs"]
         tools += ["favorites", "odds", "export_curation"]
         paths = [MAIN, *(os.path.join(ROOT, ".tools", f"srcp_{name}.py") for name in tools)]
+        paths += [os.path.join(ROOT, f"srcp_{name}.py") for name in ("ratings", "never_show")]
         for path in paths:
             with open(path) as f, self.subTest(path=os.path.basename(path)):
                 self.assertEqual(prefs_copies.findall(f.read()), [])
@@ -948,6 +961,16 @@ class OldSchemaTest(DbTest):
         self.make_old()
         self.assertIsNone(build.favorite_fixes(self.db_path))  # can't tell: no "changed" list
 
+    def test_the_tools_connection_never_creates_a_db(self):
+        missing = os.path.join(self.tmp, "nothing", "here.db")
+        os.makedirs(os.path.dirname(missing))
+        with self.assertRaises(sqlite3.OperationalError):
+            srcp_schema.connect_rw(missing)
+        self.assertFalse(os.path.exists(missing))
+        db = srcp_schema.connect_rw(self.db_path)
+        self.addCleanup(db.close)
+        self.assertIsNone(db.isolation_level)  # autocommit
+
     def test_the_tools_refuse_an_old_db_with_one_line(self):
         self.make_old()
         with self.assertRaises(srcp_schema.OldSchema):
@@ -1034,6 +1057,8 @@ class MainScriptTest(DbTest):
             self.assertEqual(cfg, self.main["DEFAULT_CONFIG"], value)
             self.assertEqual(out.getvalue().count("isn't a usable number"), 4, value)  # each once
             self.assertIsNotNone(self.main["pick"](self.db, "dark", set()))
+            self.assertEqual(srcp_odds.read_config(self.db), self.main["DEFAULT_CONFIG"], value)
+            srcp_odds.odds(self.db, "dark")  # the report doesn't crash on it either
         # The cap itself is still a usable number.
         self.db.execute("UPDATE config SET value = '1000000' WHERE key = 'recent_window'")
         self.assertEqual(self.main["read_config"](self.db)["recent_window"], 1e6)
@@ -1774,6 +1799,62 @@ class ExportTest(DbTest):
         self.addCleanup(writer.join)  # before busy.close (cleanups run last-added first)
         self.restore(sql, target)  # waits for the writer, then goes through
 
+    def test_a_busy_db_exits_with_one_line(self):
+        locked = sqlite3.OperationalError("database is locked")
+        argv = ["srcp_export_curation.py", "--db", self.db_path]
+        with (
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(srcp_export_curation, "export", side_effect=locked),
+            self.assertRaises(SystemExit) as caught,
+        ):
+            srcp_export_curation.main()
+        self.assertIn("The DB is busy", str(caught.exception.code))
+
+    def test_a_failed_export_leaves_no_half_file(self):
+        output = os.path.join(self.tmp, "curation.sql")
+        with open(output, "w") as f:
+            f.write("-- an earlier export\n")
+
+        def busy_halfway(_db, out):
+            out.write("BEGIN;\n")
+            raise sqlite3.OperationalError("database is locked")
+
+        argv = ["srcp_export_curation.py", "--db", self.db_path, "-o", output]
+        with (
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(srcp_export_curation, "export", side_effect=busy_halfway),
+            self.assertRaises(SystemExit),
+        ):
+            srcp_export_curation.main()
+        with open(output) as f:
+            self.assertEqual(f.read(), "-- an earlier export\n")  # untouched
+        self.assertFalse(os.path.exists(output + ".partial"))
+        with (
+            mock.patch.object(sys, "argv", argv),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            srcp_export_curation.main()
+        with open(output) as f:
+            self.assertIn("COMMIT;", f.read())
+
+    def test_export_writes_through_a_link_and_to_dev_stdout(self):
+        target = os.path.join(self.tmp, "real.sql")
+        link = os.path.join(self.tmp, "link.sql")
+        os.symlink(target, link)
+        tool = os.path.join(ROOT, ".tools", "srcp_export_curation.py")
+        for output in (link, "/dev/stdout"):
+            result = subprocess.run(
+                [sys.executable, "-I", tool, "--db", self.db_path, "-o", output],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(os.path.islink(link))  # still a link, not replaced
+        with open(target) as f:
+            self.assertIn("COMMIT;", f.read())
+        self.assertIn("COMMIT;", result.stdout)  # the /dev/stdout run
+
     def test_a_name_with_a_quote_restores(self):
         self.main["save_favorite"](self.db, "O'Hara", "Monaco", 13, 5)
         sql = self.export()
@@ -2202,7 +2283,9 @@ class ColorFixTest(DbTest):
         # Stopping just short of black (0, 0, 0.0001), a second build would take the last
         # invisible gain to black, but for MIN_GAIN.
         colors = with_colors(
-            DARK, Background_Color=(0.3901, 0.4631, 0.3989), Foreground_Color=(0.5531, 0.213, 0.8002)
+            DARK,
+            Background_Color=(0.3901, 0.4631, 0.3989),
+            Foreground_Color=(0.5531, 0.213, 0.8002),
         )
         for gain, fixed_point in ((build.MIN_GAIN, True), (0.0, False)):
             with mock.patch.object(build, "MIN_GAIN", gain):
@@ -2278,6 +2361,7 @@ class ColorFixTest(DbTest):
 
         target = build.MIN_TEXT_CONTRAST
         self.assertTrue(build.classify(grey_text(target - build.CONTRAST_EPS / 2))["text_ok"])
+
         # The same for the accents: four reds at a hair under 2 against black, two at 1.
         def red(contrast):
             return (build.encode_srgb((contrast * 0.05 - 0.05) / 0.2126), 0.0, 0.0)

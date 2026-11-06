@@ -812,8 +812,8 @@ def remove(font, args):
 
 @contextlib.contextmanager
 def db_for_writing(path):
-    """srcp_favorites.connect (mode=rw, schema checked), closed after; exits with a message
-    for a missing, outdated or busy DB."""
+    """srcp_favorites.connect (srcp_schema.connect_rw, schema checked), closed after; exits
+    with a message for a missing, outdated, corrupt or busy DB."""
     if not os.path.exists(path):
         sys.exit(f"No database at {path}. Build it with {REBUILD}.")
     try:

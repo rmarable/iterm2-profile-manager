@@ -113,7 +113,7 @@ A few installed presets are byte-identical copies under an older name (`base16 i
 
 ## Configuration
 
-Settings live in the database's `config` table. Edit with `sqlite3`; changes apply to the next new session. A numeric setting that isn't a usable number (text, `inf`, `nan`, or beyond ±1,000,000) is ignored: its default is used, with one Console warning.
+Settings live in the database's `config` table. Edit with `sqlite3`; changes apply to the next new session. A numeric setting that isn't a usable number (text, `inf`, `nan`, or beyond ±1,000,000) is ignored: its default is used, with one Console warning (`srcp_odds.py` ignores it too).
 
 ```sh
 sqlite3 ~/.local/share/iterm2-color-schemes/schemes.db
@@ -332,7 +332,7 @@ Double-clicking an `.itermcolors` file also imports it, with one dialog per file
 | `config` | Settings (see [Configuration](#configuration)). |
 | `fonts` | `name` (PostScript name), `enabled`, `label`, `missing` (1: disabled only because its file wasn't found; a rebuild enables it once it is). |
 | `favorites` | `preset`, `font`, `size`, `stars`, `saved_at`. One row per preset and font. |
-| `ratings` | Every save, removal and Never show: `at`, `preset`, `font`, `action`, `stars`, `previous_stars`. The scripts never delete rows; migration 4 removed exact duplicates once, and `uninstall.sh --data` deletes the database. Older databases have none from before it existed. |
+| `ratings` | Every save, removal and Never show: `id`, `at`, `preset`, `font`, `action`, `stars`, `previous_stars`. The scripts never delete rows; migration 4 removed exact duplicates once, and `uninstall.sh --data` deletes the database. Older databases have none from before it existed. |
 | `launches` | One row per look shown in a session: `id`, `launched_at`, `preset`, `font`, `size`, `mode`, `source` (favorite or discovery), `stars`, `iterm_profile` (the session's profile), `session_id`, `ended_at`, `duration_s`, `end_reason` (`closed`, `changed` or `unknown`). |
 | `effective` (view) | `schemes` with `overrides` applied. |
 | `discovery` (view) | Presets eligible for discovery, with `colorful` (1 = colored background). |
