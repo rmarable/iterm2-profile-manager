@@ -78,7 +78,7 @@ It backs up iTerm2's settings to `~/.local/share/iterm2-profile-manager/prefs-ba
 | Keep a look you like | Right-click → **Save/update this profile**, or press ⌃⌥⌘S, then pick 1 to 5 stars. Rate again to change. |
 | Try a different look in this tab | Right-click → **Change to another profile**. Repeat until one sticks. |
 | Open a saved look | **Profiles → Favorites → \<name\>** |
-| Drop a favorite | Same dialog → **Remove favorite** |
+| Drop a favorite | Right-click → **Remove profile from favorites**, or the same dialog → **Remove favorite** |
 | Never see a scheme again | Right-click → **Never show this profile**, and the tab switches to another look. If it's a favorite, you're asked first, since its stars are deleted. Or in the rating dialog (⌃⌥⌘S) → **Never show**. Either way it's hidden with every font and stays hidden through updates. |
 | See your ratings | **Scripts → srcp_ratings.py** |
 | See schemes you've hidden | **Scripts → srcp_never_show.py** (or **srcp_ratings.py** → **Hidden**) |
@@ -116,7 +116,7 @@ Quit iTerm2, then from Terminal.app in the repo:
 | Menu scripts copied into the Scripts folder | (default) |
 | Favorite profiles (iTerm2 drops its saved copies the next time it opens) | (default) |
 | ⌃⌥⌘S key binding (settings backed up first) | (default) |
-| Database, snapshots, launch history (ratings exported to `~/srcp-curation-<time>.sql` first, with a copy of the whole database beside it; other files there are kept) | `--data` |
+| Database, snapshots, launch history (ratings exported to `~/srcp-curation-<time>.sql` first, with a copy of the whole database beside it; other files there, and snapshots dated in the future, are kept) | `--data` |
 | Presets matching the repo's files, current or earlier versions (edited ones are kept) | `--presets` |
 | Terminal.app fonts and the MesloLGS Homebrew package that `setup.sh` installed (ones you had already stay) | `--fonts` |
 | iTerm2-Color-Schemes clone (kept if it has changes, commits, stashes or ignored files of yours) | `--repo` |
@@ -148,6 +148,7 @@ Kept: this repo, iTerm2 settings backups, shell config, and the Claude Code inte
 | A favorite is missing from the Profiles menu | Preset not installed, or marked **Never show**. |
 | ⌃⌥⌘S does nothing | Check Settings → Keys → Key Bindings for `save_profile()`, and the Console for the main script's startup line. |
 | Console: `[warn] DB pick_look: database is locked` (or another name after `DB`), then `couldn't read the DB; session left as is` | A rebuild or open `sqlite3` transaction held the lock over 5 s. A session opened then keeps the profile's colors, or isn't logged; a rating made then shows a "didn't take" alert: rate again. |
+| `srcp_build_scheme_db.py`: `... schemes.db is locked (another sqlite3 session or a long write?)` | Another program has the database open, usually an `sqlite3` session in some tab. Close it and run the build again; the message says whether the database was changed. |
 | `srcp_build_scheme_db.py`: `schemes.db is missing but its -wal/-shm files are still there` | Move `schemes.db-wal` and `schemes.db-shm` out of the way (keep them until the new build works), or restore a snapshot. |
 | A tool says iTerm2 is running | Quit iTerm2 (⌘Q) and run the tool from Terminal.app. |
 | Setup says iTerm2 loads its settings from a custom folder | iTerm2 would overwrite the changes. Turn off Settings → General → Settings → **Load settings from a custom folder or URL**, run setup, then turn it back on and save the current settings to the folder. |

@@ -7,6 +7,7 @@ sys.path, so the tests can import the tools.
 import os
 import plistlib
 import shutil
+import subprocess
 import sys
 import tempfile
 import types
@@ -86,6 +87,33 @@ PRESETS = {
     "Murky": UNREADABLE,
 }
 REPO_NAMES = ["Dark One", "Dark Two", "Dark Two Copy", "Light One", "Yellow", "Murky"]
+
+
+# Ignore the user's git config (commit signing, hooks), which could fail commits.
+GIT_ENV = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+
+
+def git(repo, *args):
+    """Run git in repo as a throwaway committer."""
+    argv = ["git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@t", *args]
+    subprocess.run(argv, check=True, env=GIT_ENV, capture_output=True)
+
+
+def schemes_repo(test, versions):
+    """A temp git repo with one commit per {name: colors} in versions, each written as
+    schemes/<name>.itermcolors; returns the schemes folder (removed by test.addCleanup)."""
+    repo = tempfile.mkdtemp(prefix="srcp-repo-")
+    test.addCleanup(shutil.rmtree, repo)
+    schemes = os.path.join(repo, "schemes")
+    os.makedirs(schemes)
+    git(repo, "init", "-q")
+    for files in versions:
+        for name, colors in files.items():
+            with open(os.path.join(schemes, f"{name}.itermcolors"), "wb") as f:
+                plistlib.dump(colors, f)
+        git(repo, "add", ".")
+        git(repo, "commit", "-qm", "v", "--allow-empty")
+    return schemes
 
 
 def fake_defaults(test, live=None, running=False):

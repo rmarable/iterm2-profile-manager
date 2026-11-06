@@ -153,7 +153,7 @@ Snapshots of the database go to `backups/` beside it:
 - Before every rebuild
 - While the main script runs (at start, then every 15 minutes of awake time), if the newest snapshot is over a day old
 
-The newest 14 are kept; `manual-*.db` snapshots are never pruned. Preset data can be rebuilt from iTerm2's settings; snapshots protect favorites, ratings, hidden presets, launches and settings.
+The newest 14 are kept; `manual-*.db` snapshots are never pruned. Snapshots are aged by the UTC time in their names, not mtime; one named after now (a clock set ahead, or a file from another Mac) is neither counted nor pruned, and `uninstall.sh --data` leaves it in place and says so. Preset data can be rebuilt from iTerm2's settings; snapshots protect favorites, ratings, hidden presets, launches and settings.
 
 ### Manual snapshot
 

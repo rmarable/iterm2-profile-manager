@@ -8,7 +8,8 @@
 # Only when asked:
 #   --data     export your curation to ~/srcp-curation-<time>.sql (and keep a copy of the
 #              whole DB beside it, .db), then delete the scheme DB, its snapshots and launch
-#              history (~/.local/share/iterm2-color-schemes); other files there are kept
+#              history (~/.local/share/iterm2-color-schemes); other files there, and
+#              snapshots dated in the future, are kept
 #   --presets  remove color presets matching the schemes repo's .itermcolors files
 #              (current or earlier versions; ones you edited are kept)
 #   --fonts    remove the Terminal.app fonts and the MesloLGS Nerd Font Homebrew cask
@@ -32,7 +33,8 @@ for arg in "$@"; do
 	--repo) REPO=true ;;
 	--all) DATA=true PRESETS=true FONTS=true REPO=true ;;
 	-h | --help)
-		sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
+		# The header comment: line 2 up to the first line that isn't a comment.
+		awk 'NR == 1 { next } !/^#/ { exit } { sub(/^# ?/, ""); print }' "$0"
 		exit 0
 		;;
 	*)
@@ -100,6 +102,12 @@ SNAPSHOT_RE='^schemes-([0-9]{8}T[0-9]{6}Z)(-([0-9]+))?\.db(\.partial)?$'
 # A real file (not a link) directly in backups/, named as the scripts name snapshots.
 is_our_snapshot() {
 	[[ "$(dirname "$1")" == "$DATA_DIR/backups" && -f "$1" && ! -L "$1" && "$(basename "$1")" =~ $SNAPSHOT_RE ]]
+}
+# A finished snapshot named after now (a clock set ahead, or copied from another Mac): as
+# .tools/srcp_db_backup.py does, never counted, kept or deleted. Half-written ones go anyway.
+NOW_UTC="$(date -u +%Y%m%dT%H%M%SZ)"
+is_future_snapshot() {
+	[[ "${1##*/}" =~ $SNAPSHOT_RE && -z "${BASH_REMATCH[4]}" && "${BASH_REMATCH[1]}" > "$NOW_UTC" ]]
 }
 # The DB and the files SQLite and the main script keep next to it.
 DB_FILES=(schemes.db schemes.db-wal schemes.db-shm schemes.db-journal .lock)
@@ -177,15 +185,16 @@ python3 "$HERE/.tools/srcp_uninstall_prefs.py" "${PREFS_ARGS[@]+"${PREFS_ARGS[@]
 if $DATA; then
 	echo "==> Scheme DB, backups and launch history: $DATA_DIR"
 	export_file="$HOME/srcp-curation-$(date +%Y%m%d-%H%M%S).sql"
-	# Newest by the UTC time in the name (as .tools/srcp_db_backup.py prunes), not mtime; a
-	# name dated in the future (wrong clock, copied from another Mac) doesn't count.
-	newest_backup="" newest_key="" now_utc="$(date -u +%Y%m%dT%H%M%SZ)" snapshots=0
+	# Newest by the UTC time in the name (as .tools/srcp_db_backup.py prunes), not mtime; only
+	# real files of ours (a link named like one could point at a file of yours).
+	newest_backup="" newest_key="" snapshots=0
 	for f in "$DATA_DIR"/backups/schemes-*.db; do
-		[[ "$(basename "$f")" =~ $SNAPSHOT_RE ]] || continue
+		is_our_snapshot "$f" || continue
+		[[ "${f##*/}" =~ $SNAPSHOT_RE ]] || continue
 		[[ -z "${BASH_REMATCH[4]}" ]] || continue # half-written: nothing to keep, fine to delete
 		snapshots=$((snapshots + 1))
-		[[ "${BASH_REMATCH[1]}" > "$now_utc" ]] && continue
 		key="${BASH_REMATCH[1]}-$(printf '%09d' "$((10#${BASH_REMATCH[3]:-0}))")"
+		is_future_snapshot "$f" && continue
 		if [[ -z "$newest_key" || "$key" > "$newest_key" ]]; then
 			newest_backup="$f" newest_key="$key"
 		fi
@@ -213,7 +222,12 @@ if $DATA; then
 			if [[ -e "$DATA_DIR/$f" ]]; then run rm -f "$DATA_DIR/$f"; fi
 		done
 		for f in "$DATA_DIR"/backups/schemes-*; do
-			if is_our_snapshot "$f"; then run rm -f "$f"; fi
+			is_our_snapshot "$f" || continue
+			if is_future_snapshot "$f"; then
+				echo "  = left in place (dated in the future): $f"
+				continue
+			fi
+			run rm -f "$f"
 		done
 		if ! $DRYRUN; then
 			rmdir "$DATA_DIR/backups" 2>/dev/null || true # only if now empty

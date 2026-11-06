@@ -21,7 +21,8 @@ for arg in "$@"; do
 	case "$arg" in
 	--dryrun | --dry-run) DRYRUN=true ;;
 	-h | --help)
-		sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
+		# The header comment: line 2 up to the first line that isn't a comment.
+		awk 'NR == 1 { next } !/^#/ { exit } { sub(/^# ?/, ""); print }' "$0"
 		exit 0
 		;;
 	*)

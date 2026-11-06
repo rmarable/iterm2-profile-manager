@@ -225,6 +225,17 @@ class BuildTest(DbTest):
         colorful = dict(self.db.execute("SELECT name, colorful FROM discovery"))
         self.assertEqual((colorful["Yellow"], colorful["Light One"]), (1, 0))
 
+    def test_favorite_pool_leaves_out_only_hidden_presets(self):
+        for name in ("Dark One", "Light One", "Yellow"):
+            self.main["save_favorite"](self.db, name, "Monaco", 13, 4)
+        self.db.execute("DELETE FROM overrides")
+        # Dark One: no row (include NULL); Light One forced in; Yellow hidden.
+        self.db.execute(
+            "INSERT INTO overrides (name, include) VALUES ('Light One', 1), ('Yellow', 0)"
+        )
+        pool = {r[0] for r in self.db.execute("SELECT preset FROM favorite_pool")}
+        self.assertEqual(pool, {"Dark One", "Light One"})
+
     def test_duplicates_stay_out_of_discovery(self):
         self.assertEqual(self.scheme("dark one")[2], "Dark One")  # old spelling
         self.assertEqual(self.scheme("Dark Two Copy")[2], "Dark Two")  # repo twin
@@ -801,6 +812,18 @@ class MainScriptTest(DbTest):
         for _ in range(50):
             name, _font, _source, _stars = self.main["pick"](self.db, "dark", {"Dark One"})
             self.assertNotEqual(name, "Dark One")
+
+    def test_set_variables_raises_on_a_status_other_than_ok(self):
+        status = self.main["api_pb2"].VariableResponse.Status.Value("SESSION_NOT_FOUND")
+        reply = types.SimpleNamespace(variable_response=types.SimpleNamespace(status=status))
+        session = types.SimpleNamespace(connection=None, session_id="gone")
+        with (
+            mock.patch.object(
+                self.main["iterm2"].rpc, "async_variable", mock.AsyncMock(return_value=reply)
+            ),
+            self.assertRaisesRegex(self.main["iterm2"].RPCException, "SESSION_NOT_FOUND"),
+        ):
+            asyncio.run(self.main["set_variables"](session, is_favorite=1))
 
     def test_favorite_profiles_turn_separate_light_and_dark_colors_off(self):
         self.main["save_favorite"](self.db, "Dark One", "Monaco", 13, 4)

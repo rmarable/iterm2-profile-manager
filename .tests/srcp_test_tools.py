@@ -26,8 +26,10 @@ from unittest import mock
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, ".tools"))  # before importing the tools
 
+import srcp_add_key_binding  # noqa: E402  (after the sys.path line above)
 import srcp_db_backup  # noqa: E402  (after the sys.path line above)
 import srcp_enable_claude_integration  # noqa: E402  (after the sys.path line above)
+import srcp_import_presets  # noqa: E402  (after the sys.path line above)
 import srcp_iterm_prefs  # noqa: E402  (after the sys.path line above)
 import srcp_preset_history  # noqa: E402  (after the sys.path line above)
 import srcp_schema  # noqa: E402  (after the sys.path line above)
@@ -36,10 +38,13 @@ from srcp_testlib import (  # noqa: E402  (after the sys.path line above)
     DARK,
     DARK_2,
     LIGHT,
+    UNREADABLE,
     YELLOW,
     defaults_writes,
     exec_main,
     fake_defaults,
+    git,
+    schemes_repo,
 )
 
 
@@ -54,22 +59,11 @@ def setUpModule():
 
 class HelperTest(unittest.TestCase):
     def test_preset_history_finds_older_versions(self):
-        with tempfile.TemporaryDirectory() as repo:
-            path = os.path.join(repo, "schemes", "A.itermcolors")
-            os.makedirs(os.path.dirname(path))
-            git = ["git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@t"]
-            # Ignore the user's git config (commit signing, hooks), which could fail commits.
-            env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
-            subprocess.run([*git[:3], "init", "-q"], check=True, env=env)
-            for version in (DARK, DARK_2):
-                with open(path, "wb") as f:
-                    plistlib.dump(version, f)
-                subprocess.run([*git, "add", "."], check=True, env=env)
-                subprocess.run([*git, "commit", "-qm", "v"], check=True, env=env)
-            root = srcp_preset_history.repo_root(os.path.dirname(path))
-            self.assertEqual(len(srcp_preset_history.past_versions(root, path)), 2)
-            self.assertTrue(srcp_preset_history.from_repo(DARK, path, root))
-            self.assertFalse(srcp_preset_history.from_repo(LIGHT, path, root))
+        path = os.path.join(schemes_repo(self, [{"A": DARK}, {"A": DARK_2}]), "A.itermcolors")
+        root = srcp_preset_history.repo_root(os.path.dirname(path))
+        self.assertEqual(len(srcp_preset_history.past_versions(root, path)), 2)
+        self.assertTrue(srcp_preset_history.from_repo(DARK, path, root))
+        self.assertFalse(srcp_preset_history.from_repo(LIGHT, path, root))
 
     def test_uninstall_removes_our_binding_and_restores_default_keymap(self):
         defaults = {"0xf700-0x300000": {"Action": 10, "Text": ""}}
@@ -108,23 +102,13 @@ class HelperTest(unittest.TestCase):
                 self.assertEqual({f"{m}.py" for m in checked}, uses)
 
     def test_uninstall_removes_current_and_past_presets_but_keeps_edited(self):
-        with tempfile.TemporaryDirectory() as repo:
-            schemes = os.path.join(repo, "schemes")
-            os.makedirs(schemes)
-            env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
-            git = ["git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@t"]
-            subprocess.run([*git[:3], "init", "-q"], check=True, env=env)
-            for version in (DARK, DARK_2):  # A changes upstream; B never does
-                for name, colors in (("A", version), ("B", LIGHT)):
-                    with open(os.path.join(schemes, f"{name}.itermcolors"), "wb") as f:
-                        plistlib.dump(colors, f)
-                subprocess.run([*git, "add", "."], check=True, env=env)
-                subprocess.run([*git, "commit", "-qm", "v", "--allow-empty"], check=True, env=env)
-            prefs = {"Custom Color Presets": {"A": DARK, "B": YELLOW, "Mine": LIGHT}}
-            with contextlib.redirect_stdout(io.StringIO()):
-                self.assertTrue(srcp_uninstall_prefs.remove_presets(prefs, schemes))
-            # A was imported before upstream changed it: ours. B was edited; Mine isn't the repo's.
-            self.assertEqual(sorted(prefs["Custom Color Presets"]), ["B", "Mine"])
+        # A changes upstream; B never does.
+        schemes = schemes_repo(self, [{"A": DARK, "B": LIGHT}, {"A": DARK_2}])
+        prefs = {"Custom Color Presets": {"A": DARK, "B": YELLOW, "Mine": LIGHT}}
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertTrue(srcp_uninstall_prefs.remove_presets(prefs, schemes))
+        # A was imported before upstream changed it: ours. B was edited; Mine isn't the repo's.
+        self.assertEqual(sorted(prefs["Custom Color Presets"]), ["B", "Mine"])
 
     def test_custom_settings_folder_is_refused_before_writing(self):
         prefs = {"LoadPrefsFromCustomFolder": True, "PrefsCustomFolder": "/elsewhere"}
@@ -274,8 +258,63 @@ class HelperTest(unittest.TestCase):
                 self.assertFalse(set(keys) & set(delete))
 
 
-class ClaudeIntegrationRemoveTest(unittest.TestCase):
-    """srcp_enable_claude_integration.py --remove takes out exactly what it installs."""
+class PrefsToolsTest(unittest.TestCase):
+    """setup.sh's prefs writers: the preset import and the key binding, with defaults faked."""
+
+    def run_main(self, tool, *args, live):
+        """tool.main() against `live` prefs; returns (what it imported, or None if it wrote
+        nothing at all, its output). A write other than one import fails the test."""
+        calls = fake_defaults(self, live=live)
+        out = io.StringIO()
+        with (
+            mock.patch.object(sys, "argv", [f"{tool.__name__}.py", *args]),
+            contextlib.redirect_stdout(out),
+        ):
+            tool.main()
+        writes = defaults_writes(calls)
+        self.assertIn([verb for verb, _, _ in writes], ([], ["import"]))
+        return (plistlib.loads(writes[0][2]) if writes else None), out.getvalue()
+
+    def test_import_adds_new_updates_ours_and_keeps_edited_presets(self):
+        first = {"New": LIGHT, "Current": DARK, "Past": DARK, "Edited": DARK}
+        schemes = schemes_repo(self, [first, {"Past": DARK_2}])  # only Past changes upstream
+        installed = {"Current": DARK, "Past": DARK, "Edited": YELLOW, "Mine": UNREADABLE}
+        live = {srcp_iterm_prefs.PRESETS_KEY: installed, "Other": 1}
+        expected = {**installed, "New": LIGHT, "Past": DARK_2}  # Edited and Mine stay
+        written, out = self.run_main(srcp_import_presets, schemes, live=live)
+        self.assertEqual(written, {srcp_iterm_prefs.PRESETS_KEY: expected})  # only that key
+        self.assertIn("1 new, 1 updated, 1 up to date, 1 kept", out)
+        written, _ = self.run_main(srcp_import_presets, schemes, "--overwrite", live=live)
+        self.assertEqual(written, {srcp_iterm_prefs.PRESETS_KEY: {**expected, "Edited": DARK}})
+        written, out = self.run_main(srcp_import_presets, schemes, "--dryrun", live=live)
+        self.assertIsNone(written)
+        self.assertIn("(dry run: nothing written)", out)
+
+    def test_key_binding_is_added_once_and_never_over_yours(self):
+        tool = srcp_add_key_binding
+        ours = srcp_iterm_prefs.SAVE_BINDING
+        other = {"0x61-0x100000": {"Action": 12, "Text": "x"}}
+        live = {tool.KEY_MAP: other}
+        written, _ = self.run_main(tool, live=live)
+        self.assertEqual(written, {tool.KEY_MAP: {**other, tool.BINDING_KEY: ours}})
+        live = {tool.KEY_MAP: {**other, tool.BINDING_KEY: dict(ours)}}  # already there
+        written, out = self.run_main(tool, live=live)
+        self.assertIsNone(written)
+        self.assertIn("already bound", out)
+        self.assertNotIn("left alone", out)
+        # Yours, under another keycode of the same character and modifiers, or in the
+        # two-part form without one.
+        for key in (f"{tool.CHAR_MODS}-0x2c-0x1", tool.CHAR_MODS):
+            with self.subTest(key=key):
+                yours = {key: {"Action": 12, "Text": "mine"}}
+                written, out = self.run_main(tool, live={tool.KEY_MAP: {**other, **yours}})
+                self.assertIsNone(written)
+                self.assertIn("left alone", out)
+
+
+class ClaudeIntegrationTest(unittest.TestCase):
+    """srcp_enable_claude_integration.py: --remove takes out exactly what it installs, a dry
+    run of either changes nothing, and a new settings.json is owner-only."""
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="srcp-claude-")
@@ -352,6 +391,29 @@ class ClaudeIntegrationRemoveTest(unittest.TestCase):
         backups = [n for n in os.listdir(os.path.dirname(self.settings)) if ".backup-" in n]
         self.assertTrue(backups)  # settings.json was backed up before each write
 
+    def test_dry_runs_of_enable_and_remove_change_nothing(self):
+        os.makedirs(os.path.dirname(self.settings))
+        with open(self.settings, "w") as f:
+            json.dump({"x": 1}, f)
+
+        def prefs():  # fresh each run: the tool edits the dict it loads, even in a dry run
+            return {"New Bookmarks": [{"Name": "Default", "Triggers": []}]}
+
+        before = tree(self.tmp)
+        self.assertEqual(self.run_tool("--dryrun", prefs=prefs()), [])
+        self.assertEqual(tree(self.tmp), before)  # no link, settings.json as it was, no backup
+        ((enabled, _, _),) = self.run_tool(prefs=prefs())
+        before = tree(self.tmp)
+        self.assertEqual(self.run_tool("--remove", "--dryrun", prefs=enabled), [])
+        self.assertEqual(tree(self.tmp), before)
+        self.assertEqual(os.readlink(self.link), self.src)
+
+    def test_a_new_settings_file_is_owner_only(self):
+        old = os.umask(0o022)  # a plain open() would then give 0o644, whatever this Mac's umask
+        self.addCleanup(os.umask, old)
+        self.run_tool(prefs={})
+        self.assertEqual(os.stat(self.settings).st_mode & 0o777, 0o600)  # it can hold secrets
+
     def test_remove_with_only_the_flags_set_writes_no_profiles(self):
         prefs = {
             "New Bookmarks": [{"Name": "Default", "Triggers": []}],
@@ -390,6 +452,26 @@ class ClaudeIntegrationRemoveTest(unittest.TestCase):
         backups.remove(future)
         self.assertEqual(len(backups), srcp_enable_claude_integration.SETTINGS_BACKUP_KEEP)
         self.assertEqual(backups[:-1], ours[3:])  # the oldest three went; the new one stays
+
+
+class TreeTest(unittest.TestCase):
+    """tree(), which the dry-run tests compare before and after, sees git changes too."""
+
+    def test_tree_sees_a_commit_branch_or_packed_ref_change(self):
+        repo = os.path.dirname(schemes_repo(self, [{"A": DARK}]))
+        before = tree(repo)
+        git(repo, "branch", "mine")
+        self.assertNotEqual(tree(repo), before)
+        git(repo, "branch", "-D", "mine")
+        self.assertEqual(tree(repo), before)
+        git(repo, "branch", "mine")
+        git(repo, "pack-refs", "--all")  # as git gc does: refs move into packed-refs
+        packed = tree(repo)
+        git(repo, "branch", "-D", "mine")  # changes only packed-refs
+        self.assertNotEqual(tree(repo), packed)
+        deleted = tree(repo)
+        git(repo, "commit", "-q", "--allow-empty", "-m", "b")
+        self.assertNotEqual(tree(repo), deleted)
 
 
 class ShellDryRunTest(unittest.TestCase):
@@ -686,14 +768,24 @@ class ShellDryRunTest(unittest.TestCase):
             os.path.join(data, "schemes.db"),
             os.path.join(backups, "schemes-20260101T000000Z.db"),
         ]
+        ours.append(os.path.join(backups, "schemes-29990101T000000Z.db.partial"))  # half-written
         mine = os.path.join(backups, "manual-x.db")
-        open(mine, "w").close()
+        # Dated after now (a clock set ahead), plain and with a -n suffix.
+        future = [os.path.join(backups, f"schemes-29990101T000000Z{n}.db") for n in ("", "-1")]
+        linked = os.path.join(backups, "schemes-20260103T000000Z.db")  # named as ours, a link
+        for path in (ours[-1], mine, *future):
+            open(path, "w").close()
+        os.symlink(mine, linked)
         self.set_prefs()
         out = self.run_script("uninstall.sh", "--dryrun", "--data")
         section = out.split("==> Scheme DB")[1]
         removed = [line[len("  $ rm -f ") :] for line in section.splitlines() if "$ rm -f" in line]
         self.assertEqual(sorted(removed), sorted(ours))  # ours, and nothing else
         self.assertIn(f"left in place: {mine}", out)
+        self.assertIn(f"left in place: {linked}", out)
+        for path in future:
+            self.assertIn(f"left in place (dated in the future): {path}\n", out)
+            self.assertEqual(out.count(path + "\n"), 1)  # said once, not listed again
         self.assertIn(f"$ rm -f {main['DYNAMIC_PATH']}\n", out)  # the file the script writes
 
     def test_uninstall_fonts_removes_only_what_setup_installed(self):
@@ -755,6 +847,29 @@ class ShellDryRunTest(unittest.TestCase):
         out = self.run_script("uninstall.sh", "--dryrun", "--data")
         self.assertIn("no snapshot to keep", out)
         self.assertNotIn("$ rm -f", out.split("==> Scheme DB")[1])
+
+    def test_uninstall_data_never_keeps_a_link_named_like_a_snapshot(self):
+        data = os.path.join(self.home, ".local", "share", "iterm2-color-schemes")
+        os.remove(os.path.join(data, "schemes.db"))  # so the newest snapshot is what's kept
+        mine = os.path.join(data, "backups", "manual-x.db")
+        open(mine, "w").close()
+        os.symlink(mine, os.path.join(data, "backups", "schemes-20260103T000000Z.db"))  # newer
+        self.set_prefs()
+        out = self.run_script("uninstall.sh", "--dryrun", "--data")
+        real = os.path.join(data, "backups", "schemes-20260101T000000Z.db")
+        self.assertIn(f"$ cp {real} ", out)  # the real snapshot, not the link's target
+        self.assertIn(f"--db {real} ", out)
+
+    def test_help_prints_the_whole_header_comment(self):
+        for script, first, last in (
+            ("setup.sh", "Set up iTerm2", "SRC_DIR=~/code ./setup.sh"),
+            ("uninstall.sh", "Undo setup.sh", "./uninstall.sh [--data] [--presets]"),
+        ):
+            with self.subTest(script=script):
+                lines = self.run_script(script, "--help").splitlines()
+                self.assertTrue(lines[0].startswith(first))
+                self.assertTrue(lines[-1].strip().startswith(last))
+                self.assertFalse([line for line in lines if line.startswith(("#", "set -"))])
 
     def test_dry_runs_when_the_checkout_is_the_scripts_folder(self):
         support = os.path.join(self.home, "Library", "Application Support", "iTerm2")
@@ -866,12 +981,22 @@ def have_tools(path):
     return None
 
 
-def tree(root, skip=(".git",)):
+def tree(root):
     """{relative path: (size, mtime, mode)} of every file and folder under root (links not
-    followed)."""
+    followed). Of a .git folder, only HEAD, packed-refs and refs/, by content: what a commit,
+    checkout, branch or stash changes (git status itself may touch the rest)."""
     out = {}
     for folder, dirs, files in os.walk(root):
-        dirs[:] = [d for d in dirs if d not in skip]
+        if ".git" in dirs and not os.path.islink(os.path.join(folder, ".git")):
+            git_dir = os.path.join(folder, ".git")
+            refs = [os.path.join(git_dir, n) for n in ("HEAD", "packed-refs")]
+            for sub, _, names in os.walk(os.path.join(git_dir, "refs")):
+                refs += [os.path.join(sub, n) for n in names]
+            for path in refs:
+                if os.path.isfile(path) and not os.path.islink(path):
+                    with open(path, "rb") as f:
+                        out[os.path.relpath(path, root)] = hashlib.sha256(f.read()).hexdigest()
+        dirs[:] = [d for d in dirs if d != ".git"]
         for name in dirs + files:
             path = os.path.join(folder, name)
             st = os.lstat(path)
