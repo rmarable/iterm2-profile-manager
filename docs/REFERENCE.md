@@ -10,12 +10,12 @@ Right-click a session → **Save/update this profile**, or press `⌃⌥⌘S`. T
 |---|---|
 | **1 ★** … **5 ★★★★★** | Saves preset + font as a favorite with that many stars. Rate again to change. |
 | **Remove favorite** | Favorites only. Deletes this favorite. The preset returns to discovery once no font of it is a favorite. |
-| **Never show** | Excludes the preset from all picks and deletes its favorites, then re-rolls the session. For a favorite it first lists the fonts and stars it will delete. Undo: rate it again, **Scripts → srcp_never_show.py** → **Show again**, or `srcp_favorites.py --show-again`. |
+| **Never show** | Excludes the preset from all picks and deletes its favorites, then re-rolls the session. For a favorite it first lists the fonts and stars it will delete. Undo: rate it again, pick it in **Scripts → srcp_never_show.py** and click **Show again**, or `srcp_favorites.py --show-again`. |
 | **Cancel** | Closes the dialog. |
 
 Right-click → **Never show this profile** does the same as **Never show**, without the rating dialog: both re-roll the session as in [Change to another profile](#change-to-another-profile), and for a favorite both first list the fonts and stars they will delete (**Cancel** or Escape keeps everything). Like the other items, iTerm2 3.7.6 shows it on every session; on one the script didn't color, it says so.
 
-Right-click → **Remove profile from favorites** does the same as **Remove favorite**, without the dialog. iTerm2 3.7.6 shows it on every session and, on a non-favorite, says so and changes nothing; if the database is busy or missing it says that instead. iTerm2 with Python API protocol 1.23+ hides it on non-favorites; the script uses that when available.
+Right-click → **Remove profile from favorites** does the same as **Remove favorite**, without the rating dialog. iTerm2 3.7.6 shows it on every session and, on a non-favorite, says so and changes nothing; if the database is busy or missing it says that instead. iTerm2 with Python API protocol 1.23+ hides it on non-favorites; the script uses that when available.
 
 ## Change to another profile
 
@@ -25,13 +25,13 @@ Right-click a session → **Change to another profile** re-rolls its look on the
 
 Each favorite becomes a profile named `<preset> - <font>` under **Profiles → Favorites**. Sessions opened from one keep that look.
 
-The main script writes these profiles to a Dynamic Profiles file (see [Files on disk](#files-on-disk)); iTerm2 reloads it automatically. Each profile is based on your default profile, so it keeps your other settings (triggers, key bindings, etc.). Edits made to one in Settings are lost when the file is rewritten. A favorite is one preset + font: changing the font in a session doesn't change what the rating dialog saves (it uses the font the script applied). To keep a preset with another font, rate it from a tab that shows it in that font; to drop the old one, open it from **Profiles → Favorites** and choose **Remove favorite**. If the file is deleted, it comes back within 30 seconds.
+The main script writes these profiles to a Dynamic Profiles file (see [Files on disk](#files-on-disk)); iTerm2 reloads it automatically. Each profile is based on your default profile, so it keeps your other settings (triggers, key bindings, etc.). Edits made to one in Settings are lost when the file is rewritten. A favorite is one preset + font: changing the font in a session doesn't change what the rating dialog saves (it uses the font the script applied). To keep a preset with another font, rate it from a tab that shows it in that font; to drop the old one, open it from **Profiles → Favorites**, then right-click → **Remove profile from favorites** (or press `⌃⌥⌘S` and click **Remove favorite**). If the file is deleted, it comes back within 30 seconds.
 
 ## Review ratings
 
-**Scripts → srcp_ratings.py** lists your favorites in a window. **History** shows the last 50 rating changes; **Hidden** shows **Never show** presets. Text is selectable.
+**Scripts → srcp_ratings.py** lists your favorites in a window. Its **History** view shows the last 50 rating changes, and its **Hidden** view the presets you've hidden with Never show. Text is selectable.
 
-**Scripts → srcp_never_show.py** lists **Never show** presets with a dropdown: pick one, then **Show again**. It sets `overrides.include` back to `NULL` (a `mode` override stays). With `fix_colors` off, a preset that fails the readability checks gets `1` instead (it was showing before), except for a `duplicate_of` twin; with it on (the default) it's picked anyway, with its [color adjustments](#color-adjustments). Rating a hidden preset un-hides it by the same rule; since 0.8.0 a twin is no longer forced in that way (twins are never picked either way). Deleted favorites aren't restored, and no `ratings` row is written. The main script picks the change up at the next new session.
+**Scripts → srcp_never_show.py** lists the presets you've hidden with Never show, in a dropdown: pick one, then click **Show again**. It sets `overrides.include` back to `NULL` (a `mode` override stays). With `fix_colors` off, a preset that fails the readability checks gets `1` instead (it was showing before), except for a `duplicate_of` twin; with it on (the default) it's picked anyway, with its [color adjustments](#color-adjustments). Rating a hidden preset un-hides it by the same rule; since 0.8.0 a twin is no longer forced in that way (twins are never picked either way). Deleted favorites aren't restored, and no `ratings` row is written. The main script picks the change up at the next new session.
 
 From the repo:
 
@@ -71,7 +71,7 @@ For each new session, and at start for each open one with no look yet (buried on
    - **Favorite:** weighted by stars per saved preset + font (a 5 ★ is picked 5× as often as a 1 ★; a preset saved with three fonts has three chances), in its saved font. If that font has since been disabled, a random one.
    - **Discovery:** a preset of this mode (with `fix_colors` off: only one that passes the readability checks) that isn't a favorite, and isn't among the last 20 discovery picks in this mode. Colored-background presets (yellow, pink, teal rather than white, grey or black) get 3× weight. They are rare, so this lifts them to roughly a fifth of light and a third of dark sessions. Random font.
 4. **Applies the preset and font** to this session only, at the profile's font size, with the preset's [color adjustments](#color-adjustments) (the Console line ends ", N colors adjusted", then how long coloring the tab took, e.g. "(84 ms)"). Also sets the non-ASCII font to MesloLGS Nerd Font (`nonascii_font`), so Oh My Zsh prompt icons (Powerlevel10k and the like) render with any font.
-5. **Logs the launch** with how long the tab took, and the close time when the session ends. Sessions open when iTerm2 quits get `end_reason = 'unknown'` at the next start. A look replaced by **Change to another profile** ends with `end_reason = 'changed'`.
+5. **Logs the launch** with how long the tab took, and the close time when the session ends. Sessions open when iTerm2 quits get `end_reason = 'unknown'` at the next start. A look replaced by right-click → **Change to another profile** ends with `end_reason = 'changed'`.
 
 ### Light or dark
 
@@ -304,7 +304,7 @@ Double-clicking an `.itermcolors` file also imports it, with one dialog per file
 |---|---|
 | `AutoLaunch/srcp_set_random_color_profile.py` | Main script. Starts with iTerm2; picks each session's look, logs launches, provides the rating dialog and right-click menu items, writes favorite profiles, takes daily snapshots (checked every 15 minutes). |
 | `srcp_ratings.py` | Scripts menu: ratings window. |
-| `srcp_never_show.py` | Scripts menu: list Never show presets, show one again. |
+| `srcp_never_show.py` | Scripts menu: list hidden (Never show) presets, show one again. |
 | `srcp_score_presets.py` | Scripts menu: ranks presets by saturation (report only). |
 | `setup.sh`, `uninstall.sh` | Install and uninstall. |
 | `.tools/` | Command-line tools. The leading dot keeps them out of iTerm2's Scripts menu. |
