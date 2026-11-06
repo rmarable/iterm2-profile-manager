@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Fixed-width fonts: iTerm2 Profile Manager</title>
+<style>
+:root{
+  --page:#f4f4f2; --card:#fff; --ink:#1d1d1f; --muted:#6b6b70; --line:#dcdcd8;
+  --pool:#1f6f43; --inst:#2457a6; --miss:#8a5a00; --warn:#b3261e;
+  --t-bg:#1b1d23; --t-fg:#d6d7d9;
+  --c1:#ef6b73; --c2:#8fd16a; --c3:#e8c26a; --c4:#6aa7ef; --c5:#c58ae8; --c6:#5fd1c9; --c8:#7a7f8a;
+}
+body.light{--t-bg:#fbfbf8; --t-fg:#2a2b2e; --c1:#c0303b; --c2:#3c8a1f; --c3:#9a6b00; --c4:#2457a6; --c5:#8a3fb0; --c6:#16807a; --c8:#8a8d94}
+*{box-sizing:border-box}
+body{margin:0;background:var(--page);color:var(--ink);font:14px/1.45 -apple-system,BlinkMacSystemFont,"Helvetica Neue",sans-serif}
+header{padding:28px 32px 8px;max-width:1500px;margin:0 auto}
+h1{font-size:22px;margin:0 0 6px}
+header p{margin:4px 0;color:var(--muted);max-width:920px}
+header p.warn{color:var(--warn)}
+.controls{position:sticky;top:0;z-index:5;background:var(--page);border-bottom:1px solid var(--line);
+  padding:12px 32px;display:flex;flex-wrap:wrap;gap:10px 22px;align-items:center}
+.controls label{display:flex;gap:6px;align-items:center;color:var(--muted)}
+.controls select,.controls input[type=range]{font:inherit}
+.controls button{font:inherit;padding:4px 10px;border:1px solid var(--line);background:var(--card);border-radius:6px;cursor:pointer}
+.controls button.on{background:var(--ink);color:var(--page)}
+#custom{width:100%;font:13px Menlo,monospace;display:none;padding:6px;border:1px solid var(--line);border-radius:6px}
+#custom.show{display:block}
+main{max-width:1500px;margin:0 auto;padding:18px 32px 40px}
+h2{font-size:15px;margin:26px 0 4px;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.04em}
+.sub{margin:0 0 10px;color:var(--muted);font-size:12.5px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(460px,1fr));gap:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;overflow:hidden;display:flex;flex-direction:column;content-visibility:auto;contain-intrinsic-size:auto 330px}
+.card.picked{outline:2px solid var(--inst)}
+.head{padding:10px 12px 8px;display:flex;flex-wrap:wrap;gap:6px 8px;align-items:center}
+.name{font-weight:650;font-size:15px;margin-right:auto}
+.pick{display:flex;gap:4px;align-items:center;color:var(--muted);font-size:12px;cursor:pointer}
+.badges{padding:0 12px 8px;display:flex;flex-wrap:wrap;gap:6px}
+.b{font-size:11.5px;padding:1px 7px;border-radius:999px;border:1px solid currentColor;white-space:nowrap}
+.b.pool{color:var(--pool);background:#e7f3ec}
+.b.inst{color:var(--inst);background:#e8eef9}
+.b.miss{color:var(--miss);background:#fbf1de}
+.b.src{color:var(--muted)}
+.b.warn{color:var(--warn);background:#fbe9e7}
+.meta{padding:0 12px 8px;font-size:12px;color:var(--muted)}
+.meta div{margin:2px 0}
+.meta code{font:11.5px Menlo,monospace;background:#f0f0ec;padding:1px 4px;border-radius:4px;color:var(--ink);word-break:break-all}
+.meta button{font-size:11px;margin-left:4px;padding:0 6px;border:1px solid var(--line);background:var(--card);border-radius:4px;cursor:pointer}
+body{--size:14px;--lh:1.2;--weight:400}
+pre.sample{margin:0;padding:12px 14px;background:var(--t-bg);color:var(--t-fg);white-space:pre;overflow:auto;
+  flex:1;font-size:var(--size);line-height:var(--lh);font-weight:var(--weight);
+  font-variant-ligatures:none;font-feature-settings:"liga" 0,"calt" 0}
+body.lig pre.sample{font-variant-ligatures:normal;font-feature-settings:normal}
+.k1{color:var(--c1)}.k2{color:var(--c2)}.k3{color:var(--c3)}.k4{color:var(--c4)}.k5{color:var(--c5)}.k6{color:var(--c6)}.k8{color:var(--c8)}
+b{font-weight:700}
+footer{max-width:1500px;margin:0 auto;padding:0 32px 40px;color:var(--muted);font-size:12.5px}
+footer li{margin:3px 0}
+</style>
+</head>
+<body>
+<header>
+  <h1>Fixed-width fonts for iTerm2 Profile Manager</h1>
+  <p>Each card shows whether the font is in the random font pool, whether it's installed on this Mac, and where it comes from. Homebrew fonts aren't installed by default; the one exception is MesloLGS Nerd Font, which <code>setup.sh</code> installs with Homebrew, if Homebrew is there, because Oh My Zsh prompts need it. Copy a card's command into a terminal to add that font.</p>
+  <p id="made"></p>
+  <p id="dbnote" class="warn" hidden></p>
+</header>
+
+<div class="controls">
+  <label>Sample
+    <select id="sample">
+      <option value="term">Terminal session</option>
+      <option value="code">Code</option>
+      <option value="glyphs">Look-alike characters</option>
+      <option value="custom">Your own text…</option>
+    </select></label>
+  <label>Size <input id="size" type="range" min="10" max="24" value="14"> <span id="sizev">14 px</span></label>
+  <label>Line height <input id="lh" type="range" min="100" max="160" value="120"> <span id="lhv">1.20</span></label>
+  <label>Show
+    <select id="filter">
+      <option value="all">All fonts</option>
+      <option value="pool">In the pool</option>
+      <option value="inst">Installed</option>
+      <option value="miss">Not installed</option>
+      <option value="picked">Only the ones I ticked</option>
+    </select></label>
+  <button id="theme">Light background</button>
+  <button id="lig">Ligatures off</button>
+  <button id="bold">Bold off</button>
+  <textarea id="custom" rows="4" placeholder="Type or paste text to preview in every font"></textarea>
+</div>
+
+<main id="main"></main>
+
+<footer>
+  <ul>
+    <li>A red <b>Not drawn in this browser</b> badge means the browser used a fallback font instead. Safari won't use fonts you installed yourself, so this page carries copies of the ones in the pool (regular face only, files up to 5 MB). Keep the page to yourself: some of them, such as SF Mono, are licensed by Apple.</li>
+    <li>Fonts that aren't installed are previewed from web copies (Fontsource on jsDelivr; Hack and 0xProto from their own packages), Latin characters only. The installed fonts have the full character set.</li>
+    <li>iTerm2 keeps ligatures off by default, so this page does too; use the button to see them.</li>
+  </ul>
+</footer>
+
+<script type="application/json" id="data">__DATA__</script>
+<!--EMBEDS-->
+<script>
+const DATA = JSON.parse(document.getElementById("data").textContent);
+const SECTIONS = DATA.pool_known ? {
+  pool: ["In the pool", "Picked at random for new tabs."],
+  inst: ["Installed, not in the pool", "On this Mac already; the command adds it to the pool."],
+  miss: ["Not installed", "For a Homebrew font, the command installs it, then adds it to the pool. The others come with macOS or Terminal.app (setup.sh copies Terminal.app's)."],
+} : {
+  inst: ["Installed", "The pool couldn't be read (see above), so no commands are shown."],
+  miss: ["Not installed", "The pool couldn't be read (see above), so no commands are shown."],
+};
+const esc = s => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const SAMPLES = {
+  term:
+`<span class="k2">you@mac</span> <span class="k4">~/src/app</span> <span class="k5">(main)</span> <span class="k8">$</span> ls -la
+drwxr-xr-x  12 you  staff   384 Nov  6 09:12 <span class="k4">.</span>
+-rw-r--r--   1 you  staff  4210 Nov  6 09:10 README.md
+-rwxr-xr-x   1 you  staff   918 Nov  5 17:44 <span class="k2">setup.sh</span>
+<span class="k2">you@mac</span> <span class="k4">~/src/app</span> <span class="k8">$</span> git status
+On branch <span class="k6">main</span>
+Changes not staged for commit:
+	<span class="k1">modified:   src/server.py</span>
+	<span class="k1">deleted:    tests/old_test.py</span>
+<span class="k3">warning:</span> 3 files changed, <span class="k2">+128</span> <span class="k1">-41</span>
+<span class="k8">[12:04:55]</span> build ok in <b>2.31 s</b>  0O 1lI| {}[]()`,
+  code:
+`<span class="k5">def</span> <span class="k4">pick_font</span>(fonts: <span class="k6">list</span>[<span class="k6">str</span>], seed: <span class="k6">int</span> = <span class="k3">0</span>) -> <span class="k6">str</span>:
+    <span class="k8"># Weighted pick; never returns an empty name.</span>
+    <span class="k5">if not</span> fonts <span class="k5">or</span> seed &lt; <span class="k3">0</span>:
+        <span class="k5">raise</span> <span class="k6">ValueError</span>(<span class="k2">"no fonts"</span>)
+    weights = {f: <span class="k3">1.0</span> <span class="k5">for</span> f <span class="k5">in</span> fonts <span class="k5">if</span> f != <span class="k2">""</span>}
+    total = <span class="k6">sum</span>(weights.values())  <span class="k8"># >= 1, <= len</span>
+    <span class="k5">return</span> fonts[(seed * <span class="k3">0x9E37</span>) % <span class="k6">len</span>(fonts)]
+
+<span class="k8">// =&gt; -&gt; &lt;= &gt;= != === !== &amp;&amp; || :: ++ -- /* */ &lt;!-- --&gt;</span>`,
+  glyphs:
+`0O0O  oO08  1lI|!i  5S  2Z  6b  9g  rnm  vvw  ''""\`\`
+{}[]()&lt;&gt;  ;:,.  _-~=+*  @#$%^&amp;  \\/
+The quick brown fox jumps over the lazy dog.
+THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG.
+0123456789  3.14159  0xDEADBEEF  1,000,000
+┌──────┬──────┐  ▏▎▍▌▋▊▉█  ░▒▓
+│ left │ right│  ← ↑ → ↓  ✓ ✗ •
+└──────┴──────┘  äöü ñ ç é ß €`,
+};
+
+const $ = id => document.getElementById(id);
+$("made").textContent = DATA.made;
+if (DATA.dbnote) { $("dbnote").textContent = DATA.dbnote; $("dbnote").hidden = false; }
+
+// Web and embedded fonts load only when their card is on screen (bold only with Bold on).
+const loaded = new Set();
+function loadFace(f, weight){
+  const key = f.family + weight;
+  if (loaded.has(key)) return;
+  let src = null;
+  if (f.embed && weight === 400) {
+    const block = $(f.embed);  // the browser decodes the data: URL itself
+    src = `url(data:${block.dataset.mime};base64,${block.textContent.trim()})`;
+  } else if (f.web) {
+    src = `url(${f.web[weight === 700 ? 1 : 0]})`;
+  }
+  if (!src) return;
+  loaded.add(key);
+  const face = new FontFace(f.family, src, {weight: String(weight), display: "swap"});
+  face.load().then(ff => { document.fonts.add(ff); check(f); }).catch(() => check(f));
+}
+function wanted(f){
+  if (!f.el.dataset.seen) return;
+  loadFace(f, 400);
+  if (document.body.classList.contains("bold")) loadFace(f, 700);
+}
+const seen = new IntersectionObserver(entries => entries.forEach(e => {
+  if (!e.isIntersecting) return;
+  const f = DATA.fonts[e.target.dataset.i];
+  e.target.dataset.seen = "1"; wanted(f); check(f);
+}), {rootMargin: "400px"});
+
+// Not drawn: the text measures the same as with the fallback alone, against two fallbacks.
+const ctx = document.createElement("canvas").getContext("2d");
+const probe = "mmmmmmmmmmlli0O@#WiI1|.,";
+const width = fam => { ctx.font = `72px ${fam}`; return ctx.measureText(probe).width; };
+function check(f){
+  const missing = ["monospace", "serif"].every(fb => width(`"${f.family}", ${fb}`) === width(fb));
+  f.el.querySelector(".render").hidden = !missing || ((f.web || f.embed) && !loaded.has(f.family + 400));
+}
+
+function card(f, i){
+  const el = document.createElement("div");
+  el.className = "card"; el.dataset.i = i;
+  const badges = [];
+  if (f.section === "pool") badges.push('<span class="b pool">In the pool</span>');
+  if (!f.pool_known) badges.push('<span class="b warn">Pool unknown</span>');
+  badges.push(f.installed ? '<span class="b inst">Installed</span>' : '<span class="b miss">Not installed</span>');
+  badges.push(`<span class="b src">${esc(f.source)}</span>`);
+  badges.push('<span class="b warn render" hidden>Not drawn in this browser</span>');
+  const meta = [];
+  if (f.ps) meta.push(`<div>PostScript name <code>${esc(f.ps)}</code></div>`);
+  if (f.add) meta.push(`<div><code>${esc(f.add)}</code><button data-copy="${esc(f.add)}">copy</button></div>`);
+  if (f.note) meta.push(`<div>${esc(f.note)}</div>`);
+  el.innerHTML = `
+    <div class="head"><span class="name">${esc(f.label)}</span>
+      <label class="pick"><input type="checkbox"> compare</label></div>
+    <div class="badges">${badges.join("")}</div>
+    <div class="meta">${meta.join("")}</div>
+    <pre class="sample"></pre>`;
+  el.querySelector("pre").style.fontFamily = `"${f.family}", monospace`;
+  el.querySelector("input").addEventListener("change", e => { el.classList.toggle("picked", e.target.checked); applyFilter(); });
+  const btn = el.querySelector("[data-copy]");
+  if (btn) btn.addEventListener("click", () => navigator.clipboard.writeText(btn.dataset.copy).then(() => { btn.textContent = "copied"; setTimeout(() => btn.textContent = "copy", 1200); }));
+  f.el = el; seen.observe(el);
+  return el;
+}
+
+const main = $("main");
+for (const s of Object.keys(SECTIONS)) {
+  const fonts = DATA.fonts.map((f, i) => [f, i]).filter(([f]) => f.section === s);
+  if (!fonts.length) continue;
+  const sec = document.createElement("section"); sec.dataset.section = s;
+  sec.innerHTML = `<h2>${SECTIONS[s][0]}</h2><p class="sub">${esc(SECTIONS[s][1])}</p>`;
+  const grid = document.createElement("div"); grid.className = "grid";
+  fonts.forEach(([f, i]) => grid.appendChild(card(f, i)));
+  sec.appendChild(grid); main.appendChild(sec);
+}
+
+// The text is set only when it changes; size, line height and weight are CSS variables.
+let shown = null;
+function render(){
+  const which = $("sample").value;
+  $("custom").classList.toggle("show", which === "custom");
+  const html = which === "custom" ? esc($("custom").value || "Type something above.") : SAMPLES[which];
+  if (html !== shown) {
+    document.querySelectorAll("pre.sample").forEach(p => { p.innerHTML = html; });
+    shown = html;
+  }
+  const bold = document.body.classList.contains("bold");
+  const style = document.body.style;
+  style.setProperty("--size", $("size").value + "px");
+  style.setProperty("--lh", ($("lh").value / 100).toFixed(2));
+  style.setProperty("--weight", bold ? 700 : 400);
+  $("sizev").textContent = $("size").value + " px";
+  $("lhv").textContent = ($("lh").value / 100).toFixed(2);
+  if (bold) DATA.fonts.forEach(wanted);
+}
+function applyFilter(){
+  const v = $("filter").value;
+  DATA.fonts.forEach(f => {
+    const show = v === "all" || v === f.section || (v === "inst" && f.installed) ||
+      (v === "miss" && !f.installed) || (v === "picked" && f.el.classList.contains("picked"));
+    f.el.hidden = !show;
+  });
+  document.querySelectorAll("section").forEach(s => s.hidden = ![...s.querySelectorAll(".card")].some(c => !c.hidden));
+}
+function toggle(btn, cls, on, off){ $(btn).addEventListener("click", () => {
+  const isOn = document.body.classList.toggle(cls);
+  $(btn).classList.toggle("on", isOn); $(btn).textContent = isOn ? on : off; render(); }); }
+toggle("theme", "light", "Dark background", "Light background");
+toggle("lig", "lig", "Ligatures on", "Ligatures off");
+toggle("bold", "bold", "Bold on", "Bold off");
+["sample","size","lh","custom"].forEach(id => $(id).addEventListener("input", render));
+$("filter").addEventListener("change", applyFilter);
+render(); applyFilter();
+</script>
+</body>
+</html>

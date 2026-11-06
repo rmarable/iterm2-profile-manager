@@ -77,6 +77,10 @@ class DbTest(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp)
         # The main script quits with os._exit, which would end the whole test run with
         # status 0 (so lint.sh would pass with the rest unrun): raise SystemExit instead.
+        # The fonts tool's record: none, not the real one (one test sets its own).
+        record = mock.patch.object(build, "added_fonts", return_value={})
+        record.start()
+        self.addCleanup(record.stop)
         patch = mock.patch.object(os, "_exit", side_effect=sys.exit)
         patch.start()
         self.addCleanup(patch.stop)
@@ -336,9 +340,10 @@ class BuildTest(DbTest):
 
     def test_no_hand_copies_left(self):
         names = "FIX_ON_SQL|UNHIDE|HASH_KEYS|COMPONENTS|FONT_DIRS|SEED_FONTS|SEED_CONFIG"
-        names += "|NUMERIC_CONFIG"
+        names += "|NUMERIC_CONFIG|SEED_FONT_LABELS"
         copies = re.compile(rf'^({names}) =|"schemes-\*\.db"|removesuffix\("-Regular"\)', re.M)
-        for path in (MAIN, BUILD, os.path.join(ROOT, ".tools", "srcp_favorites.py")):
+        tools = [os.path.join(ROOT, ".tools", f) for f in ("srcp_favorites.py", "srcp_fonts.py")]
+        for path in (MAIN, BUILD, *tools):
             with open(path) as f, self.subTest(path=os.path.basename(path)):
                 self.assertEqual(copies.findall(f.read()), [])
         # The prefs keys and the key binding live in srcp_iterm_prefs, the rebuild command in
@@ -408,6 +413,47 @@ class BuildTest(DbTest):
         with self.install_fonts():
             self.build()
         self.assertEqual(self.fonts()["Monaco"], (0, 1))
+
+    def test_new_default_fonts_reach_an_existing_db_with_labels(self):
+        old = {n: build.SEED_FONTS[n] for n in ("SFMono-Regular", "Menlo-Regular", "Monaco")}
+        self.db.execute("DELETE FROM fonts")
+        with mock.patch.object(build, "SEED_FONTS", old):
+            self.build()
+        self.db.execute("UPDATE fonts SET enabled = 0 WHERE name = 'Monaco'")  # your choice
+        self.assertNotIn("PTMono-Regular", self.fonts())
+        self.build()
+        fonts = self.fonts()
+        for name in ("SFMonoTerminal-Regular", "PTMono-Regular", "AndaleMono"):
+            self.assertEqual(fonts[name], (1, 0), name)
+        self.assertEqual(fonts["Monaco"], (0, 0))
+        labels = dict(self.db.execute("SELECT name, label FROM fonts"))
+        self.assertEqual(labels["AndaleMono"], "Andale Mono")
+        self.assertEqual(labels["SFMonoTerminal-Regular"], "SF Mono Terminal")
+
+    def test_a_font_the_fonts_tool_added_is_turned_off_while_its_file_is_gone(self):
+        home = os.path.join(self.tmp, "home")
+        font_file = os.path.join(home, "Library", "Fonts", "Hack-Regular.ttf")
+        os.makedirs(os.path.dirname(font_file))
+        open(font_file, "w").close()
+        record = os.path.join(home, ".local/share/iterm2-profile-manager/added-fonts.txt")
+        os.makedirs(os.path.dirname(record))
+        with open(record, "w") as f:
+            f.write(f"cask font-hack\nfile Hack-Regular {font_file}\nfile Ghost-Regular /nope\n")
+        self.db.execute("INSERT INTO fonts (name, label) VALUES ('Hack-Regular', 'Hack')")
+        real = mock.patch.object(build, "added_fonts", lambda: build.read_added_fonts()[1])
+        with mock.patch.dict(os.environ, {"HOME": home}), real:
+            self.build()
+            self.assertEqual(self.fonts()["Hack-Regular"], (1, 0))
+            self.assertNotIn("Ghost-Regular", self.fonts())  # the tool's rows only, never new
+            os.remove(font_file)
+            self.build()
+            self.assertEqual(self.fonts()["Hack-Regular"], (0, 1))
+            open(font_file, "w").close()
+            self.build()
+            self.assertEqual(self.fonts()["Hack-Regular"], (1, 0))
+            self.db.execute("UPDATE fonts SET enabled = 0 WHERE name = 'Hack-Regular'")
+            self.build()  # turned off by you: stays off
+            self.assertEqual(self.fonts()["Hack-Regular"], (0, 0))
 
     def test_schema_5_marks_disabled_fonts_that_are_still_missing(self):
         self.db.execute("ALTER TABLE fonts DROP COLUMN missing")

@@ -5,6 +5,7 @@ Runs under iTerm2's Python, like srcp_test_db.py, against temp folders only.
 """
 
 import ast
+import base64
 import contextlib
 import hashlib
 import io
@@ -17,6 +18,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import types
 import unittest
@@ -27,8 +29,10 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, ".tools"))  # before importing the tools
 
 import srcp_add_key_binding  # noqa: E402  (after the sys.path line above)
+import srcp_build_scheme_db  # noqa: E402  (after the sys.path line above)
 import srcp_db_backup  # noqa: E402  (after the sys.path line above)
 import srcp_enable_claude_integration  # noqa: E402  (after the sys.path line above)
+import srcp_fonts  # noqa: E402  (after the sys.path line above)
 import srcp_import_presets  # noqa: E402  (after the sys.path line above)
 import srcp_iterm_prefs  # noqa: E402  (after the sys.path line above)
 import srcp_preset_history  # noqa: E402  (after the sys.path line above)
@@ -1091,6 +1095,479 @@ def have_tools(path):
                 if isinstance(n, ast.Constant) and isinstance(n.value, str)
             }
     return None
+
+
+# A brew stand-in for the fonts tool: logs every call; `install` puts font-hack's font file in
+# $HOME/Library/Fonts and notes an install time, `uninstall` takes both away. $FAKE_BREW
+# holds its state; `info` reports installed_time only while the cask is installed.
+FAKE_BREW = r"""#!/bin/sh
+echo "brew $*" >>"$FAKE_BREW/log"
+case "$1" in
+list) cat "$FAKE_BREW/installed" 2>/dev/null || true ;;
+info) [ -n "$FAKE_BREW_INFO_FAIL" ] && exit 1
+	cask="$5"; stamp=null
+	grep -qx "$cask" "$FAKE_BREW/installed" 2>/dev/null && stamp=$(cat "$FAKE_BREW/time-$cask")
+	font='{"font": ["ttf/Hack-Regular.ttf"], "target": "%s/Library/Fonts/Hack-Regular.ttf"}'
+	head='{"casks": [{"token": "%s", "installed_time": %s, "artifacts": '
+	[ -n "$FAKE_BREW_NO_FONTS" ] && font='{"zap": [], "home": "%s"}'
+	printf "$head[$font, {}]}]}" \
+		"$cask" "$stamp" "$HOME" ;;
+install) [ -n "$FAKE_BREW_FAIL" ] && exit 1
+	echo "$4" >>"$FAKE_BREW/installed"; date +%s%N >"$FAKE_BREW/time-$4"
+	touch "$HOME/Library/Fonts/Hack-Regular.ttf" ;;
+uninstall) grep -vx "$4" "$FAKE_BREW/installed" >"$FAKE_BREW/i.new"
+	mv "$FAKE_BREW/i.new" "$FAKE_BREW/installed"; rm -f "$HOME/Library/Fonts/Hack-Regular.ttf" ;;
+esac
+"""
+
+
+class FontsToolTest(unittest.TestCase):
+    """.tools/srcp_fonts.py with a temp HOME and DB, a brew stand-in on PATH (only there: the
+    tool looks nowhere else), and macOS's font lookups and iTerm2's settings faked."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="srcp-fonts-")
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.home = os.path.join(self.tmp, "home")
+        self.fonts_dir = os.path.join(self.home, "Library", "Fonts")
+        os.makedirs(self.fonts_dir)
+        self.brew_state = os.path.join(self.tmp, "brew")
+        bin_dir = os.path.join(self.tmp, "bin")
+        os.makedirs(self.brew_state)
+        os.makedirs(bin_dir)
+        with open(os.path.join(bin_dir, "brew"), "w") as f:
+            f.write(FAKE_BREW)
+        os.chmod(os.path.join(bin_dir, "brew"), 0o755)  # noqa: S103  (a temp stand-in we run)
+        env = {"HOME": self.home, "PATH": f"{bin_dir}:/usr/bin:/bin", "FAKE_BREW": self.brew_state}
+        patch = mock.patch.dict(os.environ, env)
+        patch.start()
+        self.addCleanup(patch.stop)
+        # Every seeded font "installed", then a DB built against them.
+        self.seeds = os.path.join(self.tmp, "seeds")
+        os.makedirs(self.seeds)
+        for files in srcp_schema.SEED_FONTS.values():
+            open(os.path.join(self.seeds, files[0]), "w").close()
+        self.db_path = os.path.join(self.tmp, "data", "schemes.db")
+        with (
+            mock.patch.object(srcp_build_scheme_db, "FONT_DIRS", [self.seeds]),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            srcp_build_scheme_db.write_db(self.db_path, [])
+        self.known = set()  # the PostScript names macOS "knows"
+        self.faces = [
+            ["Menlo-Regular", "Menlo", "/System/Library/Fonts/Menlo.ttc", 5, False],
+            ["Menlo-Bold", "Menlo", "/System/Library/Fonts/Menlo.ttc", 9, False],
+            ["CourierNewPSMT", "Courier New", "/System/Library/Fonts/Supplemental/Courier New.ttf",
+             5, False],
+            ["Odd-Regular", "Odd Mono", "/Library/Fonts/Odd.ttf", 5, False],
+            ["Hack-Regular", "Hack", os.path.join(self.fonts_dir, "Hack-Regular.ttf"), 5, False],
+        ]  # fmt: skip
+        hack = os.path.join(self.fonts_dir, "Hack-Regular.ttf")
+        self.file_faces = {hack: ["Hack-Regular", "HackSans-Regular"]}
+        for target, value in (
+            ("run_jxa", mock.DEFAULT),
+            ("RESOLVE_WAIT_S", 0),
+            ("profiles_using", mock.DEFAULT),
+        ):
+            p = mock.patch.object(srcp_fonts, target, value)
+            mocked = p.start()
+            self.addCleanup(p.stop)
+            if target == "run_jxa":
+                mocked.side_effect = self.fake_jxa
+            elif target == "profiles_using":
+                self.profiles = mocked
+                mocked.return_value = []
+
+    def fake_jxa(self, *args):
+        if args[0] == "resolve":
+            return next((n for n in args[1:] if n in self.known), "")
+        if args[0] == "faces":  # every face in those files, not only the fixed-width ones
+            return json.dumps([n for path in args[1:] for n in self.file_faces.get(path, [])])
+        return json.dumps(self.faces)
+
+    def run_tool(self, *args):
+        out = io.StringIO()
+        code = 0
+        with (
+            contextlib.redirect_stdout(out),
+            mock.patch.object(srcp_fonts, "FONT_DIRS", [self.seeds, *srcp_schema.FONT_DIRS[2:]]),
+        ):
+            try:
+                srcp_fonts.main([*args, "--db", self.db_path])
+            except SystemExit as e:
+                code = e.code
+        return code, out.getvalue()
+
+    def brew_log(self):
+        try:
+            with open(os.path.join(self.brew_state, "log")) as f:
+                return f.read().splitlines()
+        except FileNotFoundError:
+            return []
+
+    def installs(self):
+        return [c for c in self.brew_log() if " install " in f" {c} " or "uninstall" in c]
+
+    def db_exec(self, sql):
+        db = sqlite3.connect(self.db_path)
+        db.execute(sql)
+        db.commit()
+        db.close()
+
+    def row(self, name):
+        db = sqlite3.connect(self.db_path)
+        try:
+            return db.execute(
+                "SELECT enabled, missing, label FROM fonts WHERE name = ?", (name,)
+            ).fetchone()
+        finally:
+            db.close()
+
+    def record(self):
+        return srcp_schema.read_added_fonts()
+
+    def test_names_match_by_label_cask_slug_or_postscript_name(self):
+        queries = (
+            "JetBrains Mono",
+            "font-jetbrains-mono",
+            "jetbrains-mono",
+            "JetBrainsMono-Regular",
+        )
+        for query in queries:
+            self.assertEqual([f.label for f in srcp_fonts.find(query)], ["JetBrains Mono"], query)
+        self.assertEqual(srcp_fonts.find("nonsense"), [])
+        self.assertEqual(len(srcp_fonts.find("font-meslo-lg-nerd-font")), 6)  # "name one"
+        code, _ = self.run_tool("--add", "Fira Cod")
+        self.assertIn("Did you mean: Fira Code", str(code))
+
+    def test_catalog_has_every_seed_once_with_a_source(self):
+        fonts = srcp_fonts.catalog()
+        names = [n for f in fonts for n in f.names]
+        self.assertEqual(len(names), len(set(names)))
+        self.assertEqual(set(srcp_fonts.SEED_SOURCES), set(srcp_schema.SEED_FONTS))
+        for f in fonts:
+            self.assertIn(f.source, ("macOS", "Terminal.app", "Homebrew"), f.label)
+            self.assertEqual(bool(f.cask), f.source == "Homebrew", f.label)
+            if f.cask:
+                self.assertRegex(f.cask, r"^font-[a-z0-9-]+$")
+
+    def test_help_lists_every_font_on_the_page(self):
+        cards, _ = srcp_fonts.page_fonts(srcp_fonts.scan(), None, embed=False)
+        text = srcp_fonts.parser().format_help()
+        shown = [c["label"] for c in cards if not c["label"].startswith("MesloLG M / L")]
+        shown += re.findall(r"MesloLG\w+ Nerd Font Mono", " ".join(c["note"] for c in cards))
+        self.assertIn("MesloLGLDZ Nerd Font Mono", shown)
+        for label in shown:
+            self.assertIn(label, text)
+        self.assertNotIn("Odd Mono", [c["label"] for c in cards])  # only catalog fonts
+
+    def test_catalog_doc_matches_the_committed_one(self):
+        path = os.path.join(ROOT, "docs", "MONOSPACE-FONT-INVENTORY.md")
+        with open(path, encoding="utf-8") as f:
+            self.assertEqual(f.read(), srcp_fonts.catalog_doc(), "rerun --catalog > the doc")
+
+    def test_page_sections_and_add_commands(self):
+        table = {"Menlo-Regular": (1, None), "CascadiaCodeRoman-Regular": (1, None)}
+        cards, _ = srcp_fonts.page_fonts(srcp_fonts.scan(), table, False)
+        by = {c["label"]: c for c in cards}
+        self.assertEqual(by["Menlo"]["section"], "pool")
+        self.assertEqual(by["Menlo"]["add"], "")
+        self.assertEqual(by["Courier New"]["section"], "inst")
+        self.assertIn('--add "Courier New"', by["Courier New"]["add"])
+        self.assertEqual(by["Fira Code"]["section"], "miss")
+        self.assertTrue(by["Fira Code"]["web"] and by["Fira Code"]["add"])
+        self.assertEqual(by["Cascadia Code"]["section"], "pool")  # its second name is in the pool
+        self.assertEqual(by["SF Mono"]["section"], "miss")  # not on this "Mac", not Homebrew:
+        self.assertEqual(by["SF Mono"]["add"], "")  # no command that would fail
+
+    def test_page_with_the_pool_unknown_offers_no_commands(self):
+        cards, _ = srcp_fonts.page_fonts(srcp_fonts.scan(), None, False)
+        by = {c["label"]: c for c in cards}
+        self.assertEqual(by["Menlo"]["section"], "inst")
+        self.assertFalse(by["Menlo"]["pool_known"])
+        self.assertEqual([c["add"] for c in cards if c["add"]], [])
+
+    def test_page_embeds_small_regular_pool_fonts_only_and_escapes(self):
+        small = os.path.join(self.fonts_dir, "SF-Mono-Regular.otf")
+        with open(small, "wb") as f:
+            f.write(b"FONTBYTES")
+        big = os.path.join(self.fonts_dir, "Hack-Regular.ttf")
+        with open(big, "wb") as f:
+            f.truncate(srcp_fonts.EMBED_MAX + 1)
+        ttc = os.path.join(self.fonts_dir, "Iosevka.ttc")
+        open(ttc, "w").close()
+        evil = "SF Mono <!--EMBEDS--></script><img src=x onerror=alert(1)>"
+        self.faces[:0] = [
+            ["SFMono-Regular", evil, small, 5, False],
+            ["Iosevka-Term", "Iosevka Term", ttc, 5, False],
+        ]
+        table = {
+            n: (1, None)
+            for n in ("SFMono-Regular", "Menlo-Regular", "Hack-Regular", "Iosevka-Term")
+        }
+        cards, embeds = srcp_fonts.page_fonts(srcp_fonts.scan(), table, embed=True)
+        self.assertEqual([cards[i]["label"] for i in embeds], ["SF Mono"])  # not Menlo, big, .ttc
+        page = srcp_fonts.render_page(cards, embeds, "note")
+        self.assertIn(base64.b64encode(b"FONTBYTES").decode(), page)
+        self.assertNotIn("<img", page)
+        self.assertEqual(page.count('id="emb-'), 1)
+        self.assertEqual(srcp_fonts.page_fonts(srcp_fonts.scan(), table, embed=False)[1], {})
+
+    def test_page_refuses_to_embed_inside_any_clone_and_reports_db_problems(self):
+        clone = os.path.join(self.tmp, "clone")
+        os.makedirs(os.path.join(clone, ".git"))
+        os.makedirs(os.path.join(clone, ".tools"))
+        open(os.path.join(clone, ".tools", "srcp_build_scheme_db.py"), "w").close()
+        for out in (os.path.join(ROOT, "page.html"), os.path.join(clone, "sub", "page.html")):
+            code, _ = self.run_tool("--out", out, "--no-open")
+            self.assertIn("a clone of this project", str(code))
+            self.assertFalse(os.path.exists(out))
+        self.db_exec("PRAGMA user_version = 1")
+        out_path = os.path.join(self.tmp, "page.html")
+        code, out = self.run_tool("--out", out_path, "--no-open")
+        self.assertEqual(code, 0)
+        self.assertIn("The pool isn't shown", out)
+        self.assertIn("installed (pool unknown)", out)
+
+    def test_add_installs_records_with_the_time_then_adds_and_remove_undoes_it(self):
+        self.known = {"Hack-Regular"}
+        code, out = self.run_tool("--add", "Hack")
+        self.assertEqual(code, 0, out)
+        self.assertIn("brew install --cask -- font-hack", self.brew_log())
+        casks, files = self.record()
+        self.assertTrue(casks["font-hack"])  # Homebrew's install time
+        self.assertEqual(files["Hack-Regular"], [os.path.join(self.fonts_dir, "Hack-Regular.ttf")])
+        self.assertEqual(self.row("Hack-Regular"), (1, 0, "Hack"))
+        self.assertEqual(self.run_tool("--add", "Hack")[0], 0)  # again: still the tool's
+        self.assertIn("font-hack", self.record()[0])
+        code, out = self.run_tool("--remove", "Hack")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.row("Hack-Regular")[0], 0)
+        self.assertIn("brew uninstall --cask -- font-hack", self.brew_log())
+        self.assertEqual(self.record(), ({}, {}))
+
+    def test_a_cask_you_had_or_reinstalled_is_never_uninstalled(self):
+        with open(os.path.join(self.brew_state, "installed"), "w") as f:
+            f.write("font-hack\n")
+        with open(os.path.join(self.brew_state, "time-font-hack"), "w") as f:
+            f.write("1")
+        self.known = {"Hack-Regular"}
+        self.assertEqual(self.run_tool("--add", "Hack")[0], 0)
+        self.assertNotIn("font-hack", self.record()[0])  # yours: not recorded
+        _, out = self.run_tool("--remove", "Hack")
+        self.assertIn("this tool didn't install it", out)
+        os.makedirs(os.path.dirname(srcp_schema.added_fonts_path()), exist_ok=True)
+        with open(srcp_schema.added_fonts_path(), "w") as f:
+            f.write("cask font-hack 0\n")  # recorded, but installed again since (time 1)
+        _, out = self.run_tool("--remove", "Hack")
+        self.assertIn("reinstalled since", out)
+        self.assertFalse([c for c in self.brew_log() if "uninstall" in c])
+        self.assertEqual(self.record()[0], {})
+
+    def test_remove_keeps_a_cask_whose_fonts_are_in_use_or_unknown(self):
+        self.known = {"Hack-Regular"}
+        self.run_tool("--add", "Hack")
+        self.profiles.return_value = ["Work"]
+        _, out = self.run_tool("--remove", "Hack")
+        self.assertIn("Work", out)
+        self.assertIn("brew uninstall --cask font-hack", out)  # how, by hand
+        self.profiles.return_value = None
+        _, out = self.run_tool("--remove", "Hack")
+        self.assertIn("couldn't be read", out)
+        self.profiles.return_value = []
+        self.db_exec(
+            "INSERT INTO favorites (preset, font, size, stars, saved_at) "
+            "VALUES ('X', 'Hack-Regular', 13, 4, '2026-11-06')"
+        )
+        _, out = self.run_tool("--remove", "Hack")
+        self.assertIn("1 favorite(s)", out)
+        self.assertFalse([c for c in self.brew_log() if "uninstall" in c])
+        self.assertIn("font-hack", self.record()[0])
+
+    def test_add_checks_the_db_before_installing_anything(self):
+        self.db_exec("PRAGMA user_version = 1")
+        self.known = {"Hack-Regular"}
+        code, _ = self.run_tool("--add", "Hack")
+        self.assertIn("doesn't fit this version", str(code))
+        self.assertEqual(self.brew_log(), [])
+        os.remove(self.db_path)
+        code, _ = self.run_tool("--add", "Hack")
+        self.assertIn("No database", str(code))
+        self.assertEqual(self.brew_log(), [])
+
+    def test_add_refuses_a_name_macos_doesnt_know_but_keeps_the_record(self):
+        code, _ = self.run_tool("--add", "Hack")  # self.known is empty
+        self.assertIn("doesn't know a font named Hack-Regular", str(code))
+        self.assertIsNone(self.row("Hack-Regular"))
+        self.assertIn("font-hack", self.record()[0])  # installed: --remove can undo it
+
+    def test_remove_keeps_a_cask_when_a_face_of_it_is_used_or_unknown(self):
+        self.known = {"Hack-Regular"}
+        self.run_tool("--add", "Hack")
+        # A profile's non-ASCII font is a face from the cask that isn't fixed-width.
+        self.profiles.side_effect = lambda names: ["Work"] if "HackSans-Regular" in names else []
+        _, out = self.run_tool("--remove", "Hack")
+        self.assertIn("Work", out)
+        self.profiles.side_effect = None
+        self.profiles.return_value = []
+        self.file_faces.clear()  # macOS can't list the cask's fonts: keep it
+        _, out = self.run_tool("--remove", "Hack")
+        self.assertIn("couldn't list the fonts", out)
+        self.file_faces[os.path.join(self.fonts_dir, "Hack-Regular.ttf")] = ["Hack-Regular"]
+        self.db_exec("INSERT INTO fonts (name, label) VALUES ('HackSans-Regular', 'Hack Sans')")
+        self.file_faces[os.path.join(self.fonts_dir, "Hack-Regular.ttf")].append("HackSans-Regular")
+        _, out = self.run_tool("--remove", "Hack")
+        self.assertIn("still in the pool: HackSans-Regular", out)
+        self.db_exec("UPDATE fonts SET enabled = 0 WHERE name = 'HackSans-Regular'")
+        self.db_exec("UPDATE config SET value = 'HackSans-Regular' WHERE key = 'nonascii_font'")
+        _, out = self.run_tool("--remove", "Hack")
+        self.assertIn("icon font", out)
+        self.assertFalse([c for c in self.brew_log() if "uninstall" in c])
+
+    def test_remove_keeps_the_cask_when_the_font_list_fails(self):
+        self.known = {"Hack-Regular"}
+        self.run_tool("--add", "Hack")
+        jxa = self.fake_jxa
+
+        def failing(*args):
+            if args[0] == "faces":
+                raise subprocess.CalledProcessError(1, ["osascript"])
+            return jxa(*args)
+
+        with mock.patch.object(srcp_fonts, "run_jxa", side_effect=failing):
+            code, out = self.run_tool("--remove", "Hack")
+        self.assertIn(code, (0, None))
+        self.assertIn("list of its fonts couldn't be read", out)
+        self.assertFalse([c for c in self.brew_log() if "uninstall" in c])
+
+    def test_remove_keeps_a_cask_homebrew_lists_no_font_files_for(self):
+        self.known = {"Hack-Regular"}
+        self.run_tool("--add", "Hack")
+        with mock.patch.dict(os.environ, {"FAKE_BREW_NO_FONTS": "1"}):
+            _, out = self.run_tool("--remove", "Hack")
+        self.assertIn("lists no font files", out)
+        self.assertFalse([c for c in self.brew_log() if "uninstall" in c])
+
+    def test_a_failing_brew_info_after_install_keeps_the_cask_recorded(self):
+        self.known = {"Hack-Regular"}
+        with mock.patch.dict(os.environ, {"FAKE_BREW_INFO_FAIL": "1"}):
+            code, _ = self.run_tool("--add", "Hack")
+        self.assertIn("failed", str(code))
+        self.assertEqual(self.record()[0], {"font-hack": ""})
+        _, out = self.run_tool("--remove", "Hack")
+        self.assertIn("install time wasn't recorded", out)  # unknown: kept, never guessed
+        self.assertEqual(self.record()[0], {})
+
+    def test_page_and_db_problems_are_messages_not_tracebacks(self):
+        code, _ = self.run_tool("--out", os.path.join(self.tmp, "nope", "page.html"), "--no-open")
+        self.assertIn("folder doesn't exist", str(code))
+        with open(self.db_path, "wb") as f:
+            f.write(b"not a database at all, just bytes" * 100)
+        code, _ = self.run_tool("--add", "Monaco")
+        self.assertIn("couldn't be opened", str(code))
+
+    def test_a_failed_record_save_leaves_no_temp_file(self):
+        folder = os.path.dirname(srcp_schema.added_fonts_path())
+        with (
+            mock.patch.object(srcp_fonts.os, "replace", side_effect=OSError("disk full")),
+            self.assertRaises(OSError),
+            srcp_fonts.editing_record() as record,
+        ):
+            record.casks["font-x"] = "1"
+        self.assertEqual([n for n in os.listdir(folder) if n.startswith(".added-fonts-")], [])
+        self.assertEqual(self.record(), ({}, {}))
+
+    def test_add_reenables_a_font_you_turned_off_and_a_system_font_needs_no_brew(self):
+        self.db_exec("UPDATE fonts SET enabled = 0 WHERE name = 'Monaco'")
+        self.known = {"Monaco"}
+        code, out = self.run_tool("--add", "Monaco")
+        self.assertEqual(code, 0, out)
+        self.assertIn("back in the pool", out)
+        self.assertEqual(self.row("Monaco")[0], 1)
+        self.assertEqual(self.brew_log(), [])
+        self.assertEqual(self.record(), ({}, {}))  # seeds: the build handles them
+
+    def test_remove_turns_off_every_name_of_a_font(self):
+        self.db_exec(
+            "INSERT INTO fonts (name, label) VALUES "
+            "('CascadiaCode-Regular', 'Cascadia Code'), "
+            "('CascadiaCodeRoman-Regular', 'Cascadia Code')"
+        )
+        _, out = self.run_tool("--remove", "Cascadia Code")
+        self.assertIn("CascadiaCode-Regular, CascadiaCodeRoman-Regular", out)
+        self.assertEqual(
+            (self.row("CascadiaCode-Regular")[0], self.row("CascadiaCodeRoman-Regular")[0]), (0, 0)
+        )
+
+    def test_meslo_cask_is_never_recorded_or_uninstalled(self):
+        self.known = {"MesloLGMNFM-Regular"}
+        self.assertEqual(self.run_tool("--add", "MesloLGM Nerd Font Mono")[0], 0)
+        self.assertIn("brew install --cask -- font-meslo-lg-nerd-font", self.brew_log())
+        self.assertEqual(self.record()[0], {})
+        _, out = self.run_tool("--remove", "MesloLGM Nerd Font Mono")
+        self.assertIn("the icon font comes from it", out)
+        self.assertFalse([c for c in self.brew_log() if "uninstall" in c])
+
+    def test_record_survives_odd_spacing_and_a_concurrent_edit(self):
+        path = srcp_schema.added_fonts_path()
+        os.makedirs(os.path.dirname(path))
+        with open(path, "w") as f:
+            f.write("cask  font-a 12\nfile X-Regular  /p q/X.ttf\nbogus\n\ncask font-b\n")
+        self.assertEqual(
+            srcp_schema.read_added_fonts(),
+            ({"font-a": "12", "font-b": ""}, {"X-Regular": ["/p q/X.ttf"]}),
+        )
+        # Two runs at once: the second waits for the lock, then edits what the first saved.
+        done = threading.Event()
+
+        def other_run():
+            with srcp_fonts.editing_record() as record:
+                record.casks["font-c"] = "3"
+            done.set()
+
+        with srcp_fonts.editing_record() as record:
+            worker = threading.Thread(target=other_run)
+            worker.start()
+            self.assertFalse(done.wait(0.3))  # held off by the lock
+            record.casks.pop("font-a")
+        worker.join(10)
+        self.assertEqual(self.record()[0], {"font-b": "", "font-c": "3"})
+
+    def test_dryrun_changes_nothing_and_only_reads_brew(self):
+        self.known = {"Hack-Regular", "CourierNewPSMT"}
+        with open(self.db_path, "rb") as f:
+            db_bytes = f.read()
+
+        def state():
+            # The stand-in's log and folder, and the DB's folder and -wal/-shm files, which
+            # opening the DB touches; the DB's own bytes are compared below.
+            return {
+                k: v
+                for k, v in tree(self.tmp).items()
+                if not k.startswith(("brew", "data")) or k == os.path.join("data", "schemes.db")
+            }
+
+        before = state()
+        system = ["/System/Library/Fonts/Supplemental"]
+        for args in (("--add", "Hack"), ("--add", "Courier New"), ("--remove", "Menlo")):
+            with mock.patch.object(srcp_fonts, "FONT_DIRS", system):
+                code, out = self.run_tool(*args, "--dryrun")
+            self.assertIn(code, (0, None), out)
+            self.assertIn("[dryrun] would", out)
+        after = state()
+        before.pop(os.path.join("data", "schemes.db"), None)
+        after.pop(os.path.join("data", "schemes.db"), None)
+        self.assertEqual(after, before)
+        with open(self.db_path, "rb") as f:
+            self.assertEqual(f.read(), db_bytes)
+        self.assertTrue(self.brew_log())
+        for call in self.brew_log():
+            self.assertRegex(call, r"^brew (list|info) ")
+
+    def test_brew_missing_from_path_is_reported(self):
+        with mock.patch.dict(os.environ, {"PATH": "/usr/bin:/bin"}):
+            code, _ = self.run_tool("--add", "Hack")
+        self.assertIn("brew isn't on PATH", str(code))
 
 
 def tree(root):

@@ -70,7 +70,7 @@ For each new session, and at start for each open one with no look yet (buried on
 3. **Chooses a favorite or a discovery preset.** Chance of a favorite: `favorite_share × min(1, favorite presets in this mode / favorite_target)`. With defaults that is 5% per favorite preset, capped at 50% from 10 on. No favorites means discovery every time.
    - **Favorite:** weighted by stars per saved preset + font (a 5 ★ is picked 5× as often as a 1 ★; a preset saved with three fonts has three chances), in its saved font. If that font has since been disabled, a random one.
    - **Discovery:** a preset of this mode (with `fix_colors` off: only one that passes the readability checks) that isn't a favorite, and isn't among the last 20 discovery picks in this mode. Colored-background presets (yellow, pink, teal rather than white, grey or black) get 3× weight. They are rare, so this lifts them to roughly a fifth of light and a third of dark sessions. Random font.
-4. **Applies the preset and font** to this session only, at the profile's font size, with the preset's [color adjustments](#color-adjustments) (the Console line ends ", N colors adjusted", then how long coloring the tab took, e.g. "(84 ms)"). Also sets the non-ASCII font to MesloLGS Nerd Font (`nonascii_font`), so prompt icons (Powerlevel10k etc.) render with any font.
+4. **Applies the preset and font** to this session only, at the profile's font size, with the preset's [color adjustments](#color-adjustments) (the Console line ends ", N colors adjusted", then how long coloring the tab took, e.g. "(84 ms)"). Also sets the non-ASCII font to MesloLGS Nerd Font (`nonascii_font`), so Oh My Zsh prompt icons (Powerlevel10k and the like) render with any font.
 5. **Logs the launch**, and the close time when the session ends. Sessions open when iTerm2 quits get `end_reason = 'unknown'` at the next start. A look replaced by **Change to another profile** ends with `end_reason = 'changed'`.
 
 ### Light or dark
@@ -126,9 +126,9 @@ sqlite3 ~/.local/share/iterm2-color-schemes/schemes.db
 | `recent_window` | `20` | Discovery picks before a preset can repeat. |
 | `colorful_weight` | `3` | Discovery weight of colored-background presets (OKLab chroma ≥ 0.05). `1` = no preference. |
 | `fix_colors` | `1` | [Color adjustments](#color-adjustments). `0` (or `0.0`) turns them off; anything else, or no row, means on. Applies to new sessions without a rebuild. |
-| `nonascii_font` | `MesloLGSNFM-Regular` | Font for icons and other non-ASCII characters. `''` keeps the profile's setting. The default is skipped while its font file isn't installed; disabling it in `fonts` only keeps it out of the random main fonts. |
+| `nonascii_font` | `MesloLGSNFM-Regular` | Font for icons and other non-ASCII characters (`setup.sh` installs it with Homebrew because Oh My Zsh prompts need it). `''` keeps the profile's setting. The default is skipped while its font file isn't installed; disabling it in `fonts` only keeps it out of the random main fonts. |
 
-Default fonts: SF Mono, Menlo, Monaco, MesloLGS Nerd Font Mono. Fonts that aren't installed are disabled (`missing = 1`) until you install them and rebuild (`./setup.sh`, or `python3 .tools/srcp_build_scheme_db.py`). A font you disable yourself stays disabled. To keep a missing one off after you install it, also `set missing = 0`.
+Default fonts: SF Mono, SF Mono Terminal, Menlo, Monaco, PT Mono, Andale Mono (no bold face; iTerm2 draws a synthetic bold), MesloLGS Nerd Font Mono. To add or remove one, use the [fonts tool](#fonts-tool). Fonts that aren't installed are disabled (`missing = 1`) until you install them and rebuild (`./setup.sh`, or `python3 .tools/srcp_build_scheme_db.py`). A font you disable yourself stays disabled. To keep a missing one off after you install it, also `set missing = 0`.
 
 ```sql
 update config set value = '0.7' where key = 'favorite_share';
@@ -146,6 +146,24 @@ insert into overrides (name, include) values ('Zenburn', 1)
 insert into overrides (name, mode) values ('Some Scheme', 'dark')
   on conflict (name) do update set mode = excluded.mode;
 ```
+
+## Fonts tool
+
+`.tools/srcp_fonts.py` compares fonts and adds them to, or takes them out of, the pool. Safe while iTerm2 runs; it writes no iTerm2 settings. Homebrew fonts aren't installed by default; MesloLGS Nerd Font is the exception (`setup.sh`, for Oh My Zsh prompts).
+
+| Command | Does |
+|---|---|
+| `python3 .tools/srcp_fonts.py` | Writes `$TMPDIR/iterm2-font-inventory.html` and opens it: every font in the catalog ([MONOSPACE-FONT-INVENTORY.md](MONOSPACE-FONT-INVENTORY.md), the same fonts `--help` lists), each with pool, installed and source badges and a copyable `--add` command. Prints the same list. If the DB can't be read, the pool shows as unknown and no commands are offered. |
+| `… --add FONT` | Catalog fonts only (label, cask or PostScript name). Checks the DB first. A Homebrew font not installed: `brew install --cask -- CASK` with `HOMEBREW_NO_AUTO_UPDATE`, `_NO_INSTALL_UPGRADE`, `_NO_INSTALL_CLEANUP`. Then waits up to 5 s for macOS to know the PostScript name (nothing changes in the pool until it does), and sets the `fonts` row `enabled = 1, missing = 0`, also for a font you'd turned off. |
+| `… --remove FONT` | Sets every enabled row of the font's names to `enabled = 0` (favorites saved with it come up in another font). Then `brew uninstall --cask` only if this tool installed the cask, Homebrew's install time still matches the record, it isn't the MesloLGS cask, and nothing uses any face in its files (macOS lists them; not only fixed-width ones): no favorite, enabled `fonts` row, `nonascii_font` or iTerm2 profile (font or non-ASCII font). If any of that is true or can't be checked, the cask stays, and it says why and how to remove it by hand. |
+| `… --dryrun` | With `--add`/`--remove`: prints the brew command it would run and, for a font already installed, the SQL; changes nothing. `brew list`/`brew info` still run (they may reach the network). |
+| `… --catalog` | Prints `docs/MONOSPACE-FONT-INVENTORY.md` (a test holds the two equal). |
+| `--out PATH`, `--no-open`, `--db PATH` | Page path, don't open it, another DB. |
+| `--no-embed` | The page normally carries copies of your pool fonts that aren't under `/System` (regular face, `.ttf`/`.otf` up to 5 MB), since Safari won't draw fonts you installed yourself; some (SF Mono) are Apple's, so it refuses an `--out` inside any clone of this project unless `--no-embed`. |
+
+Record: `~/.local/share/iterm2-profile-manager/added-fonts.txt` (edited under `added-fonts.txt.lock`), `cask <token> <installed_time>` per cask the tool installed (Homebrew's time then; empty if `brew info` failed right after the install, and then `--remove` keeps the cask and forgets it; a cask you already had is never recorded) and `file <PostScript name> <path>` per font file it added. A rebuild treats those fonts like the defaults: off (`missing = 1`) while their files are gone, back on when they return. `uninstall.sh`, even `--all`, leaves the record and those fonts; `--remove` them first. The curation export doesn't carry them to another Mac.
+
+By hand, for a font not in the catalog: install it, find its PostScript name (Font Book → ⓘ), then `insert into fonts (name, label) values ('<PostScript name>', '<label>');`. The main script doesn't check the file of a font you add this way, so install it first.
 
 ## Backups
 
@@ -275,6 +293,8 @@ Double-clicking an `.itermcolors` file also imports it, with one dialog per file
 | `$SRC_DIR/iTerm2-Color-Schemes` (default `~/src`) | Schemes repo clone. |
 | `~/Library/Fonts` | Copied Terminal.app fonts. |
 | `~/.local/share/iterm2-profile-manager/installed.txt` | What `setup.sh` installed: `font <file>`, `fonthash <sha256> <file>` (the copy it installed) and `cask <name>` lines, so `uninstall.sh --fonts` removes only those, and only while unchanged. `setup.sh` updates a font only while it still has the recorded hash; any other copy is left alone (to get Terminal.app's copy, delete yours in Font Book and run `setup.sh` again; that is also the way out for a font recorded by 0.11.0, before hashes, that Terminal.app has since changed). The hash comes before the name, so names with spaces survive. An install from before 0.11.0, or one done by hand, has no record, and keeps its fonts on uninstall. |
+| `~/.local/share/iterm2-profile-manager/added-fonts.txt`, `added-fonts.txt.lock` | What the [fonts tool](#fonts-tool) added: `cask <token> <installed_time>` and `file <PostScript name> <path>` lines, and the lock it edits them under. `uninstall.sh` leaves them. |
+| `$TMPDIR/iterm2-font-inventory.html` | The fonts tool's comparison page (temporary; may carry copies of your fonts). |
 | `~/srcp-curation-<time>.sql`, `~/srcp-curation-<time>.db` | Written by `uninstall.sh --data`: the ratings export, and a copy of the whole database. |
 
 ### Repo files
@@ -293,10 +313,12 @@ Double-clicking an `.itermcolors` file also imports it, with one dialog per file
 | `.tools/srcp_favorites.py` | Ratings report (CLI) and `--show-again`; also used by the menu scripts. |
 | `.tools/srcp_odds.py` | Odds of the next session's look, as bar charts or JSON. |
 | `.tools/srcp_popup.js`, `.tools/srcp_popup.py` | The window for `srcp_ratings.py` and `srcp_never_show.py` (JXA `NSAlert`, optional dropdown), and the Python side that runs it. |
+| `.tools/srcp_fonts.py`, `.tools/srcp_fonts.js`, `.tools/srcp_fonts.html` | [Fonts tool](#fonts-tool): the comparison page, `--add`/`--remove`, the font catalog; macOS's font lookups (JXA); the page template. |
 | `.tools/srcp_export_curation.py` | Exports ratings and settings as SQL. |
 | `.tools/srcp_uninstall_prefs.py` | Removes the key binding and presets from iTerm2's settings (used by `uninstall.sh`). |
-| `.tools/srcp_schema.py`, `.tools/srcp_iterm_prefs.py`, `.tools/srcp_db_backup.py`, `.tools/srcp_preset_history.py` | Shared helpers: what the DB's readers and writers agree on (color hash, `fix_colors` rule, seeds), iTerm2 settings access, snapshots, past versions of the repo's presets. The main script imports the first three, so they're installed with it. |
+| `.tools/srcp_schema.py`, `.tools/srcp_iterm_prefs.py`, `.tools/srcp_db_backup.py`, `.tools/srcp_preset_history.py` | Shared helpers: what the DB's readers and writers agree on (color hash, `fix_colors` rule, seeds and their labels, the fonts tool's record), iTerm2 settings access, snapshots, past versions of the repo's presets. The main script imports the first three, so they're installed with it. |
 | `.tools/srcp_enable_claude_integration.py` | See [Claude Code integration](#claude-code-integration-optional). |
+| `docs/MONOSPACE-FONT-INVENTORY.md` | The font catalog, generated by `srcp_fonts.py --catalog`. |
 | `lint.sh`, `pyproject.toml`, `AutoLaunch/ruff.toml` | Lint and type checks. |
 
 ## Database

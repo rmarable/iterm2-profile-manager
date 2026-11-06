@@ -1,7 +1,7 @@
 #!/bin/bash
 # Set up iTerm2 color preset scripts on this Mac:
 #   1. install Terminal.app's bundled fonts (SF Mono, SF Mono Terminal)
-#   2. install MesloLGS Nerd Font with Homebrew, if brew exists
+#   2. install MesloLGS Nerd Font with Homebrew, if brew exists (Oh My Zsh prompts need it)
 #   3. clone (or update) iTerm2-Color-Schemes into $SRC_DIR (default ~/src)
 #   4. import every .itermcolors file as an iTerm2 color preset (no dialogs), updating
 #      ones the repo changed since, unless you edited them
@@ -148,6 +148,8 @@ else
 	echo "  (skipped: Terminal.app fonts not found)"
 fi
 
+# The icon font (nonascii_font): Oh My Zsh prompts need it. The only Homebrew font installed
+# by default; others are added with .tools/srcp_fonts.py --add.
 echo "==> MesloLGS Nerd Font"
 if [[ -e "$FONT_DIR/MesloLGSNerdFontMono-Regular.ttf" ]]; then
 	echo "  already installed"

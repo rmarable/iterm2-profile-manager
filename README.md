@@ -29,7 +29,7 @@ Agents run in long-lived sessions, and it's easy to lose track of which tab is w
 | macOS | Required. `setup.sh` exits on other systems. |
 | [iTerm2](https://iterm2.com) | Tested on 3.7.6. Install in `/Applications` or `~/Applications`, or set `ITERM_APP` to its path. |
 | Xcode Command Line Tools | `xcode-select --install`. Provides `git` and `/usr/bin/python3` (3.9+). |
-| [Homebrew](https://brew.sh) | Optional. Installs MesloLGS Nerd Font for prompt icons. |
+| [Homebrew](https://brew.sh) | Optional. Installs MesloLGS Nerd Font, which Oh My Zsh prompts need, and any [fonts you add](#adding-fonts). |
 
 No pip packages are needed. Setup needs network access to clone the schemes repo.
 
@@ -62,7 +62,7 @@ Setup changes iTerm2's settings, and iTerm2 overwrites them when it quits, so ru
 `setup.sh` is safe to re-run. It:
 
 1. Copies SF Mono and SF Mono Terminal from Terminal.app into `~/Library/Fonts`. A different copy you already have there is left alone (delete it in Font Book and re-run to get Terminal.app's).
-2. Installs MesloLGS Nerd Font via Homebrew, if installed.
+2. Installs MesloLGS Nerd Font via Homebrew, if installed, because Oh My Zsh prompts need it.
 3. Clones or updates iTerm2-Color-Schemes in `~/src/iTerm2-Color-Schemes` (set `SRC_DIR` to use another folder). A folder there that isn't a clone of that repo is used as it is, not updated.
 4. Imports its schemes as iTerm2 color presets, and updates ones the repo has changed since, unless you've edited them.
 5. Builds the database the main script picks from.
@@ -87,7 +87,21 @@ It backs up iTerm2's settings to `~/.local/share/iterm2-profile-manager/prefs-ba
 
 Changes apply to the next session you open. Sessions opened from a favorite profile keep that look.
 
-To change how often favorites come up, which fonts are used, or which schemes are allowed, see [Configuration](docs/REFERENCE.md#configuration).
+To change how often favorites come up or which schemes are allowed, see [Configuration](docs/REFERENCE.md#configuration). To add or remove fonts, see [Adding fonts](#adding-fonts).
+
+## Adding fonts
+
+New tabs get a random font from a pool of seven: SF Mono, SF Mono Terminal, Menlo, Monaco, PT Mono and Andale Mono, which come with macOS or Terminal.app, and MesloLGS Nerd Font Mono, which `setup.sh` installs with Homebrew, if you have it, because Oh My Zsh prompts need it.
+
+No other Homebrew fonts are installed by default. To add one, run this in the repo:
+
+```sh
+python3 .tools/srcp_fonts.py --add "JetBrains Mono"
+```
+
+It installs the font with Homebrew if you don't have it yet, then adds it to the pool. New tabs can use it right away. `--help` lists the fonts it knows; `--remove` takes one out again; `--dryrun` shows what either would do.
+
+To compare the fonts first, run `python3 .tools/srcp_fonts.py` on its own. It opens a page showing every fixed-width font on your Mac, and the ones you could add, side by side. The full list is in [docs/MONOSPACE-FONT-INVENTORY.md](docs/MONOSPACE-FONT-INVENTORY.md), and the details in [REFERENCE.md](docs/REFERENCE.md#fonts-tool).
 
 ## Update
 
@@ -135,7 +149,7 @@ Kept: this repo, iTerm2 settings backups, shell config, and the Claude Code inte
 | Console: `no dark presets to pick from; sessions left as is` (or `light`), or after **Change to another profile** / **Never show**, `nothing left to pick: ...` | Every preset of that mode is hidden or left out. Show some again with **Scripts → srcp_never_show.py**. |
 | Console: `the scheme DB is schema N, older than this version reads ...` | The scripts were updated but the database wasn't rebuilt. Run `python3 .tools/srcp_build_scheme_db.py`; new tabs are colored again right away, no restart needed. |
 | Console: `profile 'X' has "Use separate colors for light and dark mode" on ...` | That profile draws its own light and dark colors, so a preset wouldn't show; its tabs are left as is. To have them colored, turn the checkbox off in **Settings → Profiles → Colors** for that profile, then right-click > Change to another profile on tabs already open. Your favorites' profiles have it off already. |
-| Console: `MesloLGSNFM-Regular isn't installed; icon font left as is` | Prompt icons (Powerlevel10k and the like) need MesloLGS Nerd Font: `brew install --cask font-meslo-lg-nerd-font`, or turn the icon font off ([Configuration](docs/REFERENCE.md#configuration)). Tabs are colored either way. |
+| Console: `MesloLGSNFM-Regular isn't installed; icon font left as is` | Oh My Zsh prompt icons (Powerlevel10k and the like) need MesloLGS Nerd Font: `brew install --cask font-meslo-lg-nerd-font`, or turn the icon font off ([Configuration](docs/REFERENCE.md#configuration)). Tabs are colored either way. |
 | Console: `favorite profiles not updated (tried again every 10 minutes): ...` | Reading iTerm2's settings failed or took over 30 s, so **Profiles → Favorites** wasn't refreshed. Tabs are still colored. The profiles are checked every 30 seconds; a failed write is tried again when your favorites change, or after 10 minutes. |
 | Console: `coloring session ... took over 15 s and was given up; ...` | iTerm2 stopped answering while the tab was being colored (rare; a lost reply), or the database was busy. Other tabs carry on meanwhile. If the message says `nothing was changed`, the tab keeps its profile's look; if it says the tab `may show a new look that wasn't recorded`, re-roll it with right-click > Change to another profile. |
 | Console: `... is damaged (...); restore a snapshot: docs/REFERENCE.md, Restore` | The database file is damaged. Quit iTerm2 and restore a snapshot: [Restore](docs/REFERENCE.md#restore) has the commands. If the build refuses that snapshot too, try the next older one. |
@@ -145,7 +159,7 @@ Kept: this repo, iTerm2 settings backups, shell config, and the Claude Code inte
 | A preset looks a little different from its screenshots | Colors that were hard to see are adjusted. To see the originals, turn that off: [docs/REFERENCE.md](docs/REFERENCE.md#color-adjustments). |
 | Always light, or always dark | Settings → Appearance → Theme: **Regular**, **Minimal** or **Compact**, not Light, Dark or High Contrast. |
 | Console: `another copy is still running after 5 s; exiting` | A lock allows one copy, and a restart waits 5 s for the old one to exit. If new tabs stopped changing color, a copy from before is stuck: quit iTerm2, run `pkill -f srcp_set_random_color_profile` in Terminal.app, and relaunch. |
-| A font never appears | Disabled or not installed: `select name, enabled from fonts`. If you installed it after setup, run `python3 .tools/srcp_build_scheme_db.py`. No restart needed. |
+| A font never appears | Disabled or not installed: `select name, enabled from fonts`, or `python3 .tools/srcp_fonts.py`. If you installed it after setup, run `python3 .tools/srcp_build_scheme_db.py`. No restart needed. |
 | A favorite is missing from the Profiles menu | Preset not installed, or marked **Never show**. |
 | ⌃⌥⌘S does nothing | Check Settings → Keys → Key Bindings for `save_profile()`, and the Console for the main script's startup line. |
 | Console: `[warn] DB pick_look: database is locked` (or another name after `DB`), then `couldn't read the DB; session left as is` | A rebuild or open `sqlite3` transaction held the lock over 5 s. A session opened then keeps the profile's colors, or isn't logged; a rating made then shows a "didn't take" alert: rate again. |

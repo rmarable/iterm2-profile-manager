@@ -4,6 +4,8 @@ What changed for someone using iTerm2 Profile Manager, newest first. Releases up
 
 ## Unreleased
 
+- Three more fonts in the random pool: SF Mono Terminal, PT Mono and Andale Mono, which come with macOS or Terminal.app. They show up after the next `./setup.sh` or `python3 .tools/srcp_build_scheme_db.py`.
+- New `.tools/srcp_fonts.py`: opens a page comparing fixed-width fonts side by side; `--add "JetBrains Mono"` installs a Homebrew font and adds it to the pool, and `--remove` takes one out.
 - After a rebuild (`.tools/srcp_build_scheme_db.py`), text stays on its side of the background (lighter or darker) when that side nearly reaches the contrast target, instead of flipping: Hot Dog Stand keeps its white text on red. Monochrome presets whose six accent colors are all one color (HaX0R Blue, Gr33N and R3D, Pumpkin Spice, Retro) get distinct shades of it.
 - `uninstall.sh --data` no longer takes an empty (0-byte) database as the one to keep and then deletes every snapshot: it keeps the newest snapshot instead, and deletes nothing if the database is empty or missing but its `-wal` file holds data (and says so at the end, exiting with an error). When copying or exporting the database fails, it now says which step failed and what to do, and removes the half-written copy.
 - The daily snapshot skips a damaged database (one Console warning) instead of copying the damage into `backups/`, where it would push the good snapshots out over two weeks.

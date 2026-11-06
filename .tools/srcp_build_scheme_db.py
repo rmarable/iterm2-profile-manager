@@ -35,6 +35,7 @@ from srcp_schema import (  # shared with the main script and srcp_favorites.py
     FONT_DIRS,
     HASH_KEYS,
     SEED_CONFIG,
+    SEED_FONT_LABELS,
     SEED_FONTS,
     colors_hash,
     contrast_ratio,
@@ -43,6 +44,7 @@ from srcp_schema import (  # shared with the main script and srcp_favorites.py
     in_gamut,
     is_busy,
     linear,
+    read_added_fonts,
     relative_luminance,
     schema_problem,
     space_of,
@@ -107,13 +109,6 @@ SEED_INCLUDES = [
     "Aura",
     "Aura Dark",
 ]
-# PostScript name -> readable label, used in favorite profile names ("Kibble - Menlo").
-SEED_FONT_LABELS = {
-    "SFMono-Regular": "SF Mono",
-    "Menlo-Regular": "Menlo",
-    "Monaco": "Monaco",
-    "MesloLGSNFM-Regular": "MesloLGS Nerd Font Mono",
-}
 
 
 # What the build learns about each preset (color math: WCAG contrast, OKLab; the readability
@@ -685,6 +680,25 @@ def seed_every_build(db):
         "UPDATE fonts SET label = ? WHERE name = ? AND label IS NULL",
         [(label, n) for n, label in SEED_FONT_LABELS.items()],
     )
+    # Fonts added with .tools/srcp_fonts.py --add get the same rule as seeds, from the files
+    # its record lists; their rows are the tool's to create, so none is inserted here.
+    for name, paths in added_fonts().items():
+        if name in SEED_FONTS:
+            continue
+        if any(os.path.exists(p) for p in paths):
+            db.execute(
+                "UPDATE fonts SET enabled = 1, missing = 0 WHERE name = ? AND missing = 1", (name,)
+            )
+        else:
+            db.execute(
+                "UPDATE fonts SET enabled = 0, missing = 1 WHERE name = ? AND enabled = 1", (name,)
+            )
+            print(f"[warn] added font not installed: {name} (disabled until it is and you rebuild)")
+
+
+def added_fonts():
+    """{PostScript name: [file paths]} the fonts tool recorded (srcp_schema.read_added_fonts)."""
+    return read_added_fonts()[1]
 
 
 def write_db(path, rows):

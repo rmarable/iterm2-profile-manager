@@ -54,9 +54,22 @@ NUMERIC_CONFIG = ("favorite_share", "favorite_target", "recent_window", "colorfu
 # PostScript name -> font file names (any one present counts as installed).
 SEED_FONTS = {
     "SFMono-Regular": ["SF-Mono-Regular.otf"],
+    "SFMonoTerminal-Regular": ["SFMono-Terminal.ttf"],
     "Menlo-Regular": ["Menlo.ttc"],
     "Monaco": ["Monaco.ttf"],
+    "PTMono-Regular": ["PTMono.ttc"],
+    "AndaleMono": ["Andale Mono.ttf"],
     "MesloLGSNFM-Regular": ["MesloLGSNerdFontMono-Regular.ttf"],
+}
+# PostScript name -> readable label, used in favorite profile names ("Kibble - Menlo").
+SEED_FONT_LABELS = {
+    "SFMono-Regular": "SF Mono",
+    "SFMonoTerminal-Regular": "SF Mono Terminal",
+    "Menlo-Regular": "Menlo",
+    "Monaco": "Monaco",
+    "PTMono-Regular": "PT Mono",
+    "AndaleMono": "Andale Mono",
+    "MesloLGSNFM-Regular": "MesloLGS Nerd Font Mono",
 }
 FONT_DIRS = [
     "~/Library/Fonts",
@@ -64,6 +77,31 @@ FONT_DIRS = [
     "/System/Library/Fonts",
     "/System/Library/Fonts/Supplemental",
 ]
+
+
+def added_fonts_path():
+    """The fonts tool's record of the fonts it added (format: docs/REFERENCE.md, Fonts tool).
+    Read at call time, so a test's HOME applies."""
+    return os.path.expanduser("~/.local/share/iterm2-profile-manager/added-fonts.txt")
+
+
+def read_added_fonts(path=None):
+    """(casks, files) from the fonts tool's record: {cask: Homebrew's installed_time when the
+    tool installed it ('' if unknown)}, and {PostScript name: [font file paths]} for every font
+    it added. Empty if there's no record; lines it can't read are skipped."""
+    casks, files = {}, {}
+    try:
+        with open(path or added_fonts_path(), encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except FileNotFoundError:
+        return casks, files
+    for line in lines:
+        parts = line.split(None, 2)
+        if len(parts) >= 2 and parts[0] == "cask":
+            casks[parts[1]] = parts[2].strip() if len(parts) == 3 else ""
+        elif len(parts) == 3 and parts[0] == "file":
+            files.setdefault(parts[1], []).append(parts[2])  # the path last: spaces survive
+    return casks, files
 
 
 def default_font_label(font):
