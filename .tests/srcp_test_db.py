@@ -2078,6 +2078,28 @@ class ColorFixTest(DbTest):
         ),
     }
 
+    # Untagged or Calibrated, these needed a second build before fix_colors() repeated its pass
+    # and MIN_GAIN was judged from the start (synthetic, 2026-11-06): stored to 6 decimals near
+    # white or black, a color had room for one more small move. Not GENERIC_CASES: the
+    # near-white ANSI 3 stays short of its target.
+    ROUNDING_CASES: ClassVar[dict[str, dict]] = {
+        "near-white ANSI 3": with_colors(
+            DARK,
+            Background_Color=(0.992515, 0.466548, 0.629528),
+            Ansi_3_Color=(0.155948, 0.826778, 0.997137),
+        ),
+        "near-black text on red": with_colors(
+            DARK,
+            Background_Color=(0.842528, 0.028086, 0.024911),
+            Foreground_Color=(0.009493, 0.026951, 0.977206),
+        ),
+        "near-black text on violet": with_colors(
+            DARK,
+            Background_Color=(0.5238, 0.008054, 0.997285),
+            Foreground_Color=(0.011674, 0.004513, 0.995881),
+        ),
+    }
+
     @staticmethod
     def as_space(colors, space):
         """The same numbers, tagged Calibrated (space "Calibrated") or untagged (None)."""
@@ -2231,7 +2253,7 @@ class ColorFixTest(DbTest):
         self.assertEqual({r.name: r.duplicate_of for r in rows}, {"Plain": None, "Untagged": None})
 
     def test_fixing_twice_changes_nothing(self):
-        cases = {**self.CASES, **self.GENERIC_CASES}
+        cases = {**self.CASES, **self.GENERIC_CASES, **self.ROUNDING_CASES}
         for name, colors in cases.items():
             for space in ("sRGB", None, "Calibrated"):  # as tagged, untagged, Calibrated
                 with self.subTest(name, space=space):
@@ -2239,6 +2261,35 @@ class ColorFixTest(DbTest):
                     after = build.apply_fixes(colors_in, build.fix_colors(colors_in))
                     self.assertEqual(build.fix_colors(after), {})  # 6-decimal rounding and all
         self.assertEqual(build.fix_colors(LIGHT), {})  # already readable
+
+    def test_fixes_repeat_their_pass_until_it_settles(self):
+        for name, colors in self.ROUNDING_CASES.items():
+            for space in (None, "Calibrated"):
+                with self.subTest(name, space=space):
+                    colors_in = self.as_space(colors, space)
+                    fixes, settled = build.settled_fixes(colors_in)
+                    self.assertTrue(settled)
+                    after = build.apply_fixes(colors_in, fixes)
+                    self.assertEqual(build.fix_pass(after), {})  # the last pass's colors
+                    bg = build.rgb(colors_in["Background Color"])
+                    for key, (*_, before, _after) in fixes.items():  # before: the original's
+                        shown = build.contrast_ratio(build.rgb(colors_in[key]), bg)
+                        self.assertEqual(before, round(shown, 2), key)
+        # A palette still changing after FIX_PASSES is kept, and the build names it.
+        colors = self.as_space(self.ROUNDING_CASES["near-white ANSI 3"], None)
+        with mock.patch.object(build, "FIX_PASSES", 1):
+            fixes, settled = build.settled_fixes(colors)
+            _, report = build.build_rows({"Unsettled": colors, "Plain": DARK}, self.repo)
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                build.print_report([], report)
+        self.assertFalse(settled)
+        self.assertIn("Ansi 3 Color", fixes)
+        self.assertEqual(report["unsettled"], ["Unsettled"])
+        self.assertIn(
+            "[warn] unsettled 'Unsettled': color adjustments still changing after 1 passes "
+            "(kept the last)\n",
+            out.getvalue(),
+        )
 
     def test_look_alike_accents_are_moved_apart_or_left_alone(self):
         colors = self.CASES["look-alike accents"]
@@ -2302,9 +2353,8 @@ class ColorFixTest(DbTest):
             self.assertGreaterEqual(after, build.MIN_TEXT_CONTRAST, fg)
 
     def test_text_short_of_its_target_ends_at_white_or_black_once(self):
-        # On the slack path text can't reach 4.5 and takes the best point on the way. That
-        # ends on (or within MIN_GAIN of) white or black, so a second build finds nothing
-        # further (it used to stop a step short, and the next build took that step).
+        # On the slack path text can't reach 4.5 and takes the best point on the way: white or
+        # black (within sRGB's 4-decimal rounding), so a second build finds nothing further.
         cases = {
             "white": ((0.355, 0.5132, 0.1856), (0.0589, 0.5542, 0.557), (1, 1, 1)),
             "black": ((0.5968, 0.4144, 0.2733), (0.0196, 0.1222, 0.284), (0, 0, 0)),
@@ -2314,21 +2364,22 @@ class ColorFixTest(DbTest):
                 colors = with_colors(DARK, Background_Color=bg, Foreground_Color=fg)
                 fixes = build.fix_colors(colors)
                 for got, want in zip(fixes["Foreground Color"][:3], end, strict=True):
-                    self.assertAlmostEqual(got, want, delta=0.001)  # MIN_GAIN: close enough
+                    self.assertAlmostEqual(got, want, delta=0.0001)
                 self.assertEqual(build.fix_colors(build.apply_fixes(colors, fixes)), {})
-        # Stopping just short of black (0, 0, 0.0001), a second build would take the last
-        # invisible gain to black, but for MIN_GAIN.
+        # Near-black text ends on black itself: MIN_GAIN is judged from where the color started,
+        # not from step to step (that stopped at (0, 0, 0.0009), and a second build moved on).
         colors = with_colors(
-            DARK,
-            Background_Color=(0.3901, 0.4631, 0.3989),
-            Foreground_Color=(0.5531, 0.213, 0.8002),
+            DARK, Background_Color=(0.3901, 0.4631, 0.3989), Foreground_Color=(0, 0, 0.004)
         )
-        for gain, fixed_point in ((build.MIN_GAIN, True), (0.0, False)):
+        self.assertEqual(build.fix_colors(colors)["Foreground Color"][:3], (0.0, 0.0, 0.0))
+        # Text a hair from black (0.00024 short of black's contrast) is left alone: MIN_GAIN
+        # keeps out gains too small to see.
+        colors = with_colors(
+            DARK, Background_Color=(0.3901, 0.4631, 0.3989), Foreground_Color=(0, 0, 0.0005)
+        )
+        for gain, moved in ((build.MIN_GAIN, False), (0.0, True)):
             with mock.patch.object(build, "MIN_GAIN", gain):
-                fixes = build.fix_colors(colors)
-                again = build.fix_colors(build.apply_fixes(colors, fixes))
-            self.assertIn("Foreground Color", fixes)
-            self.assertEqual(again == {}, fixed_point, gain)
+                self.assertEqual("Foreground Color" in build.fix_colors(colors), moved, gain)
 
     def test_six_identical_accents_get_shades_of_their_hue(self):
         # As in Retro (one green) and Pumpkin Spice (near-greys, on orange): monochrome, so

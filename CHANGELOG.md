@@ -2,6 +2,10 @@
 
 What changed for someone using iTerm2 Profile Manager, newest first. Releases up to v0.7.1 are described on [GitHub releases](https://github.com/rmarable/iterm2-profile-manager/releases).
 
+## Unreleased
+
+- Color adjustments that end near black or white are now final after one rebuild; before, a rare one moved a hair further on the next. If a preset's adjustments ever still change, the build prints a `[warn] unsettled` line naming it.
+
 ## v0.14.4 (2026-11-06)
 
 - Three more fonts in the random pool: SF Mono Terminal, PT Mono and Andale Mono, which come with macOS or Terminal.app. They show up after the next `./setup.sh` or `python3 .tools/srcp_build_scheme_db.py`.

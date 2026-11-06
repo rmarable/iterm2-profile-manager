@@ -88,11 +88,14 @@ GAMUT_EPS = 1e-6
 # A color this close below its contrast target counts as reaching it: a P3 or Generic RGB
 # color stored to 6 decimals can show a hair under the sRGB value it was moved to.
 CONTRAST_EPS = 1e-4
-# A color that can't reach its target takes the best point on the way only if it beats the
-# one before by this much: smaller gains are invisible, and a second build could find them
-# again by rounding (a Generic RGB near-black lands 1.3e-4 short of black), which would break
-# the fixed point.
+# A color that can't reach its target takes the best point on the way only if that beats the
+# color as it was by this much: smaller gains are invisible.
 MIN_GAIN = 1e-3
+# settled_fixes() repeats fix_pass() until a pass changes nothing: a color stored rounded (6
+# decimals in P3 or Generic RGB, 4 in sRGB) can leave room for one more small move. 2 passes
+# were the most seen (synthetic near-black and near-white palettes, 2026-11-06). Past this
+# many the build warns and keeps the last result.
+FIX_PASSES = 3
 # Text stays on its side of the background (lighter or darker) when that side gets within this
 # much of its target: white text on red stays white at 4.2 rather than turn black at 4.5.
 TEXT_SIDE_SLACK = 0.5
@@ -237,9 +240,8 @@ def move_to_contrast(c, bg, target, floor, space="srgb", *, slack=0.0):  # noqa:
     highest target; with slack, c may stay short of it on its own side). Text below
     NO_SIDE_CONTRAST with bg has no side, so gets no slack. Chroma drops only as far as needed
     to stay in gamut, never below floor. The last step lands on the end itself (L 0 or 1).
-    Returns the first point that reaches the target, else the last point that beat the one
-    kept before it by more than MIN_GAIN (so up to MIN_GAIN short of the best, and a second
-    pass from it finds nothing further), or None if nothing beat c.
+    Returns the first point that reaches the target, else the best point on the way if it
+    beat c by more than MIN_GAIN, else None.
     """
     lightness, a, b = oklab(c)
     chroma, hue = math.hypot(a, b), math.atan2(b, a)
@@ -251,7 +253,8 @@ def move_to_contrast(c, bg, target, floor, space="srgb", *, slack=0.0):  # noqa:
         direction = 1 if lighter else -1
     else:
         direction = -1 if lighter else 1
-    best, best_contrast = None, contrast_ratio(c, bg)
+    start = contrast_ratio(c, bg)
+    best, best_contrast = None, start
     for step in range(1, FIX_MAX_STEPS + 1):
         lt = lightness + direction * step * FIX_STEP
         last = not 0.0 < lt < 1.0
@@ -261,7 +264,7 @@ def move_to_contrast(c, bg, target, floor, space="srgb", *, slack=0.0):  # noqa:
         contrast = contrast_ratio(rgb_, bg)
         if contrast >= target:
             return rgb_
-        if contrast > best_contrast + MIN_GAIN:
+        if contrast > best_contrast and contrast > start + MIN_GAIN:
             best, best_contrast = rgb_, contrast
         if last:
             break
@@ -377,8 +380,44 @@ def separate_accents(palette, bg, spaces):
 def fix_colors(colors):
     """{key: (r, g, b, contrast before, contrast after)} for the colors to adjust; {} if none.
 
-    A fixed point: fix_colors() of a palette with these applied returns {}.
+    A fixed point once settled: fix_colors() of a palette with these applied returns {}.
     """
+    return settled_fixes(colors)[0]
+
+
+def settled_fixes(colors):
+    """(fix_colors() result, whether a pass changed nothing within FIX_PASSES passes).
+
+    Each pass is fix_pass() of the palette with the earlier passes applied, so a later pass
+    judges the bright-vs-normal check against the pass before it, not the original.
+    """
+    current = colors
+    for _ in range(FIX_PASSES):
+        moved = fix_pass(current)
+        if not moved:
+            return final_fixes(colors, current), True
+        current = apply_fixes(current, moved)
+    return final_fixes(colors, current), not fix_pass(current)
+
+
+def final_fixes(colors, current):
+    """{key: (r, g, b, contrast before, contrast after)} for the colors whose stored components
+    differ in current: before is the original's, after the current one's as shown."""
+    bg = rgb(colors["Background Color"])
+    out = {}
+    for k in FIX_TARGETS:
+        keep = tuple(current[k][c] for c in COMPONENTS)
+        if keep != tuple(colors[k][c] for c in COMPONENTS):
+            out[k] = (
+                *keep,
+                round(contrast_ratio(rgb(colors[k]), bg), 2),
+                round(contrast_ratio(rgb(current[k]), bg), 2),
+            )
+    return out
+
+
+def fix_pass(colors):
+    """{key: stored components} for the colors one pass moves, from colors as given."""
     bg = rgb(colors["Background Color"])
     palette = {k: rgb(colors[k]) for k in FIX_TARGETS}
     shown_before = dict(palette)  # converted once: rgb() of a P3 or Generic RGB color isn't free
@@ -406,18 +445,7 @@ def fix_colors(colors):
     if distinct < MIN_DISTINCT_ACCENTS and (distinct == 1 or not is_monochrome(labs)):
         start = spread_identical(palette, bg, spaces) if distinct == 1 else palette
         palette = separate_accents(start, bg, spaces) or palette  # best effort: keep fixes
-    out = {}
-    for k, v in palette.items():
-        before = shown_before[k]
-        if v != before:
-            keep = stored(colors[k], v)
-            shown = rgb({**colors[k], **dict(zip(COMPONENTS, keep))})  # as it will look
-            out[k] = (
-                *keep,
-                round(contrast_ratio(before, bg), 2),
-                round(contrast_ratio(shown, bg), 2),
-            )
-    return out
+    return {k: stored(colors[k], v) for k, v in palette.items() if v != shown_before[k]}
 
 
 def fixes_json(fixes):
@@ -745,12 +773,15 @@ def build_rows(presets, repo):
         print(f"[warn] no schemes in {repo}: yaml labels and repo duplicates not used")
     variants = yaml_variants(repo)
 
-    info, skipped, repo_hashes = {}, [], {}
+    info, skipped, unsettled, repo_hashes = {}, [], [], {}
     for name in sorted(presets):
         if not has_colors(presets[name]):
             skipped.append(name)
             continue
-        info[name] = classify(presets[name]), color_hash(presets[name]), fix_colors(presets[name])
+        fixes, settled = settled_fixes(presets[name])
+        if not settled:
+            unsettled.append(name)
+        info[name] = classify(presets[name]), color_hash(presets[name]), fixes
         if name in repo_names:
             repo_hashes.setdefault(info[name][1], name)
 
@@ -788,7 +819,8 @@ def build_rows(presets, repo):
                 int(fixed["text_ok"] and fixed["accent_ok"] and fixed["distinct_ok"]),
             )
         )
-    return rows, {"disagree": disagree, "fails": fails, "skipped": skipped}
+    report = {"disagree": disagree, "fails": fails, "skipped": skipped, "unsettled": unsettled}
+    return rows, report
 
 
 def print_report(rows, report):
@@ -825,6 +857,11 @@ def print_report(rows, report):
     )
     for name in report["skipped"]:
         print(f"[warn] skipped {name!r}: missing ANSI/fg/bg colors")
+    for name in report["unsettled"]:
+        print(
+            f"[warn] unsettled {name!r}: color adjustments still changing after {FIX_PASSES} "
+            "passes (kept the last)"
+        )
     for font, files in SEED_FONTS.items():
         if not font_installed(files):
             print(f"[warn] font not installed: {font} (disabled until it is and you rebuild)")
