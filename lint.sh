@@ -10,6 +10,7 @@ RUFF="ruff@0.16.9"
 PYRIGHT="pyright@1.1.414"
 # The iterm2 module's type hints come from iTerm2's own Python runtime.
 ITERM_PY="$HOME/.config/iterm2/AppSupport/uv/venvs/3.12/bin/python"
+TEST_LIMIT_S=120
 
 FIX=false
 ALLOW_SKIP=false
@@ -59,30 +60,51 @@ shellcheck setup.sh uninstall.sh lint.sh || status=1
 # Database-layer tests, against a temp folder (never the real DB or iTerm2's settings).
 echo "==> tests"
 if [[ -x "$ITERM_PY" ]]; then
-	# -W: the iterm2 module imports websockets.legacy, which warns on every run.
-	"$ITERM_PY" -W "ignore:websockets.legacy is deprecated:DeprecationWarning" \
-		-m unittest discover -s .tests -p 'srcp_test_*.py' || status=1
+	# -W: the iterm2 module imports websockets.legacy, which warns on every run. A hung test
+	# fails the run after TEST_LIMIT_S (stock macOS has no timeout command; perl's alarm
+	# kills Python with SIGALRM, exit 142, but not processes it started). The suite takes
+	# about 20 s.
+	rc=0
+	perl -e 'alarm shift; exec @ARGV or die "exec: $!\n"' "$TEST_LIMIT_S" \
+		"$ITERM_PY" -W "ignore:websockets.legacy is deprecated:DeprecationWarning" \
+		-m unittest discover -s .tests -p 'srcp_test_*.py' || rc=$?
+	if ((rc == 142)); then
+		echo "  tests stopped after $TEST_LIMIT_S s: one hangs"
+		status=1
+	elif ((rc != 0)); then
+		status=1
+	fi
 else
 	echo "  (skipped: iTerm2's Python runtime not found at $ITERM_PY)"
 	skipped=1
 fi
 # CLAUDE.md: VERSION is bumped on every change to the main script, so the Console shows
-# which code runs. Checked against the last commit and the last release tag.
+# which code runs. Checked against the last commit, the last release tag and the commit
+# that set the current VERSION (which catches a second commit after a bumped one).
 echo "==> VERSION bumped"
 main=AutoLaunch/srcp_set_random_color_profile.py
 if [[ ! -f "$main" ]]; then
 	echo "  (skipped: $main not there; parked as .py.disabled?)"
 elif git rev-parse --git-dir >/dev/null 2>&1; then
-	now="$(grep -m1 '^VERSION = ' "$main" || echo "(no VERSION line)")"
-	for base in HEAD "$(git describe --tags --abbrev=0 2>/dev/null || true)"; do
-		if [[ -z "$base" ]] || ! git cat-file -e "$base:$main" 2>/dev/null; then continue; fi
-		if ! git diff --quiet "$base" -- "$main" &&
-			[[ "$(git show "$base:$main" | grep -m1 '^VERSION = ')" == "$now" ]]; then
-			echo "  $main changed since $base, but VERSION didn't: bump it"
-			status=1
-			break
-		fi
-	done
+	# The version alone: a commit that only edits the line's comment didn't bump it.
+	version_of() { grep -m1 -o '^VERSION = "[^"]*"' || true; }
+	ver="$(version_of <"$main")"
+	if [[ -z "$ver" ]]; then
+		echo "  no VERSION line in $main"
+		status=1
+	else
+		# "|| true": a repo with no commits yet has nothing to compare with.
+		bumped="$(git log -1 --format=%h -S"$ver" -- "$main" 2>/dev/null || true)"
+		for base in HEAD "$(git describe --tags --abbrev=0 2>/dev/null || true)" "$bumped"; do
+			if [[ -z "$base" ]] || ! git cat-file -e "$base:$main" 2>/dev/null; then continue; fi
+			if ! git diff --quiet "$base" -- "$main" &&
+				[[ "$(git show "$base:$main" | version_of)" == "$ver" ]]; then
+				echo "  $main changed since $base, but VERSION didn't: bump it"
+				status=1
+				break
+			fi
+		done
+	fi
 else
 	echo "  (skipped: not a git checkout)"
 fi

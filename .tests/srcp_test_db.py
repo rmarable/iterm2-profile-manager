@@ -175,10 +175,13 @@ class DbTest(unittest.TestCase):
         patch.start()
         self.addCleanup(patch.stop)
 
-    def run_quietly(self, coro):
+    def run_quietly(self, coro, limit_s=10):
+        """Run coro and return what it printed. One stuck on an await after limit_s fails its
+        test (TimeoutError); one stuck in a worker thread (Store.call) can't be cancelled, and
+        is caught by lint.sh's 120 s limit instead."""
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            asyncio.run(coro)
+            asyncio.run(asyncio.wait_for(coro, limit_s))
         return out.getvalue()
 
     def record(self, *values):
@@ -507,6 +510,59 @@ class DamagedDbTest(DbTest):
                 self.assertFalse(os.path.exists(os.path.join(os.path.dirname(path), "backups")))
 
 
+class GateTest(unittest.TestCase):
+    """The readability gate at its thresholds: each preset sits just on one side of one."""
+
+    BLACK = (0.0, 0.0, 0.0)
+    LIGHT_TEXT = (0.9, 0.9, 0.9)
+    # Against black: four accents at contrast 6-16, two at 1.5-1.8.
+    READABLE = ((1, 0.3, 0.3), (0.2, 0.9, 0.2), (0.9, 0.9, 0.2), (0.4, 0.5, 1.0))
+    DIM = ((0.4, 0, 0.4), (0, 0.2, 0.2))
+
+    def gate(self, name, fg, accents):
+        """passes_gate, and the failing checks, for one preset on black (no fixes looked at)."""
+        colors = preset(self.BLACK, fg, accents)
+        with tempfile.TemporaryDirectory() as repo, contextlib.redirect_stdout(io.StringIO()):
+            (row,), _ = build.build_rows({name: colors}, repo)
+        c = build.classify(colors)
+        return row.passes_gate, {k for k in ("text", "accent", "distinct") if not c[f"{k}_ok"]}
+
+    @staticmethod
+    def grey(contrast):
+        """The sRGB grey with this contrast on black."""
+        return 1.055 * (0.05 * contrast - 0.05) ** (1 / 2.4) - 0.055
+
+    def test_text_contrast_just_under_the_minimum_fails_and_just_over_passes(self):
+        self.assertEqual(build.MIN_TEXT_CONTRAST, 4.5)  # WCAG AA; the greys below follow it
+        for offset, passes in ((-0.1, 0), (0.1, 1)):
+            with self.subTest(offset=offset):
+                grey = self.grey(build.MIN_TEXT_CONTRAST + offset)
+                fg = (grey, grey, grey)
+                got = self.gate("Text", fg, self.READABLE + self.DIM)
+                self.assertEqual(got, (passes, set() if passes else {"text"}))
+
+    def test_four_readable_accents_pass_and_three_fail(self):
+        self.assertEqual(self.gate("Four", self.LIGHT_TEXT, self.READABLE + self.DIM), (1, set()))
+        three = [*self.READABLE[:3], (0, 0, 0.45), *self.DIM]  # the 4th highest is 1.76
+        self.assertEqual(self.gate("Three", self.LIGHT_TEXT, three), (0, {"accent"}))
+
+    def test_six_accents_in_two_look_alike_groups_fail(self):
+        reds = [(1, 0.3, 0.3), (1, 0.31, 0.3), (1, 0.3, 0.31)]
+        greens = [(0.2, 0.9, 0.2), (0.21, 0.9, 0.2), (0.2, 0.9, 0.21)]
+        self.assertEqual(self.gate("Pairs", self.LIGHT_TEXT, reds + greens), (0, {"distinct"}))
+
+    def test_weak_accents_pass_only_in_a_monochrome_theme(self):
+        # Greens spanning 29 degrees of hue (under MONO_ARC_DEG), most below contrast 2: only
+        # the accent check's monochrome exemption is at stake (they're 5 distinct anyway).
+        greens = [(0, 0.2, 0), (0.1, 0.25, 0), (0, 0.3, 0.03)]
+        greens += [(0.22, 0.24, 0), (0, 0.15, 0), (0.05, 0.3, 0.05)]
+        self.assertEqual(self.gate("Mono", self.LIGHT_TEXT, greens), (1, set()))
+        # Reds to yellow-greens spanning 82 degrees: not monochrome, so the checks apply.
+        warm = [(0.35, 0, 0), (0.3, 0.1, 0), (0.25, 0.2, 0)]
+        warm += [(0.35, 0.02, 0.02), (0.3, 0.15, 0), (0.2, 0.2, 0)]
+        self.assertEqual(self.gate("Warm", self.LIGHT_TEXT, warm), (0, {"accent", "distinct"}))
+
+
 class RepoModeTest(DbTest):
     def test_the_repos_yaml_variant_decides_the_mode(self):
         self.assertEqual(self.scheme("Dark One")[0], "dark")  # by luminance
@@ -659,8 +715,9 @@ class MigrationTest(DbTest):
 
 
 class OldSchemaTest(DbTest):
-    """Store._connect's checks: an older or newer schema, a damaged file, a busy DB. Each gets
-    one message saying what to do, then it just works once that's done."""
+    """Store._connect's checks: an older or newer schema, a damaged file and a busy DB each get
+    one message saying what to do, then it just works once that's done; a file replaced under
+    an open Store is reopened."""
 
     def make_old(self):
         """This DB as the build before the newest step left it (only the version is behind:
@@ -728,6 +785,35 @@ class OldSchemaTest(DbTest):
 
         store.db = Failing(store.db)
         return store
+
+    def test_a_db_restored_under_an_open_store_is_read_from_the_restored_file(self):
+        store, read_config = self.main["Store"](self.db_path), self.main["read_config"]
+        window = {}
+
+        async def read():
+            window["now"] = (await store.call(read_config))["recent_window"]
+
+        self.run_quietly(read())
+        self.assertNotEqual(window["now"], 7)
+        self.db.execute("INSERT INTO config VALUES ('probe', '1')")  # the old DB's WAL has frames
+        copy = os.path.join(self.data, "restored.db")
+        dest = sqlite3.connect(copy)
+        self.db.backup(dest)
+        dest.execute("INSERT OR REPLACE INTO config VALUES ('recent_window', '7')")
+        dest.commit()
+        dest.close()
+        self.db.close()  # only the store's connection is left on the old file
+        self.assertGreater(os.path.getsize(self.db_path + "-wal"), 0)
+        # A restore as docs/REFERENCE.md (Restore) does it: the old DB set aside with its -wal
+        # and -shm (which SQLite would replay into another file), the copy put in its place.
+        aside = os.path.join(self.data, "aside")
+        os.makedirs(aside)
+        for ext in ("", "-wal", "-shm"):
+            if os.path.exists(self.db_path + ext):
+                os.replace(self.db_path + ext, os.path.join(aside, "schemes.db" + ext))
+        os.replace(copy, self.db_path)
+        self.run_quietly(read())
+        self.assertEqual(window["now"], 7)
 
     def test_a_db_damaged_under_an_open_store_says_restore_once(self):
         store = self.connected_store_whose_check_fails(sqlite3.DatabaseError("not a database"))
@@ -1069,11 +1155,45 @@ class MainScriptTest(DbTest):
         self.assertIn("Murky", self.discovery("dark"))
 
     def test_second_rating_in_one_second_saves_but_skips_history(self):
+        self.main["now"] = lambda: "2026-11-06 12:00:00"  # the same second, however slow the run
         self.main["save_favorite"](self.db, "Dark One", "Monaco", 13, 3)
         self.main["save_favorite"](self.db, "Dark One", "Monaco", 13, 4)
         self.assertEqual(self.db.execute("SELECT stars FROM favorites").fetchall(), [(4,)])
         # Both events share (at, preset, font, action): history keeps the first only.
         self.assertEqual(self.db.execute("SELECT count(*) FROM ratings").fetchone()[0], 1)
+
+    def test_never_show_on_a_hidden_preset_with_favorites_drops_them(self):
+        self.main["save_favorite"](self.db, "Dark One", "Monaco", 13, 4)
+        self.db.execute(  # hidden while its favorite stayed (by hand, say)
+            "INSERT INTO overrides (name, include) VALUES ('Dark One', 0) "
+            "ON CONFLICT (name) DO UPDATE SET include = 0"
+        )
+        self.assertTrue(self.main["never_show"](self.db, "Dark One"))
+        self.assertEqual(self.db.execute("SELECT count(*) FROM favorites").fetchone(), (0,))
+        rows = self.db.execute(
+            "SELECT font, stars, previous_stars FROM ratings WHERE action = ?", ("never_show",)
+        )
+        self.assertEqual(rows.fetchall(), [("Monaco", None, 4)])
+        self.assertFalse(self.main["never_show"](self.db, "Dark One"))  # now nothing to do
+
+    def test_a_failed_rename_leaves_the_old_profiles_file_whole(self):
+        self.export_prefs({"Custom Color Presets": {"Dark One": DARK, "Light One": LIGHT}})
+        self.main["save_favorite"](self.db, "Dark One", "Monaco", 13, 4)
+        self.assertEqual(self.write_profiles(), 1)
+        with open(self.main["DYNAMIC_PATH"], "rb") as f:
+            before = f.read()
+        self.main["save_favorite"](self.db, "Light One", "Monaco", 13, 4)
+        full = OSError(28, "No space left on device")
+        with mock.patch.object(os, "replace", side_effect=full), self.assertRaises(OSError):
+            self.write_profiles()
+        with open(self.main["DYNAMIC_PATH"], "rb") as f:
+            self.assertEqual(f.read(), before)
+        folder, name = os.path.split(self.main["DYNAMIC_PATH"])
+        partial = os.path.join(folder, f".{name}.partial")
+        self.assertTrue(os.path.exists(partial))  # left by the failed rename
+        self.main["remove_favorite"](self.db, "Light One", "Monaco")
+        self.assertIsNone(self.write_profiles())  # the file is current again...
+        self.assertFalse(os.path.exists(partial))  # ...and the leftover is cleared
 
     def test_sync_profiles_writes_the_favorites_file(self):
         prefs = {
@@ -1149,6 +1269,29 @@ class SnapshotTest(DbTest):
         self.run_ticks(store, [self.backdate, nothing, self.backdate])
         # Tick 1: due (none, or a day old); tick 2: one is fresh, so none; tick 3: due again.
         self.assertEqual(len(self.snapshots()), before + 2)
+
+    def test_a_snapshot_13_hours_old_isnt_due_and_one_25_hours_old_is(self):
+        due, start = srcp_db_backup.snapshot_if_due, time.time()
+        due(self.db_path, now=start)  # one now, unless the build just made one
+        count = len(self.snapshots())
+        self.assertIsNone(due(self.db_path, now=start + 13 * 3600))
+        self.assertEqual(len(self.snapshots()), count)
+        self.assertIsNotNone(due(self.db_path, now=start + 25 * 3600))
+        self.assertEqual(len(self.snapshots()), count + 1)
+
+    def test_a_snapshot_file_error_is_a_db_failure_and_the_next_call_works(self):
+        folder = os.path.join(self.data, "backups")
+        shutil.rmtree(folder, ignore_errors=True)
+        open(folder, "w").close()  # a file where the snapshots folder goes
+        store, main = self.main["Store"](self.db_path), self.main
+
+        async def snapshot_then_read():
+            with self.assertRaises(main["DbUnavailable"]):
+                await store.call(main["daily_snapshot"])
+            config = await store.call(main["read_config"])
+            self.assertEqual(config, main["DEFAULT_CONFIG"])
+
+        self.assertIn("DB daily_snapshot", self.run_quietly(snapshot_then_read()))
 
     def test_only_old_partial_copies_are_cleaned_up(self):
         folder = os.path.join(self.tmp, "partials")
@@ -2714,6 +2857,15 @@ class TabTest(DbTest):
         self.variables.clear()
         out = self.run_quietly(color(None, self.app, self.store, self.session))
         self.assertIn("Use separate colors for light and dark mode", out)
+
+    def test_a_profile_with_separate_colors_set_to_off_is_colored(self):
+        self.tab({})
+        self.profile.use_separate_colors_for_light_and_dark_mode = False  # off, not just unset
+        color = self.main["color_one_at_a_time"]
+        out = self.run_quietly(color(None, self.app, self.store, self.session))
+        self.assertNotIn("Use separate colors", out)
+        self.session.async_set_profile_properties.assert_called_once()
+        self.assertIn("user.color_preset", self.variables)
 
     def test_a_favorites_profile_is_kept_even_if_it_inherits_separate_colors(self):
         # Before startup rewrites the profiles file, a favorite's profile can inherit the
